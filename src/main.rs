@@ -1,15 +1,13 @@
 #![forbid(unsafe_code)]
 
-use cheap_otto::ai_gateway::{LocalAiStackConfig, ScrapedCandidate, filter_scraped_batch};
 use cheap_otto::arbiter::{ArbiterPolicy, ArbiterSnapshot};
-use cheap_otto::chief_of_staff::{InboxItem, triage_inbox_item};
-use cheap_otto::dev_worker::{CanaryProbeResult, CanarySpec, build_pr_sandbox_plan};
+use cheap_otto::bridge::PeerNode;
 use cheap_otto::doctor::{CheckStatus, SystemProbeInput};
 use cheap_otto::hardware::{CpuArch, HardwareProfile, ThermalLevel};
 use cheap_otto::macos::MacOsStateBackup;
-use cheap_otto::network::{ApplianceNode, RemoteWorkload};
-use cheap_otto::packs::{CapabilityPack, render_compose_stack};
-use cheap_otto::remote_dev::RemoteDevAccessKit;
+use cheap_otto::worktree::{
+    AgentRunner, build_delegate_plan, build_jobs_status_command, build_pull_plan,
+};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +16,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "cheap-otto",
     version,
-    about = "Turn any spare MacBook or old laptop into a 24/7 headless AI agent, residential browser worker, local AI gateway, and CI runner."
+    about = "Cross-OS Dev Bridge & Parallel Agent Worktree Runner: Pair your Windows PC with a spare headless MacBook over LAN/Tailscale SSH."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Preview and generate the reversible Clamshell Appliance plan + docker-compose stack
+    /// Configure the spare MacBook for 100% reversible headless clamshell mode (AC no-sleep + 78% battery cap)
     Init {
         /// Detected or target RAM in GB (default: 16 for M1 MacBook Air)
         #[arg(long, default_value_t = 16)]
@@ -35,35 +33,93 @@ enum Commands {
         /// Target battery charge ceiling percentage (50..=100)
         #[arg(long, default_value_t = 78)]
         battery_cap: u8,
-        /// Output directory for generated compose stack and state backup
+        /// Output directory for state backup
         #[arg(long, default_value = ".cheap-otto")]
         out_dir: PathBuf,
     },
-    /// Pair this workstation (e.g. Windows PC) with a remote cheap-otto appliance on the same LAN or Tailscale mesh
-    Connect {
-        /// Appliance LAN IP (e.g. 192.168.1.42) or Tailscale IP (e.g. 100.101.102.103)
+    /// Option 5 (Cross-OS Dev Bridge): Pair your Windows workstation with the MacBook over LAN or Tailscale SSH
+    Pair {
+        /// MacBook LAN IP (e.g. 192.168.1.42), mDNS (.local), or Tailscale IP (e.g. 100.101.102.103)
         #[arg(long, default_value = "100.101.102.103")]
         host: String,
-        /// Logical name for the headless appliance node
-        #[arg(long, default_value = "cheap-otto-m1")]
-        name: String,
-        /// Control plane port on the appliance (1024..=65535)
-        #[arg(long, default_value_t = 9400)]
+        /// SSH username on the MacBook
+        #[arg(long, default_value = "admin")]
+        user: String,
+        /// SSH alias for the MacBook
+        #[arg(long, default_value = "otto-mac")]
+        alias: String,
+        /// SSH port on the MacBook
+        #[arg(long, default_value_t = 22)]
         port: u16,
-        /// SSH username on the macOS appliance
-        #[arg(long, default_value = "otto")]
-        ssh_user: String,
-        /// Output directory for workstation connection configs (.env and node-config.json)
+        /// Localhost ports to forward from the MacBook to Windows (comma-separated, e.g. 3000,5173,8080)
+        #[arg(long, value_delimiter = ',', default_values_t = [3000, 5173, 8080])]
+        ports: Vec<u16>,
+        /// State directory where peer.json is stored
         #[arg(long, default_value = ".cheap-otto")]
         out_dir: PathBuf,
     },
-    /// Dispatch or simulate a remote agent workload across the 4 appliance pillars
-    Dispatch {
-        /// Target appliance host (LAN or Tailscale IP)
-        #[arg(long, default_value = "100.101.102.103")]
-        host: String,
-        #[command(subcommand)]
-        task: DispatchTask,
+    /// Option 5 (Cross-OS Dev Bridge): Sync your current Windows project to the MacBook over Git + SSH
+    Sync {
+        /// Project folder name (default: cheap-otto)
+        #[arg(long, default_value = "cheap-otto")]
+        project: String,
+        /// Path to state directory containing peer.json
+        #[arg(long, default_value = ".cheap-otto")]
+        state_dir: PathBuf,
+    },
+    /// Option 5 (Cross-OS Dev Bridge): Run a native macOS / ARM64 command inside the synced MacBook workspace
+    Exec {
+        /// Command to run on the MacBook (e.g. "cargo test --all-targets")
+        #[arg(long, default_value = "cargo test --all-targets")]
+        cmd: String,
+        /// Project folder name
+        #[arg(long, default_value = "cheap-otto")]
+        project: String,
+        /// Path to state directory containing peer.json
+        #[arg(long, default_value = ".cheap-otto")]
+        state_dir: PathBuf,
+    },
+    /// Option 1 (Parallel Agent Farm): Delegate a coding task to an isolated Git worktree on the MacBook
+    Delegate {
+        /// Coding task prompt for the remote agent
+        #[arg(long)]
+        task: String,
+        /// Optional explicit task slug (auto-generated from prompt if omitted)
+        #[arg(long)]
+        id: Option<String>,
+        /// Coding agent CLI to invoke on the MacBook (`claude`, `agy`, `kiro`, or `custom`)
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Verification gate command executed after the agent finishes
+        #[arg(long, default_value = "cargo test --all-targets")]
+        verify: String,
+        /// Project folder name
+        #[arg(long, default_value = "cheap-otto")]
+        project: String,
+        /// Path to state directory containing peer.json
+        #[arg(long, default_value = ".cheap-otto")]
+        state_dir: PathBuf,
+    },
+    /// Option 1 (Parallel Agent Farm): List active and completed agent worktrees on the MacBook
+    Jobs {
+        /// Project folder name
+        #[arg(long, default_value = "cheap-otto")]
+        project: String,
+        /// Path to state directory containing peer.json
+        #[arg(long, default_value = ".cheap-otto")]
+        state_dir: PathBuf,
+    },
+    /// Option 1 (Parallel Agent Farm): Pull a completed MacBook worktree branch (`otto/<task-id>`) back into Windows
+    Pull {
+        /// Task ID of the MacBook worktree to fetch into the local Windows repo
+        #[arg(long)]
+        id: String,
+        /// Project folder name
+        #[arg(long, default_value = "cheap-otto")]
+        project: String,
+        /// Path to state directory containing peer.json
+        #[arg(long, default_value = ".cheap-otto")]
+        state_dir: PathBuf,
     },
     /// Run the 8-point headless appliance health check
     Doctor,
@@ -72,10 +128,10 @@ enum Commands {
         /// Available unified memory in MB
         #[arg(long, default_value_t = 6144)]
         available_mb: u32,
-        /// Whether a GitHub Actions CI job is currently active
+        /// Whether a heavy build or agent worktree verification is active
         #[arg(long, default_value_t = false)]
         ci_running: bool,
-        /// Whether the local LLM is currently loaded in RAM
+        /// Whether a local LLM is currently loaded in RAM
         #[arg(long, default_value_t = true)]
         llm_loaded: bool,
         /// Seconds since the last local LLM inference request
@@ -90,46 +146,6 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand, Debug)]
-enum DispatchTask {
-    /// Pillar 1: Run an isolated OrbStack Background Agent Sandbox for an `agent-fix` or `triage` issue
-    PrFix {
-        /// GitHub repository slug (owner/repo)
-        #[arg(long, default_value = "cokitron/cheap-otto")]
-        repo: String,
-        /// Issue or PR number
-        #[arg(long, default_value_t = 1)]
-        issue: u64,
-        /// Trigger label (`agent-fix`, `triage`, or `autofix`)
-        #[arg(long, default_value = "agent-fix")]
-        label: String,
-    },
-    /// Pillar 1: Execute a scheduled residential-IP Playwright E2E canary check
-    Canary {
-        /// Canary suite name
-        #[arg(long, default_value = "prod-checkout-canary")]
-        suite: String,
-        /// Target URL to verify from residential IP
-        #[arg(long, default_value = "https://github.com/cokitron/cheap-otto")]
-        url: String,
-    },
-    /// Pillar 2: Run the 15-minute Chief of Staff Inbox & Calendar Triage with Telegram approval buttons
-    Triage {
-        /// Sender address
-        #[arg(long, default_value = "founder@acme.dev")]
-        sender: String,
-        /// Subject line
-        #[arg(long, default_value = "Can we ship the ARM64 runner today?")]
-        subject: String,
-    },
-    /// Pillar 3: Run the High-Volume 99%-Local / 1%-Frontier Scraper Filter using the local 8B model
-    ScraperFilter {
-        /// Minimum local relevance score (0..=100) to escalate to paid frontier cloud API
-        #[arg(long, default_value_t = 95)]
-        min_score: u8,
-    },
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -139,14 +155,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             battery_cap,
             out_dir,
         } => run_init(ram_gb, battery_cap, &out_dir)?,
-        Commands::Connect {
+        Commands::Pair {
             host,
-            name,
+            user,
+            alias,
             port,
-            ssh_user,
+            ports,
             out_dir,
-        } => run_connect(&name, &host, port, &ssh_user, &out_dir)?,
-        Commands::Dispatch { host, task } => run_dispatch(&host, task)?,
+        } => run_pair(&alias, &host, &user, port, &ports, &out_dir)?,
+        Commands::Sync { project, state_dir } => run_sync(&project, &state_dir)?,
+        Commands::Exec {
+            cmd,
+            project,
+            state_dir,
+        } => run_exec(&project, &cmd, &state_dir)?,
+        Commands::Delegate {
+            task,
+            id,
+            agent,
+            verify,
+            project,
+            state_dir,
+        } => run_delegate(&project, &task, id.as_deref(), &agent, &verify, &state_dir)?,
+        Commands::Jobs { project, state_dir } => run_jobs(&project, &state_dir)?,
+        Commands::Pull {
+            id,
+            project,
+            state_dir,
+        } => run_pull(&project, &id, &state_dir)?,
         Commands::Doctor => run_doctor(),
         Commands::Arbiter {
             available_mb,
@@ -158,6 +194,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn load_or_default_peer(state_dir: &Path) -> Result<PeerNode, Box<dyn std::error::Error>> {
+    let peer_path = state_dir.join("peer.json");
+    if peer_path.exists() {
+        let raw = fs::read_to_string(&peer_path)?;
+        let peer: PeerNode = serde_json::from_str(&raw)?;
+        Ok(peer)
+    } else {
+        Ok(PeerNode::new("otto-mac", "100.101.102.103", "admin", 22)?)
+    }
 }
 
 fn run_init(
@@ -175,7 +222,6 @@ fn run_init(
     };
 
     let budget = profile.compute_memory_budget()?;
-    let ai_stack = LocalAiStackConfig::from_memory_budget(&budget);
     let default_pmset = "\
 AC Power:
  sleep                1
@@ -192,27 +238,12 @@ AC Power:
     let backup_path = out_dir.join("state-backup.json");
     fs::write(&backup_path, serde_json::to_string_pretty(&backup)?)?;
 
-    let compose_yaml = render_compose_stack(CapabilityPack::all(), &budget);
-    let compose_path = out_dir.join("docker-compose.yml");
-    fs::write(&compose_path, &compose_yaml)?;
-
-    println!("=== cheap-otto: Headless Appliance Initialization Plan ===");
+    println!("=== cheap-otto: Headless MacBook Appliance Setup ===");
     println!(
-        "Target Hardware : {} ({} GB Unified RAM)",
-        profile.model_name, profile.memory_gb
+        "Target Hardware : {} ({} GB Unified RAM, CI/Agent Budget: {} MB)",
+        profile.model_name, profile.memory_gb, budget.ci_runner_mb
     );
-    println!(
-        "Local LLM Ready : {} (Max AI Budget: {} MB, Idle Unload: {}s)",
-        budget.can_run_local_llm, budget.local_ai_max_mb, budget.llm_idle_unload_secs
-    );
-    println!(
-        "Selected Models : LLM={} (~{} tok/s) | RAG={} | Whisper={}",
-        ai_stack.primary_llm_tag,
-        ai_stack.estimated_tokens_per_sec,
-        ai_stack.embedding_model_tag,
-        ai_stack.whisper_model_tag
-    );
-    println!("\n--- 1. Reversible Clamshell & Battery Guardrails ---");
+    println!("\n--- Reversible Clamshell & Battery Guardrails ---");
     for line in &power_plan.human_readable_diff {
         println!("  * {line}");
     }
@@ -220,175 +251,134 @@ AC Power:
     for cmd in &power_plan.pmset_apply_commands {
         println!("  $ {cmd}");
     }
-    println!("\n--- 2. Enabled Capability Packs ---");
-    for pack in CapabilityPack::all() {
-        println!("  [x] {}", pack.display_name());
-    }
-    println!("\nSaved state backup to : {}", backup_path.display());
-    println!("Saved Compose stack to: {}", compose_path.display());
+    println!("\nSaved state backup to: {}", backup_path.display());
     Ok(())
 }
 
-fn run_connect(
-    name: &str,
+fn run_pair(
+    alias: &str,
     host: &str,
+    user: &str,
     port: u16,
-    ssh_user: &str,
+    ports: &[u16],
     out_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let node = ApplianceNode::new(name, host, port, ssh_user)?;
-    let endpoints = node.endpoints();
-    let env_contents = node.render_workstation_env();
-    let dev_kit = RemoteDevAccessKit::for_node(&node);
+    let peer = PeerNode::new(alias, host, user, port)?;
+    let tunnel = peer.build_port_tunnel(ports)?;
 
     fs::create_dir_all(out_dir)?;
-    let node_path = out_dir.join("node-config.json");
-    fs::write(&node_path, serde_json::to_string_pretty(&node)?)?;
+    let peer_path = out_dir.join("peer.json");
+    fs::write(&peer_path, serde_json::to_string_pretty(&peer)?)?;
 
-    let env_path = out_dir.join("workstation.env");
-    fs::write(&env_path, &env_contents)?;
+    let ssh_config_path = out_dir.join("ssh-config.conf");
+    fs::write(&ssh_config_path, &tunnel.ssh_config_snippet)?;
 
-    println!("=== cheap-otto: Cross-Network Workstation <-> Appliance Pairing ===");
+    println!("=== cheap-otto: Cross-OS Dev Bridge Paired (Windows <-> MacBook) ===");
     println!(
-        "Paired Node     : {} ({} via {:?})",
-        node.node_name, node.host, node.transport
+        "Paired MacBook  : {} ({} via {:?})",
+        peer.alias,
+        peer.ssh_destination(),
+        peer.transport
     );
-    println!("\n--- Network Service Endpoints (Reachable from this Workstation) ---");
-    println!("  * Control Plane     : {}", endpoints.control_plane_url);
-    println!(
-        "  * OpenAI Local API  : {}",
-        endpoints.openai_compatible_base_url
-    );
-    println!(
-        "  * Local Whisper ASR : {}",
-        endpoints.whisper_transcribe_url
-    );
-    println!("  * Local RAG Embeds  : {}", endpoints.embeddings_rag_url);
-    println!(
-        "  * Residential Browser: {}",
-        endpoints.playwright_ws_endpoint
-    );
-    println!("  * n8n Orchestrator  : {}", endpoints.n8n_orchestrator_url);
-    println!("  * Uptime Monitor    : {}", endpoints.uptime_monitor_url);
-    println!("\n--- Remote Dev Access (Pillar 4) ---");
-    println!(
-        "  * Attach tmux       : {}",
-        dev_kit.ssh_tmux_attach_command
-    );
-    println!(
-        "  * VS Code Tunnel    : {}",
-        dev_kit.vscode_tunnel_service_command
-    );
-    println!("\nSaved node profile to : {}", node_path.display());
-    println!("Saved workstation env : {}", env_path.display());
+    println!("Workspace Root  : {}", peer.remote_workspace_root);
+    println!("\n--- Localhost Port Forwarding Tunnel ---");
+    println!("  $ {}", tunnel.ssh_tunnel_command);
+    println!("\n--- Generated ~/.ssh/config Snippet ---");
+    print!("{}", tunnel.ssh_config_snippet);
+    println!("\nSaved peer profile to : {}", peer_path.display());
+    println!("Saved SSH config to   : {}", ssh_config_path.display());
     Ok(())
 }
 
-fn run_dispatch(host: &str, task: DispatchTask) -> Result<(), Box<dyn std::error::Error>> {
-    let node = ApplianceNode::new("cheap-otto-m1", host, 9400, "otto")?;
+fn run_sync(project: &str, state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = load_or_default_peer(state_dir)?;
+    let plan = peer.build_sync_plan(project)?;
 
-    match task {
-        DispatchTask::PrFix { repo, issue, label } => {
-            let plan = build_pr_sandbox_plan(&repo, issue, &label)?;
-            let envelope = node.build_dispatch(RemoteWorkload::OvernightPrFix {
-                repo: plan.repo_slug.clone(),
-                issue_number: plan.issue_number,
-                label: plan.trigger_label.as_str().to_string(),
-            });
-            println!("=== Pillar 1: Overnight PR Worker Dispatch ===");
-            println!("Dispatch Endpoint   : {}", envelope.endpoint_url);
-            println!(
-                "CI RAM Preemption   : {} (evicts 5.5GB LLM before cargo build)",
-                envelope.requires_ci_ram_preemption
-            );
-            println!("Sandbox Branch      : {}", plan.branch_name);
-            for step in &plan.sandbox_steps {
-                println!("  -> {step}");
-            }
-        }
-        DispatchTask::Canary { suite, url } => {
-            let spec = CanarySpec::new(&suite, &url, "*/15 * * * *", 1200)?;
-            let sample_probe = CanaryProbeResult {
-                http_status: 200,
-                latency_ms: 340,
-                assertion_passed: true,
-                failure_reason: None,
-            };
-            let decision = spec.evaluate_probe(&sample_probe);
-            println!("=== Pillar 1: Residential-IP Playwright Canary ===");
-            println!(
-                "Suite: {} | Target: {} | Cron: {}",
-                spec.suite_name, spec.target_url, spec.cron_schedule
-            );
-            println!(
-                "Status: Healthy={} | Page Mobile Alert={}",
-                decision.healthy, decision.notify_mobile_channel
-            );
-        }
-        DispatchTask::Triage { sender, subject } => {
-            let item = InboxItem {
-                id: "msg-live-01".to_string(),
-                sender,
-                subject,
-                preview_text: "Need confirmation before triggering the release workflow."
-                    .to_string(),
-                is_bulk_newsletter: false,
-                asks_direct_question: true,
-                mentions_urgent_deadline: true,
-            };
-            let card = triage_inbox_item(&item);
-            println!("=== Pillar 2: 24/7 Chief of Staff Inbox Triage ===");
-            println!("Category: {:?}", card.category);
-            for bullet in &card.three_bullet_summary {
-                println!("  • {bullet}");
-            }
-            if let Some(reply) = &card.drafted_reply {
-                println!("Drafted Reply: \"{reply}\"");
-            }
-            println!("Telegram Buttons: {:?}", card.buttons);
-        }
-        DispatchTask::ScraperFilter { min_score } => {
-            let candidates = vec![
-                ScrapedCandidate {
-                    id: "page-01".to_string(),
-                    source_url: "https://news.example/item-1".to_string(),
-                    local_relevance_score: 35,
-                    extracted_json_summary: "{\"topic\":\"general\"}".to_string(),
-                },
-                ScrapedCandidate {
-                    id: "page-02".to_string(),
-                    source_url: "https://news.example/item-2".to_string(),
-                    local_relevance_score: 72,
-                    extracted_json_summary: "{\"topic\":\"devops\"}".to_string(),
-                },
-                ScrapedCandidate {
-                    id: "page-03".to_string(),
-                    source_url: "https://news.example/item-3".to_string(),
-                    local_relevance_score: 98,
-                    extracted_json_summary: "{\"topic\":\"high_intent_lead\"}".to_string(),
-                },
-            ];
-            let report = filter_scraped_batch(&candidates, min_score, 1500);
-            println!("=== Pillar 3: Local 8B Scraper Filter (99% Local -> 1% Frontier) ===");
-            println!(
-                "Evaluated Locally ($0) : {} items",
-                report.total_evaluated_locally
-            );
-            println!(
-                "Filtered Out Locally   : {} items",
-                report.discarded_locally
-            );
-            println!(
-                "Escalated to Frontier  : {} items",
-                report.escalated_to_frontier.len()
-            );
-            println!(
-                "Cloud Tokens Saved     : {} tokens",
-                report.estimated_cloud_tokens_saved
-            );
-        }
+    println!("=== cheap-otto: Cross-OS Workspace Sync (Windows -> MacBook) ===");
+    println!("Project         : {}", plan.project_name);
+    println!("Remote Path     : {}", plan.remote_project_dir);
+    println!("Git Remote URL  : {}", plan.git_remote_url);
+    println!("Excluded Paths  : {}", plan.excluded_paths.join(", "));
+    println!("\nSync Commands:");
+    for step in &plan.sync_commands {
+        println!("  $ {step}");
     }
+    Ok(())
+}
 
+fn run_exec(
+    project: &str,
+    command: &str,
+    state_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = load_or_default_peer(state_dir)?;
+    let remote_cmd = peer.build_remote_exec(project, command)?;
+
+    println!("=== cheap-otto: Cross-OS Remote Execution ===");
+    println!("Target MacBook  : {}", peer.ssh_destination());
+    println!("Remote Command  :");
+    println!("  $ {remote_cmd}");
+    Ok(())
+}
+
+fn run_delegate(
+    project: &str,
+    task: &str,
+    id: Option<&str>,
+    agent_str: &str,
+    verify: &str,
+    state_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = load_or_default_peer(state_dir)?;
+    let agent = AgentRunner::parse(agent_str)?;
+    let plan = build_delegate_plan(&peer, project, task, id, agent, verify)?;
+
+    println!("=== cheap-otto: Delegate Task to Parallel MacBook Worktree ===");
+    println!("Task ID         : {}", plan.task_id);
+    println!("Worktree Branch : {}", plan.branch_name);
+    println!("Remote Worktree : {}", plan.remote_worktree_dir);
+    println!("tmux Session    : {}", plan.tmux_session_name);
+    println!("Agent Runner    : {:?}", plan.agent);
+    println!("Verify Gate     : {}", plan.verify_command);
+    println!("\nExecution Steps:");
+    for (idx, step) in plan.execution_steps.iter().enumerate() {
+        println!("  [{}] $ {step}", idx + 1);
+    }
+    println!(
+        "\nWhen finished, fetch the branch back to Windows with:\n  $ cargo run -- pull --id {}",
+        plan.task_id
+    );
+    Ok(())
+}
+
+fn run_jobs(project: &str, state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = load_or_default_peer(state_dir)?;
+    let cmd = build_jobs_status_command(&peer, project)?;
+
+    println!("=== cheap-otto: Parallel MacBook Agent Worktrees ===");
+    println!("  $ {cmd}");
+    Ok(())
+}
+
+fn run_pull(
+    project: &str,
+    task_id: &str,
+    state_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let peer = load_or_default_peer(state_dir)?;
+    let plan = build_pull_plan(&peer, project, task_id)?;
+
+    println!("=== cheap-otto: Pull MacBook Worktree Branch Back to Windows ===");
+    println!("Task ID         : {}", plan.task_id);
+    println!("Branch          : {}", plan.branch_name);
+    println!("\n1. Fetch branch from MacBook over SSH into your Windows repo:");
+    println!("  $ {}", plan.git_fetch_command);
+    println!("\n2. Inspect the agent's diff on Windows:");
+    println!("  $ {}", plan.inspect_diff_command);
+    println!("\n3. Merge into your active Windows branch:");
+    println!("  $ {}", plan.merge_command);
+    println!("\n4. Clean up the remote MacBook worktree (optional):");
+    println!("  $ {}", plan.cleanup_remote_worktree_command);
     Ok(())
 }
 
