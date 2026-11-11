@@ -871,7 +871,7 @@ fn probe_hardware_and_pmset(
             );
             let pmset_spec = remote_peer.build_ssh_probe_spec(
                 "Probe remote MacBook pmset configuration",
-                "pmset -g custom",
+                "pmset -g custom && pmset -g",
             );
             let batt_spec = remote_peer.build_ssh_probe_spec(
                 "Probe remote MacBook battery health",
@@ -902,7 +902,14 @@ fn probe_hardware_and_pmset(
             profile.battery_health_percent =
                 capture_command_stdout("ioreg", &["-rn", "AppleSmartBattery"])
                     .and_then(|s| parse_battery_health_percent(&s));
-            let pmset_out = capture_command_stdout("pmset", &["-g", "custom"]);
+            let pmset_out = match (
+                capture_command_stdout("pmset", &["-g", "custom"]),
+                capture_command_stdout("pmset", &["-g"]),
+            ) {
+                (Some(custom), Some(global)) => Some(format!("{custom}\n{global}")),
+                (Some(custom), None) => Some(custom),
+                (None, other) => other,
+            };
             return (profile, pmset_out, "Live Local macOS");
         }
     }
@@ -1442,7 +1449,14 @@ fn run_projects(explicit_state_dir: Option<&Path>) -> Result<(), Box<dyn std::er
 }
 
 fn collect_local_macos_telemetry(configured_ceiling: Option<u8>) -> RawTelemetrySnapshot {
-    let pmset_custom = capture_command_stdout("pmset", &["-g", "custom"]);
+    let pmset_custom = match (
+        capture_command_stdout("pmset", &["-g", "custom"]),
+        capture_command_stdout("pmset", &["-g"]),
+    ) {
+        (Some(custom), Some(global)) => Some(format!("{custom}\n{global}")),
+        (Some(custom), None) => Some(custom),
+        (None, other) => other,
+    };
     let pmset_batt = capture_command_stdout("pmset", &["-g", "batt"]);
     let thermal_raw = capture_command_stdout("sysctl", &["-n", "kern.thermalstate"]);
     let tailscale_ip_stdout = capture_command_stdout("tailscale", &["ip", "-4"]);
@@ -1472,9 +1486,20 @@ fn collect_remote_ssh_telemetry(
     let ping_spec = peer.build_ssh_probe_spec("Probe MacBook reachability", "pmset -g batt");
     let pmset_batt = capture_spec_stdout(&ping_spec)?;
 
-    let pmset_custom = capture_spec_stdout(
-        &peer.build_ssh_probe_spec("Probe remote pmset custom", "pmset -g custom"),
-    );
+    let pmset_custom = capture_spec_stdout(&peer.build_ssh_probe_spec(
+        "Probe remote pmset custom and system-wide sleep settings",
+        "pmset -g custom && pmset -g",
+    ));
+    let resolved_ceiling = configured_ceiling.or_else(|| {
+        let raw_backup = capture_spec_stdout(&peer.build_ssh_probe_spec(
+            "Probe remote state-backup.json battery ceiling",
+            "cat ~/.cheap-otto/state-backup.json 2>/dev/null",
+        ))?;
+        let parsed = serde_json::from_str::<MacOsStateBackup>(&raw_backup).ok()?;
+        parsed
+            .configured_ceiling_percent
+            .or(Some(parsed.battery_charge_ceiling_percent))
+    });
     let thermal_raw = capture_spec_stdout(
         &peer.build_ssh_probe_spec("Probe remote thermal state", "sysctl -n kern.thermalstate"),
     );
@@ -1499,7 +1524,7 @@ fn collect_remote_ssh_telemetry(
     Some(RawTelemetrySnapshot {
         pmset_custom,
         pmset_batt: Some(pmset_batt),
-        configured_battery_ceiling: configured_ceiling,
+        configured_battery_ceiling: resolved_ceiling,
         thermal_raw,
         tailscale_ip_stdout,
         container_runtime_ready,

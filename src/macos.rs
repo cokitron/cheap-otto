@@ -79,12 +79,21 @@ impl MacOsStateBackup {
 
         for raw_line in pmset_output.lines() {
             let line = raw_line.trim();
+            let mut top_parts = line.split_whitespace();
+            if let (Some("SleepDisabled" | "disablesleep"), Some(val)) =
+                (top_parts.next(), top_parts.next())
+            {
+                ac_disablesleep = val == "1";
+            }
+
             if line.starts_with("AC Power:") {
                 in_ac_section = true;
                 found_any = true;
                 continue;
             }
-            if line.ends_with("Power:") && !line.starts_with("AC Power:") {
+            if (line.ends_with("Power:") || line.starts_with("System-wide power settings:"))
+                && !line.starts_with("AC Power:")
+            {
                 in_ac_section = false;
                 continue;
             }
@@ -350,6 +359,16 @@ AC Power:
         assert_eq!(parse_pmset_batt_ac_power(ac), Some(true));
         assert_eq!(parse_pmset_batt_ac_power(batt), Some(false));
         assert_eq!(parse_pmset_batt_ac_power("empty"), None);
+    }
+
+    #[test]
+    fn parses_apple_silicon_system_wide_sleep_disabled() -> Result<(), MacOsConfigError> {
+        let combined = "AC Power:\n sleep 0\n displaysleep 1\n womp 1\n tcpkeepalive 1\nSystem-wide power settings:\n SleepDisabled\t\t1\n";
+        let backup = MacOsStateBackup::from_pmset_custom(combined, 1_794_363_501)?;
+        assert!(backup.ac_disablesleep);
+        assert_eq!(backup.ac_sleep_minutes, 0);
+        assert_eq!(backup.ac_displaysleep_minutes, 1);
+        Ok(())
     }
 
     #[test]

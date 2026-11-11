@@ -308,10 +308,10 @@ impl SystemProbeInput {
         } else {
             HealthCheckItem {
                 name: "Tailscale Private Mesh".to_string(),
-                status: CheckStatus::Fail,
-                detail: "Tailscale tunnel is offline".to_string(),
+                status: CheckStatus::Warn,
+                detail: "Tailscale mesh offline (reachable on local LAN only)".to_string(),
                 remediation: Some(
-                    "Run `tailscale up --ssh` to connect your appliance.".to_string(),
+                    "Optional for off-LAN access: run `sudo tailscale up --ssh`.".to_string(),
                 ),
             }
         });
