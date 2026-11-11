@@ -321,7 +321,7 @@ impl PeerNode {
         let dest = self.ssh_destination();
         let remote_init_script = if force_overwrite {
             format!(
-                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead"
+                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if git -C {remote_project_dir} rev-parse --verify HEAD >/dev/null 2>&1; then git -C {remote_project_dir} reset --hard HEAD && git -C {remote_project_dir} clean -fd; fi"
             )
         } else {
             format!(
