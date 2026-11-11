@@ -5,21 +5,26 @@
 //!
 //! Each delegated task runs in its own branch (`otto/<task-id>`), its own directory
 //! (`~/otto-workspaces/<project>/.otto-worktrees/<task-id>`), and its own background `tmux` session
-//! (`otto-<task-id>`), then gets fetched back into the Windows Git repo via `cheap-otto pull <task-id>`.
+//! (`otto-<task-id>`), then gets fetched back into the Windows Git repo via `cheap-otto pull --id <task-id>`.
 
 use crate::bridge::{BridgeError, PeerNode, validate_safe_identifier};
+use crate::command::CommandSpec;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors returned when building or validating parallel worktree agent plans.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WorktreeError {
+    /// Underlying peer or project validation error.
     #[error(transparent)]
     Bridge(#[from] BridgeError),
+    /// Task description was blank.
     #[error("task prompt cannot be empty")]
     EmptyPrompt,
-    #[error("invalid task ID '{0}': must contain only ASCII alphanumeric, '-', or '_'")]
+    /// Task identifier contains path traversal or shell metacharacters.
+    #[error("invalid task ID '{0}': must contain only ASCII alphanumeric, '-', '_', or '.'")]
     InvalidTaskId(String),
+    /// Unrecognized `--agent` runner string.
     #[error("unsupported agent runner '{0}': expected 'claude', 'agy', 'kiro', or 'custom'")]
     UnsupportedAgent(String),
 }
@@ -52,7 +57,7 @@ impl AgentRunner {
         }
     }
 
-    /// Formats the headless invocation command for the given prompt inside the remote worktree.
+    /// Formats the headless invocation command for human-readable display.
     #[must_use = "returns the shell command to invoke the agent"]
     pub fn build_agent_command(self, escaped_prompt: &str) -> String {
         match self {
@@ -64,32 +69,93 @@ impl AgentRunner {
             Self::CustomShell => escaped_prompt.to_string(),
         }
     }
+
+    /// Formats a POSIX single-quoted invocation string safe from remote variable expansion.
+    #[must_use = "returns the single-quoted remote agent invocation"]
+    pub fn build_remote_safe_command(self, raw_prompt: &str) -> String {
+        let quoted = posix_single_quote(raw_prompt);
+        match self {
+            Self::ClaudeCode => format!("claude -p {quoted} --dangerously-skip-permissions"),
+            Self::Antigravity => format!("agy --prompt {quoted}"),
+            Self::KiroCli => format!("kiro-cli chat --non-interactive {quoted}"),
+            Self::CustomShell => raw_prompt.to_string(),
+        }
+    }
+}
+
+/// Wraps an arbitrary string in POSIX single quotes (`'...'`), escaping embedded single quotes as `'\''`.
+pub(crate) fn posix_single_quote(input: &str) -> String {
+    let mut quoted = String::with_capacity(input.len() + 2);
+    quoted.push('\'');
+    for ch in input.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Execution plan for delegating a parallel coding task to an isolated Git worktree on the MacBook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegatedWorktreePlan {
+    /// Target repository slug.
     pub project_name: String,
+    /// Sanitized task identifier (`<task-id>`).
     pub task_id: String,
+    /// Remote worktree branch (`otto/<task-id>`).
     pub branch_name: String,
+    /// Remote worktree filesystem path on the MacBook.
     pub remote_worktree_dir: String,
+    /// Detached `tmux` session name (`otto-<task-id>`).
     pub tmux_session_name: String,
+    /// Persistent log file path on the MacBook (`~/.cheap-otto/logs/<project>/<task-id>.log`).
+    #[serde(default)]
+    pub remote_log_file: String,
+    /// Selected coding agent runner.
     pub agent: AgentRunner,
+    /// Verification command run prior to committing changes.
     pub verify_command: String,
+    /// Whether the arbiter should evict idle local LLM weights before running verification.
     pub evict_idle_llm_for_headroom: bool,
+    /// Human-readable command lines for dry-run inspection.
     pub execution_steps: Vec<String>,
+    /// Shell-free process specifications executed when `--execute` is passed.
+    #[serde(default)]
+    pub execution_specs: Vec<CommandSpec>,
 }
 
 /// Plan for pulling a completed MacBook worktree branch back into the Windows Git repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreePullPlan {
+    /// Target repository slug.
     pub project_name: String,
+    /// Sanitized task identifier (`<task-id>`).
     pub task_id: String,
+    /// Remote and local branch name (`otto/<task-id>`).
     pub branch_name: String,
+    /// Human-readable `git fetch` command.
     pub git_fetch_command: String,
+    /// Human-readable `git diff` command.
     pub inspect_diff_command: String,
+    /// Human-readable `git merge --no-ff` command.
     pub merge_command: String,
+    /// Human-readable remote worktree cleanup command.
     pub cleanup_remote_worktree_command: String,
+    /// Shell-free `git fetch` specification.
+    #[serde(default)]
+    pub fetch_spec: Option<CommandSpec>,
+    /// Shell-free `git diff --stat` specification.
+    #[serde(default)]
+    pub diff_spec: Option<CommandSpec>,
+    /// Shell-free `git merge --no-ff` specification.
+    #[serde(default)]
+    pub merge_spec: Option<CommandSpec>,
+    /// Shell-free SSH command to prune the remote MacBook worktree.
+    #[serde(default)]
+    pub cleanup_remote_worktree_spec: Option<CommandSpec>,
 }
 
 /// Converts a free-form task description into a deterministic, URL/branch-safe slug (`max 28 chars`).
@@ -154,9 +220,13 @@ pub fn build_delegate_plan(
         _ => slugify_task_prompt(trimmed_prompt),
     };
 
+    let clean_project = project_name.trim().to_string();
     let branch_name = format!("otto/{task_id}");
     let remote_worktree_dir = format!("{remote_repo_dir}/.otto-worktrees/{task_id}");
     let tmux_session_name = format!("otto-{task_id}");
+    let remote_log_dir = format!("~/.cheap-otto/logs/{clean_project}");
+    let remote_log_file = format!("{remote_log_dir}/{task_id}.log");
+    let remote_rc_file = format!("{remote_log_dir}/.{task_id}.rc");
 
     let verify_cmd = if verify_command.trim().is_empty() {
         "cargo test".to_string()
@@ -173,6 +243,7 @@ pub fn build_delegate_plan(
 
     let ssh_dest = peer.ssh_destination();
     let port = peer.ssh_port;
+    let port_str = port.to_string();
     let git_remote_url = format!(
         "ssh://{}@{}:{}/{}",
         peer.ssh_user, peer.host, peer.ssh_port, remote_repo_dir
@@ -181,29 +252,69 @@ pub fn build_delegate_plan(
     let execution_steps = vec![
         // Step 1: Ensure remote base repository exists and push current Windows HEAD
         format!(
-            "ssh -p {port} {ssh_dest} \"mkdir -p {remote_repo_dir} && git -C {remote_repo_dir} init\""
+            "ssh -p {port} {ssh_dest} \"mkdir -p {remote_repo_dir} {remote_log_dir} && git -C {remote_repo_dir} init\""
         ),
         format!("git push {git_remote_url} HEAD:refs/heads/otto-base/{task_id} --force"),
         // Step 2: Create isolated Git worktree for this parallel task on the MacBook
         format!(
             "ssh -p {port} {ssh_dest} \"git -C {remote_repo_dir} worktree add -B {branch_name} {remote_worktree_dir} refs/heads/otto-base/{task_id}\""
         ),
-        // Step 3: Launch detached tmux session running agent -> verification -> git commit
+        // Step 3: Launch detached tmux session (remain-on-exit + persistent log tee)
         format!(
-            "ssh -p {port} {ssh_dest} \"tmux new-session -d -s {tmux_session_name} 'cd {remote_worktree_dir} && {agent_invocation} && {verify_cmd} && git add -A && git commit -m \\\"otto({task_id}): completed delegated task\\\"'\""
+            "ssh -p {port} {ssh_dest} \"tmux new-session -d -s {tmux_session_name} 'cd {remote_worktree_dir} && ({agent_invocation} && {verify_cmd} && git add -A && git commit -m \\\"otto({task_id}): completed delegated task\\\") 2>&1 | tee -a {remote_log_file}' \\; set-option -t {tmux_session_name} remain-on-exit on\""
+        ),
+    ];
+
+    let remote_init_script =
+        format!("mkdir -p {remote_repo_dir} {remote_log_dir} && git -C {remote_repo_dir} init");
+    let push_refspec = format!("HEAD:refs/heads/otto-base/{task_id}");
+    let remote_worktree_script = format!(
+        "git -C {remote_repo_dir} worktree add -B {branch_name} {remote_worktree_dir} refs/heads/otto-base/{task_id}"
+    );
+    let safe_agent_cmd = agent.build_remote_safe_command(trimmed_prompt);
+    let inner_tmux_pipeline = format!(
+        "cd {remote_worktree_dir} && source ~/.zshrc 2>/dev/null || true; source ~/.cargo/env 2>/dev/null || true; {{ {{ {safe_agent_cmd} && {verify_cmd} && git add -A && git commit -m \"otto({task_id}): completed delegated task\"; printf '%s' \"$?\" > {remote_rc_file}; }} 2>&1 | tee -a {remote_log_file}; }}; rc=$(cat {remote_rc_file} 2>/dev/null || echo 1); rm -f {remote_rc_file}; printf '\\n[OTTO_STATUS exit=%s]\\n' \"$rc\" | tee -a {remote_log_file}; exit \"$rc\""
+    );
+    let remote_tmux_script = format!(
+        "tmux kill-session -t {tmux_session_name} 2>/dev/null || true; tmux new-session -d -s {tmux_session_name} {} && tmux set-option -t {tmux_session_name} remain-on-exit on",
+        posix_single_quote(&inner_tmux_pipeline)
+    );
+
+    let execution_specs = vec![
+        CommandSpec::new(
+            "Initialize base Git repository and log directory on MacBook",
+            "ssh",
+            ["-p", &port_str, &ssh_dest, &remote_init_script],
+        ),
+        CommandSpec::new(
+            "Push current Windows HEAD snapshot to MacBook base ref",
+            "git",
+            ["push", &git_remote_url, &push_refspec, "--force"],
+        ),
+        CommandSpec::new(
+            "Create isolated Git worktree for delegated task",
+            "ssh",
+            ["-p", &port_str, &ssh_dest, &remote_worktree_script],
+        ),
+        CommandSpec::new(
+            "Launch detached tmux agent + verification session on MacBook",
+            "ssh",
+            ["-p", &port_str, &ssh_dest, &remote_tmux_script],
         ),
     ];
 
     Ok(DelegatedWorktreePlan {
-        project_name: project_name.trim().to_string(),
+        project_name: clean_project,
         task_id,
         branch_name,
         remote_worktree_dir,
         tmux_session_name,
+        remote_log_file,
         agent,
         verify_command: verify_cmd,
         evict_idle_llm_for_headroom: true,
         execution_steps,
+        execution_specs,
     })
 }
 
@@ -230,15 +341,39 @@ pub fn build_pull_plan(
         "ssh://{}@{}:{}/{}",
         peer.ssh_user, peer.host, peer.ssh_port, remote_repo_dir
     );
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+    let diff_range = format!("HEAD..{branch_name}");
+    let port_str = peer.ssh_port.to_string();
+    let ssh_dest = peer.ssh_destination();
+    let cleanup_script = format!(
+        "tmux kill-session -t otto-{trimmed_id} 2>/dev/null || true; git -C {remote_repo_dir} worktree remove --force {remote_worktree_dir}"
+    );
 
-    let git_fetch_command =
-        format!("git fetch {git_remote_url} refs/heads/{branch_name}:refs/heads/{branch_name}");
-    let inspect_diff_command = format!("git diff HEAD..{branch_name}");
+    let git_fetch_command = format!("git fetch {git_remote_url} {refspec}");
+    let inspect_diff_command = format!("git diff {diff_range}");
     let merge_command = format!("git merge --no-ff {branch_name}");
-    let cleanup_remote_worktree_command = format!(
-        "ssh -p {} {} \"git -C {remote_repo_dir} worktree remove --force {remote_worktree_dir}\"",
-        peer.ssh_port,
-        peer.ssh_destination()
+    let cleanup_remote_worktree_command =
+        format!("ssh -p {port_str} {ssh_dest} \"{cleanup_script}\"");
+
+    let fetch_spec = CommandSpec::new(
+        "Fetch completed MacBook worktree branch into Windows Git repo",
+        "git",
+        ["fetch", &git_remote_url, &refspec],
+    );
+    let diff_spec = CommandSpec::new(
+        "Summarize incoming changes from delegated worktree branch",
+        "git",
+        ["diff", "--stat", &diff_range],
+    );
+    let merge_spec = CommandSpec::new(
+        "Merge delegated worktree branch into current branch",
+        "git",
+        ["merge", "--no-ff", &branch_name],
+    );
+    let cleanup_remote_worktree_spec = CommandSpec::new(
+        "Remove completed worktree directory on MacBook",
+        "ssh",
+        ["-p", &port_str, &ssh_dest, &cleanup_script],
     );
 
     Ok(WorktreePullPlan {
@@ -249,10 +384,14 @@ pub fn build_pull_plan(
         inspect_diff_command,
         merge_command,
         cleanup_remote_worktree_command,
+        fetch_spec: Some(fetch_spec),
+        diff_spec: Some(diff_spec),
+        merge_spec: Some(merge_spec),
+        cleanup_remote_worktree_spec: Some(cleanup_remote_worktree_spec),
     })
 }
 
-/// Builds the SSH command to list all active parallel `otto-*` `tmux` sessions and Git worktrees on the MacBook.
+/// Builds the display SSH command to list all active parallel `otto-*` `tmux` sessions and Git worktrees.
 ///
 /// # Errors
 /// Returns [`WorktreeError::Bridge`] if `project_name` is invalid.
@@ -266,6 +405,28 @@ pub fn build_jobs_status_command(
         "ssh -p {} {} \"echo '--- Active Agent tmux Sessions ---' && (tmux list-sessions 2>/dev/null | grep '^otto-' || echo 'No running sessions') && echo '' && echo '--- MacBook Git Worktrees ---' && git -C {remote_repo_dir} worktree list\"",
         peer.ssh_port,
         peer.ssh_destination()
+    ))
+}
+
+/// Builds a shell-free [`CommandSpec`] to inspect active `otto-*` `tmux` sessions and Git worktrees on the MacBook.
+///
+/// # Errors
+/// Returns [`WorktreeError::Bridge`] if `project_name` is invalid.
+#[must_use = "jobs status spec should be executed via std::process::Command"]
+pub fn build_jobs_status_spec(
+    peer: &PeerNode,
+    project_name: &str,
+) -> Result<CommandSpec, WorktreeError> {
+    let remote_repo_dir = peer.remote_project_dir(project_name)?;
+    let port_str = peer.ssh_port.to_string();
+    let dest = peer.ssh_destination();
+    let remote_script = format!(
+        "echo '--- Active Agent tmux Sessions ---' && (tmux list-sessions 2>/dev/null | grep '^otto-' || echo 'No running sessions') && echo '' && echo '--- MacBook Git Worktrees ---' && (git -C {remote_repo_dir} worktree list 2>/dev/null || echo 'Remote workspace not synced yet')"
+    );
+    Ok(CommandSpec::new(
+        "Query active agent tmux sessions and Git worktrees on MacBook",
+        "ssh",
+        ["-p", &port_str, &dest, &remote_script],
     ))
 }
 
@@ -298,12 +459,31 @@ mod tests {
             "~/otto-workspaces/cheap-otto/.otto-worktrees/refactor-arbiter"
         );
         assert_eq!(plan.tmux_session_name, "otto-refactor-arbiter");
+        assert_eq!(
+            plan.remote_log_file,
+            "~/.cheap-otto/logs/cheap-otto/refactor-arbiter.log"
+        );
         assert_eq!(plan.execution_steps.len(), 4);
+        assert_eq!(plan.execution_specs.len(), 4);
         assert!(
             plan.execution_steps[2].contains("git -C ~/otto-workspaces/cheap-otto worktree add")
         );
         assert!(plan.execution_steps[3].contains("claude -p"));
+        assert!(plan.execution_specs[3].args[3].contains("remain-on-exit on"));
+        assert!(
+            plan.execution_specs[3].args[3]
+                .contains("tee -a ~/.cheap-otto/logs/cheap-otto/refactor-arbiter.log")
+        );
         Ok(())
+    }
+
+    #[test]
+    fn escapes_single_quotes_in_remote_safe_agent_invocation() {
+        let cmd = AgentRunner::ClaudeCode.build_remote_safe_command("Fix user's $HOME path");
+        assert_eq!(
+            cmd,
+            "claude -p 'Fix user'\\''s $HOME path' --dangerously-skip-permissions"
+        );
     }
 
     #[test]
@@ -324,6 +504,8 @@ mod tests {
             pull.merge_command,
             "git merge --no-ff otto/refactor-arbiter"
         );
+        assert!(pull.fetch_spec.is_some());
+        assert!(pull.merge_spec.is_some());
         Ok(())
     }
 

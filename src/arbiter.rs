@@ -1,16 +1,26 @@
+//! Unified Memory & Passive Thermal Arbiter for fanless 24/7 laptops.
+
 use crate::hardware::ThermalLevel;
 use serde::{Deserialize, Serialize};
 
+/// Point-in-time system telemetry snapshot evaluated by [`ArbiterPolicy`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArbiterSnapshot {
+    /// Observed passive or active thermal pressure tier.
     pub thermal_level: ThermalLevel,
+    /// Reclaimable + free unified memory in MiB.
     pub available_memory_mb: u32,
+    /// Whether a heavy CI build or delegated worktree verification is running.
     pub ci_build_running: bool,
+    /// Whether local LLM weights are currently resident in unified memory.
     pub local_llm_loaded: bool,
+    /// Seconds elapsed since the last local LLM inference call.
     pub local_llm_idle_secs: u32,
+    /// Whether the operator has engaged the mobile/remote kill-switch.
     pub kill_switch_engaged: bool,
 }
 
+/// Deterministic remediation or scheduling action emitted by [`ArbiterPolicy::evaluate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArbiterAction {
     /// Evict cached local LLM weights from unified RAM immediately.
@@ -21,9 +31,12 @@ pub enum ArbiterAction {
     AllowAllWorkloads,
 }
 
+/// Configurable thresholds governing unified memory eviction and thermal preemption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArbiterPolicy {
+    /// Idle duration in seconds before resident LLM weights are evicted (`300s` default).
     pub llm_idle_timeout_secs: u32,
+    /// Minimum free unified memory floor in MiB (`2048 MB` default).
     pub min_free_memory_mb: u32,
 }
 
@@ -71,7 +84,7 @@ impl ArbiterPolicy {
             return actions;
         }
 
-        // Rule 2: CI Build Priority (evict 5.5GB LLM weights when a GitHub Actions job starts)
+        // Rule 2: CI Build Priority (evict 5.5GB LLM weights when a GitHub Actions / worktree job starts)
         if snapshot.ci_build_running && snapshot.local_llm_loaded {
             actions.push(ArbiterAction::EvictLocalLlm {
                 reason: "CI build started; freeing unified RAM headroom".to_string(),

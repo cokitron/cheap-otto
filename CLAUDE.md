@@ -33,12 +33,16 @@ cheapotto/
 └── src/
     ├── lib.rs                        # Library crate root exporting public modules
     ├── main.rs                       # CLI binary entrypoint (clap derive) & I/O orchestration
-    ├── bridge.rs                     # Option 5: PeerNode, WorkspaceSyncPlan, RemoteExec, PortTunnelPlan
-    ├── worktree.rs                   # Option 1: AgentRunner, DelegatedWorktreePlan, WorktreePullPlan
-    ├── hardware.rs                   # HardwareProfile, CpuArch, ThermalLevel, MemoryBudget, sysctl parser
+    ├── command.rs                    # CommandSpec: shell-free OS process specifications (program + args)
+    ├── workspace.rs                  # Multi-project Git discovery, config hierarchy & WorkspaceRegistry
+    ├── bridge.rs                     # Option 5: PeerNode, dirty-guarded WorkspaceSyncPlan, RemoteExec, PortTunnelPlan
+    ├── terminal.rs                   # Interactive M1 shell (`manual` tmux / zsh), live `attach`, and `logs`
+    ├── worktree.rs                   # Option 1: AgentRunner, DelegatedWorktreePlan (remain-on-exit + tee logs), WorktreePullPlan
+    ├── schedule.rs                   # Reversible macOS launchd CI & autonomous agent scheduler + JSONL run ledger
+    ├── hardware.rs                   # HardwareProfile, CpuArch, ThermalLevel, MemoryBudget, sysctl/vm_stat parsers
     ├── macos.rs                      # MacOsStateBackup, AppliancePowerPlan, pmset parser & command builder
     ├── arbiter.rs                    # ArbiterPolicy, ArbiterSnapshot, ArbiterAction (RAM/thermal state machine)
-    └── doctor.rs                     # SystemProbeInput, DoctorReport, 8-point appliance invariant checker
+    └── doctor.rs                     # SystemProbeInput, RawTelemetrySnapshot, DoctorReport, 8-point checker
 ```
 
 ---
