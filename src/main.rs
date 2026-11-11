@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+use cheap_otto::agent_session::{
+    AgentAskParams, AgentSessionRecord, AgentSessionRegistry, AgentSessionStatus, AgentTurnEntry,
+    build_agent_ask_plan, build_agent_inspect_plan, normalize_agent_id, summarize_ndjson_and_log,
+};
 use cheap_otto::arbiter::{ArbiterPolicy, ArbiterSnapshot};
 use cheap_otto::bridge::{PeerNode, merge_ssh_config_block};
 use cheap_otto::command::CommandSpec;
@@ -10,6 +14,11 @@ use cheap_otto::hardware::{
     CpuArch, HardwareProfile, ThermalLevel, parse_battery_health_percent,
     parse_macos_vm_stat_available_mb,
 };
+use cheap_otto::harness::{
+    HarnessCatalogEntry, HarnessRunConfig, ReasoningEffort, default_agy_models,
+    default_claude_models, default_kiro_models, generate_session_uuid, parse_agy_models_output,
+    standard_efforts,
+};
 use cheap_otto::macos::MacOsStateBackup;
 use cheap_otto::schedule::{
     NewScheduleParams, RunStatus, ScheduleCadence, ScheduleRegistry, ScheduledWorkload,
@@ -17,6 +26,8 @@ use cheap_otto::schedule::{
     build_schedule_kickstart_spec, build_schedule_remove_plan, build_unload_all_schedules_spec,
     parse_run_history_jsonl,
 };
+use cheap_otto::server::{ServeConfig, probe_local_harnesses, run_serve};
+use cheap_otto::template::{NewTemplateParams, TaskTemplate, TemplateRegistry};
 use cheap_otto::terminal::{
     ShellMode, ShellTarget, build_attach_session_plan, build_interactive_shell_plan,
     build_job_logs_plan,
@@ -25,15 +36,17 @@ use cheap_otto::workspace::{
     DetectedWorkspace, WorkspaceRegistry, detect_workspace_from_probes, select_state_dir,
 };
 use cheap_otto::worktree::{
-    AgentRunner, build_delegate_plan, build_jobs_status_command, build_jobs_status_spec,
-    build_pull_plan,
+    AgentRunner, build_delegate_plan_with_harness, build_jobs_status_command,
+    build_jobs_status_spec, build_pull_plan, posix_single_quote,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use serde_json::json;
 use std::env;
 use std::fs;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -194,6 +207,12 @@ enum Commands {
         /// Coding agent CLI to invoke on the MacBook (`claude`, `agy`, `kiro`, or `custom`)
         #[arg(long, default_value = "claude")]
         agent: String,
+        /// Optional model override within the selected harness (e.g. `sonnet`, `opus`, `gemini-4-carbon-high`)
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
+        #[arg(long)]
+        effort: Option<String>,
         /// Verification gate command executed after the agent finishes
         #[arg(long, default_value = "cargo test --all-targets")]
         verify: String,
@@ -203,7 +222,117 @@ enum Commands {
         /// Optional path to state directory containing `peer.json`
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
         /// Execute the worktree creation and background `tmux` launch over SSH immediately
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Discover installed coding harnesses (`claude`, `agy`, `kiro`, `custom`), auth status, and selectable models
+    Harnesses {
+        /// Require live SSH probing against the paired MacBook
+        #[arg(long)]
+        remote: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+        /// Optional path to state directory containing `peer.json`
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Inspect an individual addressable agent's live worktree status, Git diff, and latest response
+    Inspect {
+        /// Agent task ID (`<id>` or `otto-<id>`)
+        #[arg(long)]
+        id: String,
+        /// Project folder name (auto-detected from current Git repository when omitted)
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+        /// Query live `tmux`, Git diff, and NDJSON telemetry over SSH
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Send a direct follow-up question or instruction to a specific addressable agent (`--resume` / model switch)
+    Ask {
+        /// Agent task ID (`<id>` or `otto-<id>`)
+        #[arg(long)]
+        id: String,
+        /// Question or follow-up coding instruction for this agent
+        #[arg(short, long)]
+        prompt: String,
+        /// Project folder name (auto-detected from current Git repository when omitted)
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional harness switch (`claude`, `agy`, `kiro`, `custom`); defaults to the agent's bound harness
+        #[arg(long)]
+        agent: Option<String>,
+        /// Optional model switch within the harness (e.g. upgrade `sonnet` -> `opus`)
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional reasoning effort switch (`low`, `medium`, `high`, `xhigh`, `max`)
+        #[arg(long)]
+        effort: Option<String>,
+        /// Optional verification command to run & commit if the follow-up turn edits code
+        #[arg(long)]
+        verify: Option<String>,
+        /// Dispatch asynchronously inside detached `tmux` instead of waiting for the response
+        #[arg(long = "async")]
+        run_async: bool,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+        /// Execute the follow-up query on the paired MacBook over SSH
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Manage repeatable multi-harness task playbooks (`templates.json`) for one-click UI & CLI reuse
+    Template {
+        #[command(subcommand)]
+        action: TemplateCommands,
+    },
+    /// Run the Mission Control HTTP/JSON server & `pixel-agents` event bridge (typically on the M1 at `:7420`)
+    Serve {
+        /// Bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// HTTP port for Mission Control UI & REST API
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+        /// Local port where `pixel-agents` standalone runs (`:7421`)
+        #[arg(long, default_value_t = 7421)]
+        pixel_port: u16,
+        /// Optional state directory (`~/.cheap-otto` default)
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Optional workspaces root (`~/otto-workspaces` default)
+        #[arg(long)]
+        workspaces_root: Option<PathBuf>,
+    },
+    /// Start `pixel-agents` + `cheap-otto serve` on the paired M1, tunnel `:7420`/`:7421`, and open Mission Control
+    Ui {
+        /// Local & remote port for Mission Control (`http://localhost:7420`)
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+        /// Local & remote port for `pixel-agents` visual office (`http://localhost:7421`)
+        #[arg(long, default_value_t = 7421)]
+        pixel_port: u16,
+        /// Optional path to state directory containing `peer.json`
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Do not automatically launch the system web browser
+        #[arg(long)]
+        no_open: bool,
+        /// Start remote services, establish SSH localhost port forwarding, and open the UI
         #[arg(long, visible_alias = "apply")]
         execute: bool,
     },
@@ -319,59 +448,68 @@ enum Commands {
     },
 }
 
+#[derive(Args, Debug)]
+struct ScheduleAddArgs {
+    /// Unique schedule identifier within the project (e.g. `main-ci` or `nightly-audit`)
+    #[arg(long)]
+    id: String,
+    /// Project folder name (auto-detected from current Git repository when omitted)
+    #[arg(long)]
+    project: Option<String>,
+    /// Fixed interval cadence (`>= 60s`, e.g. `15m`, `2h`, `300s`)
+    #[arg(long, group = "cadence")]
+    every: Option<String>,
+    /// Daily 24-hour clock cadence (`HH:MM`, e.g. `02:30`)
+    #[arg(long, group = "cadence")]
+    daily: Option<String>,
+    /// Weekly cadence (`DAY@HH:MM`, e.g. `MON@02:00` or `FRI@18:00`)
+    #[arg(long, group = "cadence")]
+    weekly: Option<String>,
+    /// CI command to run in an isolated worktree (mutually exclusive with `--task`)
+    #[arg(long, group = "workload")]
+    ci: Option<String>,
+    /// Autonomous coding agent prompt to run in an isolated worktree (mutually exclusive with `--ci`)
+    #[arg(long, group = "workload")]
+    task: Option<String>,
+    /// Coding agent CLI for `--task` (`claude`, `agy`, `kiro`, or `custom`)
+    #[arg(long, default_value = "claude")]
+    agent: String,
+    /// Optional model override for `--task` (e.g. `sonnet`, `gemini-4-carbon-high`)
+    #[arg(long)]
+    model: Option<String>,
+    /// Optional reasoning effort for `--task` (`low`, `medium`, `high`, `xhigh`, `max`)
+    #[arg(long)]
+    effort: Option<String>,
+    /// Verification gate command executed after `--task` finishes
+    #[arg(long, default_value = "cargo test --all-targets")]
+    verify: String,
+    /// Target Git branch to fetch/checkout on each scheduled tick
+    #[arg(long, default_value = "main")]
+    branch: String,
+    /// For `--ci`: skip execution when the target branch SHA has not changed since the last run
+    #[arg(long)]
+    on_change: bool,
+    /// For `--task`: push `otto/sched-<id>` to `origin` and open a Draft PR via `gh` when changes pass verification
+    #[arg(long)]
+    draft_pr: bool,
+    /// Allow scheduled runs even when the MacBook is unplugged on battery power
+    #[arg(long)]
+    allow_battery: bool,
+    /// Trigger an immediate initial run as soon as the LaunchAgent is loaded (`RunAtLoad`)
+    #[arg(long)]
+    run_at_load: bool,
+    /// Optional path to state directory
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Install the runner script & `.plist` and bootstrap `launchd` over SSH immediately
+    #[arg(long, visible_alias = "apply")]
+    execute: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum ScheduleCommands {
     /// Register a recurring CI check or autonomous agent task via macOS `launchd`
-    Add {
-        /// Unique schedule identifier within the project (e.g. `main-ci` or `nightly-audit`)
-        #[arg(long)]
-        id: String,
-        /// Project folder name (auto-detected from current Git repository when omitted)
-        #[arg(long)]
-        project: Option<String>,
-        /// Fixed interval cadence (`>= 60s`, e.g. `15m`, `2h`, `300s`)
-        #[arg(long, group = "cadence")]
-        every: Option<String>,
-        /// Daily 24-hour clock cadence (`HH:MM`, e.g. `02:30`)
-        #[arg(long, group = "cadence")]
-        daily: Option<String>,
-        /// Weekly cadence (`DAY@HH:MM`, e.g. `MON@02:00` or `FRI@18:00`)
-        #[arg(long, group = "cadence")]
-        weekly: Option<String>,
-        /// CI command to run in an isolated worktree (mutually exclusive with `--task`)
-        #[arg(long, group = "workload")]
-        ci: Option<String>,
-        /// Autonomous coding agent prompt to run in an isolated worktree (mutually exclusive with `--ci`)
-        #[arg(long, group = "workload")]
-        task: Option<String>,
-        /// Coding agent CLI for `--task` (`claude`, `agy`, `kiro`, or `custom`)
-        #[arg(long, default_value = "claude")]
-        agent: String,
-        /// Verification gate command executed after `--task` finishes
-        #[arg(long, default_value = "cargo test --all-targets")]
-        verify: String,
-        /// Target Git branch to fetch/checkout on each scheduled tick
-        #[arg(long, default_value = "main")]
-        branch: String,
-        /// For `--ci`: skip execution when the target branch SHA has not changed since the last run
-        #[arg(long)]
-        on_change: bool,
-        /// For `--task`: push `otto/sched-<id>` to `origin` and open a Draft PR via `gh` when changes pass verification
-        #[arg(long)]
-        draft_pr: bool,
-        /// Allow scheduled runs even when the MacBook is unplugged on battery power
-        #[arg(long)]
-        allow_battery: bool,
-        /// Trigger an immediate initial run as soon as the LaunchAgent is loaded (`RunAtLoad`)
-        #[arg(long)]
-        run_at_load: bool,
-        /// Optional path to state directory
-        #[arg(long)]
-        state_dir: Option<PathBuf>,
-        /// Install the runner script & `.plist` and bootstrap `launchd` over SSH immediately
-        #[arg(long, visible_alias = "apply")]
-        execute: bool,
-    },
+    Add(Box<ScheduleAddArgs>),
     /// List configured recurring jobs in `.cheap-otto/schedules.json` (and live `launchctl` status with `--execute`)
     List {
         /// Optional project filter
@@ -416,6 +554,133 @@ enum ScheduleCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum TemplateCommands {
+    /// Save or update a repeatable multi-harness task playbook in `.cheap-otto/templates.json`
+    Add {
+        /// Unique template slug (e.g. `audit-edge-cases` or `pr-lint-fix`)
+        #[arg(long)]
+        id: String,
+        /// Optional human-readable card title
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional bound project name (omit to keep the template project-agnostic)
+        #[arg(long)]
+        project: Option<String>,
+        /// Default coding harness (`claude`, `agy`, `kiro`, or `custom`)
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Optional default model (`sonnet`, `opus`, `gemini-4-carbon-high`, etc.)
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional default reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
+        #[arg(long)]
+        effort: Option<String>,
+        /// Task prompt executed when this template runs
+        #[arg(long)]
+        task: String,
+        /// Verification gate command executed after the agent finishes
+        #[arg(long, default_value = "cargo test --all-targets")]
+        verify: String,
+        /// Whether scheduled runs of this template should open a Draft PR
+        #[arg(long)]
+        draft_pr: bool,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// List repeatable task playbooks stored in `.cheap-otto/templates.json`
+    List {
+        /// Optional project filter
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Launch an isolated worktree agent from a saved template (with optional harness/model overrides)
+    Run {
+        /// Template ID to run
+        #[arg(long)]
+        id: String,
+        /// Project folder name (auto-detected when omitted if not pinned on the template)
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional explicit agent task ID override
+        #[arg(long)]
+        task_id: Option<String>,
+        /// Optional harness override (`claude`, `agy`, `kiro`, `custom`)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Optional model override
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional reasoning effort override
+        #[arg(long)]
+        effort: Option<String>,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+        /// Execute the worktree creation and background `tmux` launch over SSH immediately
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Bind a saved template directly to a recurring macOS `launchd` schedule
+    Schedule {
+        /// Template ID to bind
+        #[arg(long)]
+        id: String,
+        /// Optional schedule ID override (defaults to the template ID)
+        #[arg(long)]
+        schedule_id: Option<String>,
+        /// Project folder name (auto-detected when omitted)
+        #[arg(long)]
+        project: Option<String>,
+        /// Fixed interval cadence (`>= 60s`, e.g. `15m`, `2h`)
+        #[arg(long, group = "tpl_cadence")]
+        every: Option<String>,
+        /// Daily cadence (`HH:MM`, e.g. `02:30`)
+        #[arg(long, group = "tpl_cadence")]
+        daily: Option<String>,
+        /// Weekly cadence (`DAY@HH:MM`, e.g. `MON@02:00`)
+        #[arg(long, group = "tpl_cadence")]
+        weekly: Option<String>,
+        /// Target Git branch (`main` default)
+        #[arg(long, default_value = "main")]
+        branch: String,
+        /// Allow scheduled runs on battery power
+        #[arg(long)]
+        allow_battery: bool,
+        /// Trigger an immediate initial run (`RunAtLoad`)
+        #[arg(long)]
+        run_at_load: bool,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        /// Install & bootstrap on the paired MacBook over SSH immediately
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Remove a saved template from `.cheap-otto/templates.json`
+    Remove {
+        /// Template ID to delete
+        #[arg(long)]
+        id: String,
+        /// Optional path to state directory
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+}
+
 struct InitOptions<'a> {
     ram_gb: Option<u32>,
     battery_cap: u8,
@@ -441,8 +706,59 @@ struct DelegateOptions<'a> {
     task: &'a str,
     id: Option<&'a str>,
     agent: &'a str,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
     verify: &'a str,
     state_dir: Option<&'a Path>,
+    json: bool,
+    execute: bool,
+}
+
+struct InspectOptions<'a> {
+    id: &'a str,
+    project: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    json: bool,
+    execute: bool,
+}
+
+struct AskOptions<'a> {
+    id: &'a str,
+    prompt: &'a str,
+    project: Option<&'a str>,
+    agent: Option<&'a str>,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    verify: Option<&'a str>,
+    run_async: bool,
+    state_dir: Option<&'a Path>,
+    json: bool,
+    execute: bool,
+}
+
+struct TemplateAddOptions<'a> {
+    id: &'a str,
+    title: Option<&'a str>,
+    project: Option<&'a str>,
+    agent: &'a str,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    task: &'a str,
+    verify: &'a str,
+    draft_pr: bool,
+    state_dir: Option<&'a Path>,
+    json: bool,
+}
+
+struct TemplateRunOptions<'a> {
+    id: &'a str,
+    project: Option<&'a str>,
+    task_id: Option<&'a str>,
+    agent: Option<&'a str>,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+    state_dir: Option<&'a Path>,
+    json: bool,
     execute: bool,
 }
 
@@ -482,6 +798,8 @@ struct ScheduleAddOptions<'a> {
     ci: Option<&'a str>,
     task: Option<&'a str>,
     agent: &'a str,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
     verify: &'a str,
     branch: &'a str,
     on_change: bool,
@@ -590,19 +908,180 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             task,
             id,
             agent,
+            model,
+            effort,
             verify,
             project,
             state_dir,
+            json,
             execute,
         } => run_delegate(&DelegateOptions {
             project: project.as_deref(),
             task: &task,
             id: id.as_deref(),
             agent: &agent,
+            model: model.as_deref(),
+            effort: effort.as_deref(),
             verify: &verify,
             state_dir: state_dir.as_deref(),
+            json,
             execute,
         })?,
+        Commands::Harnesses {
+            remote,
+            json,
+            state_dir,
+        } => run_harnesses(remote, json, state_dir.as_deref())?,
+        Commands::Inspect {
+            id,
+            project,
+            state_dir,
+            json,
+            execute,
+        } => run_inspect(&InspectOptions {
+            id: &id,
+            project: project.as_deref(),
+            state_dir: state_dir.as_deref(),
+            json,
+            execute,
+        })?,
+        Commands::Ask {
+            id,
+            prompt,
+            project,
+            agent,
+            model,
+            effort,
+            verify,
+            run_async,
+            state_dir,
+            json,
+            execute,
+        } => run_ask(&AskOptions {
+            id: &id,
+            prompt: &prompt,
+            project: project.as_deref(),
+            agent: agent.as_deref(),
+            model: model.as_deref(),
+            effort: effort.as_deref(),
+            verify: verify.as_deref(),
+            run_async,
+            state_dir: state_dir.as_deref(),
+            json,
+            execute,
+        })?,
+        Commands::Template { action } => match action {
+            TemplateCommands::Add {
+                id,
+                title,
+                project,
+                agent,
+                model,
+                effort,
+                task,
+                verify,
+                draft_pr,
+                state_dir,
+                json,
+            } => run_template_add(&TemplateAddOptions {
+                id: &id,
+                title: title.as_deref(),
+                project: project.as_deref(),
+                agent: &agent,
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                task: &task,
+                verify: &verify,
+                draft_pr,
+                state_dir: state_dir.as_deref(),
+                json,
+            })?,
+            TemplateCommands::List {
+                project,
+                state_dir,
+                json,
+            } => run_template_list(project.as_deref(), state_dir.as_deref(), json)?,
+            TemplateCommands::Run {
+                id,
+                project,
+                task_id,
+                agent,
+                model,
+                effort,
+                state_dir,
+                json,
+                execute,
+            } => run_template_run(&TemplateRunOptions {
+                id: &id,
+                project: project.as_deref(),
+                task_id: task_id.as_deref(),
+                agent: agent.as_deref(),
+                model: model.as_deref(),
+                effort: effort.as_deref(),
+                state_dir: state_dir.as_deref(),
+                json,
+                execute,
+            })?,
+            TemplateCommands::Schedule {
+                id,
+                schedule_id,
+                project,
+                every,
+                daily,
+                weekly,
+                branch,
+                allow_battery,
+                run_at_load,
+                state_dir,
+                execute,
+            } => run_template_schedule(
+                &id,
+                schedule_id.as_deref(),
+                &ScheduleAddOptions {
+                    id: schedule_id.as_deref().unwrap_or(&id),
+                    project: project.as_deref(),
+                    every: every.as_deref(),
+                    daily: daily.as_deref(),
+                    weekly: weekly.as_deref(),
+                    ci: None,
+                    task: None,
+                    agent: "claude",
+                    model: None,
+                    effort: None,
+                    verify: "",
+                    branch: &branch,
+                    on_change: false,
+                    draft_pr: false,
+                    allow_battery,
+                    run_at_load,
+                    state_dir: state_dir.as_deref(),
+                    execute,
+                },
+            )?,
+            TemplateCommands::Remove { id, state_dir } => {
+                run_template_remove(&id, state_dir.as_deref())?
+            }
+        },
+        Commands::Serve {
+            host,
+            port,
+            pixel_port,
+            state_dir,
+            workspaces_root,
+        } => run_serve_cmd(
+            &host,
+            port,
+            pixel_port,
+            state_dir.as_deref(),
+            workspaces_root.as_deref(),
+        )?,
+        Commands::Ui {
+            port,
+            pixel_port,
+            state_dir,
+            no_open,
+            execute,
+        } => run_ui(port, pixel_port, state_dir.as_deref(), no_open, execute)?,
         Commands::Jobs {
             project,
             state_dir,
@@ -645,40 +1124,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state_dir.as_deref(),
         )?,
         Commands::Schedule { action } => match action {
-            ScheduleCommands::Add {
-                id,
-                project,
-                every,
-                daily,
-                weekly,
-                ci,
-                task,
-                agent,
-                verify,
-                branch,
-                on_change,
-                draft_pr,
-                allow_battery,
-                run_at_load,
-                state_dir,
-                execute,
-            } => run_schedule_add(&ScheduleAddOptions {
-                id: &id,
-                project: project.as_deref(),
-                every: every.as_deref(),
-                daily: daily.as_deref(),
-                weekly: weekly.as_deref(),
-                ci: ci.as_deref(),
-                task: task.as_deref(),
-                agent: &agent,
-                verify: &verify,
-                branch: &branch,
-                on_change,
-                draft_pr,
-                allow_battery,
-                run_at_load,
-                state_dir: state_dir.as_deref(),
-                execute,
+            ScheduleCommands::Add(args) => run_schedule_add(&ScheduleAddOptions {
+                id: &args.id,
+                project: args.project.as_deref(),
+                every: args.every.as_deref(),
+                daily: args.daily.as_deref(),
+                weekly: args.weekly.as_deref(),
+                ci: args.ci.as_deref(),
+                task: args.task.as_deref(),
+                agent: &args.agent,
+                model: args.model.as_deref(),
+                effort: args.effort.as_deref(),
+                verify: &args.verify,
+                branch: &args.branch,
+                on_change: args.on_change,
+                draft_pr: args.draft_pr,
+                allow_battery: args.allow_battery,
+                run_at_load: args.run_at_load,
+                state_dir: args.state_dir.as_deref(),
+                execute: args.execute,
             })?,
             ScheduleCommands::List {
                 project,
@@ -856,6 +1320,64 @@ fn save_schedule_registry(
     let path = state_dir.join("schedules.json");
     fs::write(path, serde_json::to_string_pretty(registry)?)?;
     Ok(())
+}
+
+fn load_agent_registry(state_dir: &Path) -> AgentSessionRegistry {
+    let path = state_dir.join("agents.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<AgentSessionRegistry>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_agent_registry(
+    state_dir: &Path,
+    registry: &AgentSessionRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(state_dir)?;
+    let path = state_dir.join("agents.json");
+    fs::write(path, serde_json::to_string_pretty(registry)?)?;
+    Ok(())
+}
+
+fn load_template_registry(state_dir: &Path) -> TemplateRegistry {
+    let path = state_dir.join("templates.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<TemplateRegistry>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_template_registry(
+    state_dir: &Path,
+    registry: &TemplateRegistry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(state_dir)?;
+    let path = state_dir.join("templates.json");
+    fs::write(path, serde_json::to_string_pretty(registry)?)?;
+    Ok(())
+}
+
+/// Mirrors an [`AgentSessionRecord`] into `~/.cheap-otto/agents.json` on the paired MacBook so
+/// `cheap-otto serve` and `pixel-agents` immediately track CLI-delegated agents.
+fn sync_remote_agent_record(peer: &PeerNode, record: &AgentSessionRecord) {
+    let raw_existing = capture_spec_stdout(&peer.build_ssh_probe_spec(
+        "Read remote ~/.cheap-otto/agents.json",
+        "cat ~/.cheap-otto/agents.json 2>/dev/null",
+    ))
+    .unwrap_or_default();
+    let mut remote_reg =
+        serde_json::from_str::<AgentSessionRegistry>(&raw_existing).unwrap_or_default();
+    remote_reg.upsert(record.clone());
+    if let Ok(serialized) = serde_json::to_string_pretty(&remote_reg) {
+        let write_cmd = format!(
+            "mkdir -p ~/.cheap-otto && printf '%s\\n' {} > ~/.cheap-otto/agents.json",
+            posix_single_quote(&serialized)
+        );
+        let _ = capture_spec_stdout(
+            &peer.build_ssh_probe_spec("Sync remote ~/.cheap-otto/agents.json", &write_cmd),
+        );
+    }
 }
 
 fn probe_hardware_and_pmset(
@@ -1272,34 +1794,45 @@ fn run_delegate(opts: &DelegateOptions<'_>) -> Result<(), Box<dyn std::error::Er
     let state_dir = resolve_active_state_dir(opts.state_dir, ws.repo_root.as_deref());
     let (peer, _) = load_or_default_peer(&state_dir)?;
     let agent = AgentRunner::parse(opts.agent)?;
-    let plan = build_delegate_plan(
+    let effort = match opts.effort {
+        Some(raw) if !raw.trim().is_empty() => Some(ReasoningEffort::parse(raw)?),
+        _ => None,
+    };
+    let assigned_session_id = if agent == AgentRunner::ClaudeCode {
+        Some(generate_session_uuid())
+    } else {
+        None
+    };
+    let harness_cfg = HarnessRunConfig {
+        runner: agent,
+        model: opts
+            .model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        effort,
+        session_id: assigned_session_id,
+        resume_existing: false,
+        stream_json: matches!(agent, AgentRunner::ClaudeCode | AgentRunner::Antigravity),
+    };
+    let plan = build_delegate_plan_with_harness(
         &peer,
         &ws.project_name,
         opts.task,
         opts.id,
-        agent,
+        &harness_cfg,
         opts.verify,
     )?;
 
-    println!("=== cheap-otto: Delegate Task to Parallel MacBook Worktree ===");
-    println!(
-        "Project         : {} (from {})",
-        plan.project_name, ws.current_branch
+    let session_rec = AgentSessionRecord::new_initial(
+        &plan.project_name,
+        &plan.task_id,
+        &plan.remote_worktree_dir,
+        &harness_cfg,
+        &plan.verify_command,
+        opts.task,
+        current_epoch_secs(),
     );
-    println!("Task ID         : {}", plan.task_id);
-    println!("Worktree Branch : {}", plan.branch_name);
-    println!("Remote Worktree : {}", plan.remote_worktree_dir);
-    println!(
-        "tmux Session    : {} (remain-on-exit enabled)",
-        plan.tmux_session_name
-    );
-    println!("Remote Log File : {}", plan.remote_log_file);
-    println!("Agent Runner    : {:?}", plan.agent);
-    println!("Verify Gate     : {}", plan.verify_command);
-    println!("\nExecution Steps:");
-    for (idx, step) in plan.execution_steps.iter().enumerate() {
-        println!("  [{}] $ {step}", idx + 1);
-    }
 
     let remote_repo_dir = peer.remote_project_dir(&plan.project_name)?;
     let mut registry = load_registry(&state_dir);
@@ -1310,19 +1843,88 @@ fn run_delegate(opts: &DelegateOptions<'_>) -> Result<(), Box<dyn std::error::Er
         &plan.task_id,
     );
 
+    let mut agent_reg = load_agent_registry(&state_dir);
+    agent_reg.upsert(session_rec.clone());
+
     if opts.execute {
-        println!("\n--- Launching Delegated Worktree on MacBook ---");
+        if !opts.json {
+            println!("=== cheap-otto: Launching Addressable Agent Worktree ===");
+        }
         for spec in &plan.execution_specs {
-            execute_command_spec(spec)?;
+            if opts.json {
+                let status = Command::new(&spec.program).args(&spec.args).status()?;
+                if !status.success() && !spec.allow_failure {
+                    return Err(format!(
+                        "command '{}' exited with {status}",
+                        spec.display_command()
+                    )
+                    .into());
+                }
+            } else {
+                execute_command_spec(spec)?;
+            }
         }
         save_registry(&state_dir, &registry)?;
-    } else if state_dir.exists() {
-        save_registry(&state_dir, &registry)?;
+        save_agent_registry(&state_dir, &agent_reg)?;
+        sync_remote_agent_record(&peer, &session_rec);
+    } else {
+        save_agent_registry(&state_dir, &agent_reg)?;
+        if state_dir.exists() {
+            save_registry(&state_dir, &registry)?;
+        }
     }
 
+    if opts.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "agent_id": plan.task_id,
+                "project_name": plan.project_name,
+                "branch_name": plan.branch_name,
+                "remote_worktree_dir": plan.remote_worktree_dir,
+                "tmux_session_name": plan.tmux_session_name,
+                "harness": plan.agent.slug(),
+                "model": plan.model,
+                "effort": plan.effort,
+                "provider_session_id": session_rec.provider_session_id,
+                "executed": opts.execute,
+                "execution_steps": plan.execution_steps,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("=== cheap-otto: Delegate Task to Parallel MacBook Worktree ===");
     println!(
-        "\nWatch live or inspect logs anytime:\n  $ cheap-otto attach --id {} --execute\n  $ cheap-otto logs --id {} --execute\n\nWhen finished, fetch the branch back to Windows with:\n  $ cheap-otto pull --id {} --execute",
-        plan.task_id, plan.task_id, plan.task_id
+        "Project         : {} (from {})",
+        plan.project_name, ws.current_branch
+    );
+    println!("Agent ID        : {}", plan.task_id);
+    println!("Worktree Branch : {}", plan.branch_name);
+    println!("Remote Worktree : {}", plan.remote_worktree_dir);
+    println!(
+        "tmux Session    : {} (remain-on-exit enabled)",
+        plan.tmux_session_name
+    );
+    println!("Remote Log File : {}", plan.remote_log_file);
+    println!("Events Stream   : {}", plan.remote_events_file);
+    println!(
+        "Harness / Model : {} (model={}, effort={})",
+        plan.agent.slug(),
+        plan.model.as_deref().unwrap_or("default"),
+        plan.effort.map_or("default", ReasoningEffort::as_flag_str)
+    );
+    if let Some(sid) = &session_rec.provider_session_id {
+        println!("Session ID      : {sid}");
+    }
+    println!("Verify Gate     : {}", plan.verify_command);
+    println!("\nExecution Steps:");
+    for (idx, step) in plan.execution_steps.iter().enumerate() {
+        println!("  [{}] $ {step}", idx + 1);
+    }
+    println!(
+        "\nQuery or inspect this agent directly anytime:\n  $ cheap-otto inspect --id {} --execute\n  $ cheap-otto ask --id {} --prompt \"...\" --execute\n  $ cheap-otto attach --id {} --execute\n\nWhen finished, fetch the branch back to Windows with:\n  $ cheap-otto pull --id {} --execute",
+        plan.task_id, plan.task_id, plan.task_id, plan.task_id
     );
     Ok(())
 }
@@ -1769,9 +2371,19 @@ fn run_schedule_add(opts: &ScheduleAddOptions<'_>) -> Result<(), Box<dyn std::er
         }
     } else if let Some(prompt) = opts.task {
         let agent = AgentRunner::parse(opts.agent)?;
+        let effort = match opts.effort {
+            Some(raw) if !raw.trim().is_empty() => Some(ReasoningEffort::parse(raw)?),
+            _ => None,
+        };
         ScheduledWorkload::AgentTask {
             branch: opts.branch.to_string(),
             agent,
+            model: opts
+                .model
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+            effort,
             prompt: prompt.to_string(),
             verify_command: opts.verify.to_string(),
             create_draft_pr: opts.draft_pr,
@@ -2066,5 +2678,918 @@ fn run_restore(
         }
     }
 
+    Ok(())
+}
+
+fn clean_version_line(raw: &str) -> Option<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.contains("command not found") && !l.contains("not found"))?;
+    Some(line.to_string())
+}
+
+fn probe_remote_harnesses(peer: &PeerNode) -> Option<Vec<HarnessCatalogEntry>> {
+    let script = "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; \
+        echo '===CLAUDE==='; (command -v claude >/dev/null 2>&1 && claude --version 2>&1 || true); \
+        echo '===AGY==='; (command -v agy >/dev/null 2>&1 && agy --version 2>&1 || true); \
+        echo '===AGY_MODELS==='; (command -v agy >/dev/null 2>&1 && agy models 2>&1 || true); \
+        echo '===KIRO==='; (command -v kiro-cli >/dev/null 2>&1 && kiro-cli --version 2>&1 || true)";
+    let out = capture_spec_stdout(
+        &peer.build_ssh_probe_spec("Probe remote M1 coding harnesses and models", script),
+    )?;
+
+    let (_, after_claude) = out.split_once("===CLAUDE===")?;
+    let (claude_sec, rest1) = after_claude.split_once("===AGY===")?;
+    let (agy_sec, rest2) = rest1.split_once("===AGY_MODELS===")?;
+    let (agy_models_sec, kiro_sec) = rest2.split_once("===KIRO===")?;
+
+    let claude_ver = clean_version_line(claude_sec);
+    let agy_ver = clean_version_line(agy_sec);
+    let kiro_ver = clean_version_line(kiro_sec);
+
+    let (agy_auth, agy_models) = if agy_ver.is_some() {
+        parse_agy_models_output(agy_models_sec)
+    } else {
+        (false, default_agy_models())
+    };
+
+    Some(vec![
+        HarnessCatalogEntry {
+            id: "claude".to_string(),
+            display_name: "Claude Code".to_string(),
+            installed: claude_ver.is_some(),
+            version: claude_ver.clone(),
+            authenticated: claude_ver.is_some(),
+            status_note: claude_ver.map(|v| format!("Ready ({v})")),
+            supports_stream_json: true,
+            supported_efforts: standard_efforts(),
+            models: default_claude_models(),
+        },
+        HarnessCatalogEntry {
+            id: "agy".to_string(),
+            display_name: "Antigravity (AGY)".to_string(),
+            installed: agy_ver.is_some(),
+            version: agy_ver.clone(),
+            authenticated: agy_auth,
+            status_note: if agy_ver.is_none() {
+                Some("Not installed on PATH".to_string())
+            } else if !agy_auth {
+                Some(
+                    "Sign in once via `cheap-otto shell --execute` -> `agy` to unlock live models"
+                        .to_string(),
+                )
+            } else {
+                agy_ver.map(|v| format!("Authenticated ({v})"))
+            },
+            supports_stream_json: true,
+            supported_efforts: standard_efforts(),
+            models: agy_models,
+        },
+        HarnessCatalogEntry {
+            id: "kiro".to_string(),
+            display_name: "Kiro CLI".to_string(),
+            installed: kiro_ver.is_some(),
+            version: kiro_ver.clone(),
+            authenticated: kiro_ver.is_some(),
+            status_note: kiro_ver.map(|v| format!("Ready ({v})")),
+            supports_stream_json: false,
+            supported_efforts: standard_efforts(),
+            models: default_kiro_models(),
+        },
+        HarnessCatalogEntry {
+            id: "custom".to_string(),
+            display_name: "Custom Shell / CI Script".to_string(),
+            installed: true,
+            version: Some("POSIX /bin/sh".to_string()),
+            authenticated: true,
+            status_note: Some("Runs arbitrary build/test shell pipelines".to_string()),
+            supports_stream_json: false,
+            supported_efforts: Vec::new(),
+            models: Vec::new(),
+        },
+    ])
+}
+
+fn run_harnesses(
+    require_remote: bool,
+    json_out: bool,
+    explicit_state_dir: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(explicit_state_dir, repo_root.as_deref());
+    let (peer, has_peer_file) = load_or_default_peer(&state_dir)?;
+
+    let (source_label, entries) = if require_remote || (!cfg!(target_os = "macos") && has_peer_file)
+    {
+        if let Some(remote_entries) = probe_remote_harnesses(&peer) {
+            (
+                format!(
+                    "Paired MacBook `{}` ({})",
+                    peer.alias,
+                    peer.ssh_destination()
+                ),
+                remote_entries,
+            )
+        } else if require_remote {
+            return Err(format!(
+                "unable to probe harnesses on paired MacBook '{}' ({}) over SSH",
+                peer.alias,
+                peer.ssh_destination()
+            )
+            .into());
+        } else {
+            ("Local Host".to_string(), probe_local_harnesses())
+        }
+    } else {
+        ("Local Host".to_string(), probe_local_harnesses())
+    };
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "source": source_label,
+                "harnesses": entries,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("=== cheap-otto: Multi-Harness & Model Catalog ===");
+    println!("Source          : {source_label}");
+    for entry in &entries {
+        let badge = if !entry.installed {
+            "[MISSING]"
+        } else if entry.authenticated {
+            "[READY]"
+        } else {
+            "[SIGN-IN]"
+        };
+        println!(
+            "\n{badge:<10} {} (`--agent {}`) — {}",
+            entry.display_name,
+            entry.id,
+            entry.status_note.as_deref().unwrap_or("-")
+        );
+        if !entry.models.is_empty() {
+            let model_ids: Vec<&str> = entry.models.iter().map(|m| m.id.as_str()).collect();
+            println!("           Models  : {}", model_ids.join(", "));
+        }
+        if !entry.supported_efforts.is_empty() {
+            let effs: Vec<&str> = entry
+                .supported_efforts
+                .iter()
+                .map(|e| e.as_flag_str())
+                .collect();
+            println!("           Efforts : {}", effs.join(", "));
+        }
+    }
+    Ok(())
+}
+
+fn load_or_synthesize_agent_record(
+    reg: &AgentSessionRegistry,
+    peer: &PeerNode,
+    project_name: &str,
+    raw_id: &str,
+) -> Result<AgentSessionRecord, Box<dyn std::error::Error>> {
+    let clean_id = normalize_agent_id(raw_id);
+    if let Some(found) = reg
+        .find(project_name, &clean_id)
+        .or_else(|| reg.find_any_project(&clean_id))
+    {
+        return Ok(found.clone());
+    }
+
+    let remote_repo = peer.remote_project_dir(project_name)?;
+    let wt_dir = format!("{remote_repo}/.otto-worktrees/{clean_id}");
+    let default_cfg = HarnessRunConfig {
+        runner: AgentRunner::ClaudeCode,
+        model: None,
+        effort: None,
+        session_id: None,
+        resume_existing: true,
+        stream_json: true,
+    };
+    Ok(AgentSessionRecord::new_initial(
+        project_name,
+        &clean_id,
+        &wt_dir,
+        &default_cfg,
+        "cargo test --all-targets",
+        "(untracked worktree)",
+        current_epoch_secs(),
+    ))
+}
+
+fn split_inspect_sections(raw: &str) -> (&str, &str, &str, &str) {
+    let after_tmux = raw.split_once("===TMUX===").map_or("", |(_, r)| r);
+    let (tmux_sec, rest1) = after_tmux
+        .split_once("===GIT===")
+        .unwrap_or((after_tmux, ""));
+    let (git_sec, rest2) = rest1.split_once("===NDJSON===").unwrap_or((rest1, ""));
+    let (ndjson_sec, log_sec) = rest2.split_once("===LOG===").unwrap_or((rest2, ""));
+    (
+        tmux_sec.trim(),
+        git_sec.trim(),
+        ndjson_sec.trim(),
+        log_sec.trim(),
+    )
+}
+
+fn run_inspect(opts: &InspectOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let ws = discover_workspace(opts.project)?;
+    let state_dir = resolve_active_state_dir(opts.state_dir, ws.repo_root.as_deref());
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+
+    let mut agent_reg = load_agent_registry(&state_dir);
+    let mut record = load_or_synthesize_agent_record(&agent_reg, &peer, &ws.project_name, opts.id)?;
+    let plan = build_agent_inspect_plan(&peer, &record.project_name, &record.agent_id)?;
+
+    if !opts.execute {
+        if opts.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "record": record,
+                    "probe_command": plan.probe_spec.display_command(),
+                    "executed": false,
+                }))?
+            );
+        } else {
+            println!("=== cheap-otto: Inspect Individual Agent Worktree ===");
+            println!("Project         : {}", record.project_name);
+            println!("Agent ID        : {}", record.agent_id);
+            println!("Worktree Branch : {}", record.branch_name);
+            println!(
+                "Harness / Model : {} (model={})",
+                record.harness.slug(),
+                record.model.as_deref().unwrap_or("default")
+            );
+            println!("SSH Probe       : $ {}", plan.probe_spec.display_command());
+            println!("\nPass `--execute` to query live worktree diff & telemetry over SSH.");
+        }
+        return Ok(());
+    }
+
+    let raw_out = capture_spec_stdout(&plan.probe_spec).ok_or_else(|| {
+        format!(
+            "failed to probe agent '{}/{}' over SSH on {}",
+            record.project_name,
+            record.agent_id,
+            peer.ssh_destination()
+        )
+    })?;
+
+    let (tmux_sec, git_sec, ndjson_sec, log_sec) = split_inspect_sections(&raw_out);
+    let fallback_sid = record
+        .provider_session_id
+        .clone()
+        .unwrap_or_else(|| format!("otto-{}", record.agent_id));
+    let summary = summarize_ndjson_and_log(ndjson_sec, log_sec, &fallback_sid);
+
+    if let Some(sid) = summary.provider_session_id {
+        record.provider_session_id = Some(sid);
+    }
+    if let Some(lbl) = summary.latest_activity_label {
+        record.current_activity = Some(lbl);
+    }
+    if let Some(resp) = summary.latest_response {
+        record.last_response = Some(resp);
+    }
+    if tmux_sec.starts_with("0:") {
+        record.status = AgentSessionStatus::Active;
+    } else if let Some(code) = summary.exit_code {
+        record.status = if code == 0 {
+            AgentSessionStatus::IdleDone
+        } else {
+            AgentSessionStatus::Failed
+        };
+    } else if let Some(dead_status) = tmux_sec.strip_prefix("1:") {
+        record.status = if dead_status.trim() == "0" {
+            AgentSessionStatus::IdleDone
+        } else {
+            AgentSessionStatus::Failed
+        };
+    }
+    record.updated_epoch_secs = current_epoch_secs();
+
+    agent_reg.upsert(record.clone());
+    if state_dir.exists() {
+        save_agent_registry(&state_dir, &agent_reg)?;
+    }
+
+    if opts.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "record": record,
+                "tmux_state": tmux_sec,
+                "git_status": git_sec,
+                "latest_response": record.last_response,
+                "log_tail": log_sec,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "=== cheap-otto: Live Agent Inspection ({}/{}) ===",
+        record.project_name, record.agent_id
+    );
+    println!("Status          : {:?}", record.status);
+    println!(
+        "Harness / Model : {} (model={}, effort={})",
+        record.harness.slug(),
+        record.model.as_deref().unwrap_or("default"),
+        record
+            .effort
+            .map_or("default", ReasoningEffort::as_flag_str)
+    );
+    println!(
+        "Session ID      : {}",
+        record.provider_session_id.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "Activity        : {}",
+        record.current_activity.as_deref().unwrap_or("-")
+    );
+    println!("\n--- Worktree Git Status & Diff ---\n{git_sec}");
+    if let Some(resp) = &record.last_response {
+        println!("\n--- Latest Agent Response ---\n{resp}");
+    }
+    Ok(())
+}
+
+fn run_ask(opts: &AskOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let ws = discover_workspace(opts.project)?;
+    let state_dir = resolve_active_state_dir(opts.state_dir, ws.repo_root.as_deref());
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+
+    let mut agent_reg = load_agent_registry(&state_dir);
+    let mut record = load_or_synthesize_agent_record(&agent_reg, &peer, &ws.project_name, opts.id)?;
+
+    let override_harness = match opts.agent {
+        Some(raw) if !raw.trim().is_empty() => Some(AgentRunner::parse(raw)?),
+        _ => None,
+    };
+    let override_effort = match opts.effort {
+        Some(raw) if !raw.trim().is_empty() => Some(ReasoningEffort::parse(raw)?),
+        _ => None,
+    };
+    let override_model = opts
+        .model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let plan = build_agent_ask_plan(
+        &peer,
+        &AgentAskParams {
+            record: &record,
+            prompt: opts.prompt,
+            override_harness,
+            override_model,
+            override_effort,
+            verify_and_commit: opts.verify,
+            run_async: opts.run_async,
+        },
+    )?;
+
+    if !opts.execute {
+        if opts.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "agent_id": record.agent_id,
+                    "project_name": record.project_name,
+                    "harness": plan.harness_config.runner.slug(),
+                    "model": plan.harness_config.model,
+                    "effort": plan.harness_config.effort,
+                    "resume_existing": plan.harness_config.resume_existing,
+                    "session_id": plan.harness_config.session_id,
+                    "command": plan.display_command,
+                    "executed": false,
+                }))?
+            );
+        } else {
+            println!("=== cheap-otto: Direct Per-Agent Query (`ask`) ===");
+            println!(
+                "Target Agent    : {}/{}",
+                record.project_name, record.agent_id
+            );
+            println!(
+                "Harness / Model : {} (model={}, resume={})",
+                plan.harness_config.runner.slug(),
+                plan.harness_config.model.as_deref().unwrap_or("default"),
+                plan.harness_config.resume_existing
+            );
+            println!("SSH Command     :\n  $ {}", plan.display_command);
+            println!("\nPass `--execute` to send this query directly to the agent.");
+        }
+        return Ok(());
+    }
+
+    let now = current_epoch_secs();
+    let next_turn = u32::try_from(record.turns.len()).unwrap_or(0) + 1;
+    record.harness = plan.harness_config.runner;
+    record.model.clone_from(&plan.harness_config.model);
+    record.effort = plan.harness_config.effort;
+    if plan.harness_config.session_id.is_some() {
+        record
+            .provider_session_id
+            .clone_from(&plan.harness_config.session_id);
+    }
+
+    if opts.run_async {
+        execute_command_spec(&plan.exec_spec)?;
+        record.status = AgentSessionStatus::Active;
+        record.current_activity = Some("Running async follow-up turn".to_string());
+        record.turns.push(AgentTurnEntry {
+            turn: next_turn,
+            prompt: opts.prompt.trim().to_string(),
+            harness: record.harness,
+            model: record.model.clone(),
+            effort: record.effort,
+            response_summary: None,
+            started_epoch_secs: now,
+        });
+        record.updated_epoch_secs = now;
+        agent_reg.upsert(record.clone());
+        save_agent_registry(&state_dir, &agent_reg)?;
+        sync_remote_agent_record(&peer, &record);
+
+        if opts.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "agent_id": record.agent_id,
+                    "project_name": record.project_name,
+                    "dispatched_async": true,
+                    "turn": next_turn,
+                }))?
+            );
+        } else {
+            println!(
+                "Dispatched async turn #{next_turn} to `otto-{}`. Inspect via `cheap-otto inspect --id {} --execute`.",
+                record.agent_id, record.agent_id
+            );
+        }
+        return Ok(());
+    }
+
+    let output = Command::new(&plan.exec_spec.program)
+        .args(&plan.exec_spec.args)
+        .output()?;
+    let stdout_raw = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr_raw = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    let fallback_sid = record
+        .provider_session_id
+        .clone()
+        .unwrap_or_else(|| format!("otto-{}", record.agent_id));
+    let parsed = if plan.harness_config.stream_json {
+        summarize_ndjson_and_log(&stdout_raw, "", &fallback_sid)
+    } else {
+        summarize_ndjson_and_log("", &stdout_raw, &fallback_sid)
+    };
+
+    if let Some(sid) = parsed.provider_session_id {
+        record.provider_session_id = Some(sid);
+    }
+    let clean_answer = parsed
+        .latest_response
+        .unwrap_or_else(|| stdout_raw.trim().to_string());
+    record.last_response = Some(clean_answer.clone());
+    record.status = if output.status.success() {
+        AgentSessionStatus::IdleDone
+    } else {
+        AgentSessionStatus::Failed
+    };
+    record.current_activity = Some(if output.status.success() {
+        "Idle (follow-up turn complete)".to_string()
+    } else {
+        "Follow-up turn failed".to_string()
+    });
+    record.turns.push(AgentTurnEntry {
+        turn: next_turn,
+        prompt: opts.prompt.trim().to_string(),
+        harness: record.harness,
+        model: record.model.clone(),
+        effort: record.effort,
+        response_summary: Some(clean_answer.clone()),
+        started_epoch_secs: now,
+    });
+    record.updated_epoch_secs = current_epoch_secs();
+
+    agent_reg.upsert(record.clone());
+    save_agent_registry(&state_dir, &agent_reg)?;
+    sync_remote_agent_record(&peer, &record);
+
+    if !output.status.success() {
+        return Err(format!(
+            "agent query exited with {}: {}",
+            output.status,
+            if stderr_raw.trim().is_empty() {
+                clean_answer
+            } else {
+                stderr_raw.trim().to_string()
+            }
+        )
+        .into());
+    }
+
+    if opts.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "agent_id": record.agent_id,
+                "project_name": record.project_name,
+                "turn": next_turn,
+                "harness": record.harness.slug(),
+                "model": record.model,
+                "provider_session_id": record.provider_session_id,
+                "response": clean_answer,
+            }))?
+        );
+    } else {
+        println!(
+            "=== Response from {}/{} [{} / {}] ===",
+            record.project_name,
+            record.agent_id,
+            record.harness.slug(),
+            record.model.as_deref().unwrap_or("default")
+        );
+        println!("{clean_answer}");
+    }
+    Ok(())
+}
+
+fn run_template_add(opts: &TemplateAddOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(opts.project)
+        .ok()
+        .and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(opts.state_dir, repo_root.as_deref());
+    let runner = AgentRunner::parse(opts.agent)?;
+    let effort = match opts.effort {
+        Some(raw) if !raw.trim().is_empty() => Some(ReasoningEffort::parse(raw)?),
+        _ => None,
+    };
+    let model = opts
+        .model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let tpl = TaskTemplate::new(&NewTemplateParams {
+        template_id: opts.id,
+        title: opts.title,
+        project_name: opts.project,
+        harness: runner,
+        model,
+        effort,
+        prompt: opts.task,
+        verify_command: opts.verify,
+        create_draft_pr: opts.draft_pr,
+    })?;
+
+    let mut reg = load_template_registry(&state_dir);
+    reg.upsert(tpl.clone());
+    save_template_registry(&state_dir, &reg)?;
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&tpl)?);
+    } else {
+        println!(
+            "Saved repeatable template '{}' ({} / model={}) to {}.",
+            tpl.template_id,
+            tpl.harness.slug(),
+            tpl.model.as_deref().unwrap_or("default"),
+            state_dir.join("templates.json").display()
+        );
+    }
+    Ok(())
+}
+
+fn run_template_list(
+    explicit_project: Option<&str>,
+    explicit_state_dir: Option<&Path>,
+    json_out: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(explicit_project)
+        .ok()
+        .and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(explicit_state_dir, repo_root.as_deref());
+    let reg = load_template_registry(&state_dir);
+
+    let filtered: Vec<&TaskTemplate> = reg
+        .templates
+        .iter()
+        .filter(|t| {
+            explicit_project
+                .map(str::trim)
+                .is_none_or(|proj| t.project_name.as_deref().is_none_or(|bound| bound == proj))
+        })
+        .collect();
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "templates": filtered }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "=== cheap-otto: Repeatable Task Templates ({}) ===",
+        filtered.len()
+    );
+    if filtered.is_empty() {
+        println!("  (none saved yet — add one with `cheap-otto template add --id ... --task ...`)");
+    } else {
+        for t in filtered {
+            println!(
+                "  * {:<22} [{} / model={} / effort={}] -> \"{}\"",
+                t.template_id,
+                t.harness.slug(),
+                t.model.as_deref().unwrap_or("default"),
+                t.effort.map_or("default", ReasoningEffort::as_flag_str),
+                t.title
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_template_run(opts: &TemplateRunOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(opts.project)
+        .ok()
+        .and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(opts.state_dir, repo_root.as_deref());
+    let reg = load_template_registry(&state_dir);
+    let tpl = reg.get(opts.id).ok_or_else(|| {
+        format!(
+            "template '{}' not found in {}",
+            opts.id,
+            state_dir.display()
+        )
+    })?;
+
+    let override_runner = match opts.agent {
+        Some(raw) if !raw.trim().is_empty() => Some(AgentRunner::parse(raw)?),
+        _ => None,
+    };
+    let override_effort = match opts.effort {
+        Some(raw) if !raw.trim().is_empty() => Some(ReasoningEffort::parse(raw)?),
+        _ => None,
+    };
+    let override_model = opts
+        .model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let merged = tpl.to_harness_config(override_runner, override_model, override_effort, None);
+    let target_project = opts.project.or(tpl.project_name.as_deref());
+
+    run_delegate(&DelegateOptions {
+        project: target_project,
+        task: &tpl.prompt,
+        id: opts.task_id.or(Some(&tpl.template_id)),
+        agent: merged.runner.slug(),
+        model: merged.model.as_deref(),
+        effort: merged.effort.map(ReasoningEffort::as_flag_str),
+        verify: &tpl.verify_command,
+        state_dir: Some(&state_dir),
+        json: opts.json,
+        execute: opts.execute,
+    })
+}
+
+fn run_template_schedule(
+    template_id: &str,
+    explicit_schedule_id: Option<&str>,
+    base_opts: &ScheduleAddOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(base_opts.project)
+        .ok()
+        .and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(base_opts.state_dir, repo_root.as_deref());
+    let reg = load_template_registry(&state_dir);
+    let tpl = reg.get(template_id).ok_or_else(|| {
+        format!(
+            "template '{template_id}' not found in {}",
+            state_dir.display()
+        )
+    })?;
+
+    let sched_id = explicit_schedule_id.unwrap_or(&tpl.template_id);
+    run_schedule_add(&ScheduleAddOptions {
+        id: sched_id,
+        project: base_opts.project.or(tpl.project_name.as_deref()),
+        every: base_opts.every,
+        daily: base_opts.daily,
+        weekly: base_opts.weekly,
+        ci: None,
+        task: Some(&tpl.prompt),
+        agent: tpl.harness.slug(),
+        model: tpl.model.as_deref(),
+        effort: tpl.effort.map(ReasoningEffort::as_flag_str),
+        verify: &tpl.verify_command,
+        branch: base_opts.branch,
+        on_change: false,
+        draft_pr: tpl.create_draft_pr,
+        allow_battery: base_opts.allow_battery,
+        run_at_load: base_opts.run_at_load,
+        state_dir: Some(&state_dir),
+        execute: base_opts.execute,
+    })
+}
+
+fn run_template_remove(
+    template_id: &str,
+    explicit_state_dir: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(explicit_state_dir, repo_root.as_deref());
+    let mut reg = load_template_registry(&state_dir);
+    if reg.remove(template_id) {
+        save_template_registry(&state_dir, &reg)?;
+        println!("Removed template '{template_id}'.");
+    } else {
+        println!("Template '{template_id}' was not present.");
+    }
+    Ok(())
+}
+
+fn run_serve_cmd(
+    host: &str,
+    port: u16,
+    pixel_port: u16,
+    explicit_state_dir: Option<&Path>,
+    explicit_workspaces_root: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let home = user_home_dir();
+    let state_dir = match explicit_state_dir {
+        Some(p) => p.to_path_buf(),
+        None => home
+            .as_ref()
+            .map_or_else(|| PathBuf::from(".cheap-otto"), |h| h.join(".cheap-otto")),
+    };
+    let workspaces_root = match explicit_workspaces_root {
+        Some(p) => p.to_path_buf(),
+        None => home.as_ref().map_or_else(
+            || PathBuf::from("otto-workspaces"),
+            |h| h.join("otto-workspaces"),
+        ),
+    };
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(run_serve(ServeConfig {
+        host: host.to_string(),
+        port,
+        pixel_port,
+        state_dir,
+        workspaces_root,
+        peer,
+    }))
+}
+
+fn is_local_port_open(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
+fn open_system_browser(url: &str) {
+    if cfg!(target_os = "windows") {
+        let _ = Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else if cfg!(target_os = "macos") {
+        let _ = Command::new("open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    } else {
+        let _ = Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
+fn run_ui(
+    port: u16,
+    pixel_port: u16,
+    explicit_state_dir: Option<&Path>,
+    no_open: bool,
+    execute: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(explicit_state_dir, repo_root.as_deref());
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+    let tunnel = peer.build_port_tunnel(&[3000, 5173, 8080, port, pixel_port])?;
+
+    let remote_start_script = format!(
+        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; \
+         mkdir -p ~/.pixel-agents ~/.cheap-otto ~/otto-workspaces; \
+         if command -v node >/dev/null 2>&1; then \
+           node -e 'const fs=require(\"fs\"),p=process.env.HOME+\"/.pixel-agents/config.json\";let c={{}};try{{c=JSON.parse(fs.readFileSync(p,\"utf8\"))}}catch{{}};c.standalone=Object.assign({{}},c.standalone,{{watchAllSessions:true}});c.hooksConsent=Object.assign({{}},c.hooksConsent,{{claude:\"granted\"}});fs.writeFileSync(p,JSON.stringify(c,null,2));'; \
+         fi; \
+         if command -v pixel-agents >/dev/null 2>&1; then \
+           tmux has-session -t cheapotto-pixel 2>/dev/null || tmux new-session -d -s cheapotto-pixel 'export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec pixel-agents --port {pixel_port} --host 127.0.0.1 --no-terminal'; \
+         fi; \
+         tmux kill-session -t cheapotto-serve 2>/dev/null || true; \
+         tmux new-session -d -s cheapotto-serve 'export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; exec cheap-otto serve --host 127.0.0.1 --port {port} --pixel-port {pixel_port}'"
+    );
+
+    let start_spec = peer.build_ssh_probe_spec(
+        "Start pixel-agents (:7421) and cheap-otto serve (:7420) on paired MacBook",
+        &remote_start_script,
+    );
+
+    let ui_url = format!("http://localhost:{port}");
+    let pixel_url = format!("http://localhost:{pixel_port}");
+
+    println!("=== cheap-otto: Mission Control GUI & Pixel Office ===");
+    println!(
+        "Paired MacBook  : {} ({})",
+        peer.alias,
+        peer.ssh_destination()
+    );
+    println!("Mission Control : {ui_url}");
+    println!("Pixel Office    : {pixel_url} (embedded + standalone Flat & Diorama views)");
+    println!("Remote Startup  :\n  $ {}", start_spec.display_command());
+
+    if !execute {
+        println!(
+            "\nPass `--execute` to start the remote M1 daemons, establish SSH port forwarding, and open Mission Control."
+        );
+        return Ok(());
+    }
+
+    println!("\n--- Starting M1 Daemons & Tunnel ---");
+    execute_command_spec(&start_spec)?;
+
+    if state_dir.join("peer.json").exists()
+        && let Some(home) = user_home_dir()
+    {
+        let ssh_dir = home.join(".ssh");
+        let ssh_cfg_path = ssh_dir.join("config");
+        let existing = fs::read_to_string(&ssh_cfg_path).unwrap_or_default();
+        if let Ok(merged) =
+            merge_ssh_config_block(&existing, &peer.alias, &tunnel.ssh_config_snippet)
+        {
+            let _ = fs::write(&ssh_cfg_path, merged);
+        }
+    }
+
+    if !is_local_port_open(port) || !is_local_port_open(pixel_port) {
+        let port_str = peer.ssh_port.to_string();
+        let dest = peer.ssh_destination();
+        let fwd_ui = format!("127.0.0.1:{port}:127.0.0.1:{port}");
+        let fwd_px = format!("127.0.0.1:{pixel_port}:127.0.0.1:{pixel_port}");
+        println!("  ==> Spawning background SSH tunnel for :{port} and :{pixel_port}");
+        let _ = Command::new("ssh")
+            .args([
+                "-N",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ServerAliveInterval=30",
+                "-p",
+                &port_str,
+                "-L",
+                &fwd_ui,
+                "-L",
+                &fwd_px,
+                &dest,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        for _ in 0..12 {
+            if is_local_port_open(port) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    if !no_open {
+        open_system_browser(&ui_url);
+    }
+    println!("\nMission Control is live at {ui_url}");
     Ok(())
 }

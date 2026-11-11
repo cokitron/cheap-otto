@@ -4,7 +4,8 @@
 
 Instead of tying up your Windows terminal, branch, and CPU waiting for coding agents or heavy test suites, `cheap-otto` pairs your **Windows PC** and **headless MacBook** over LAN or Tailscale SSH so they work as **one machine**:
 1. **Cross-OS Dev Bridge & Interactive Terminal (`pair`, `sync`, `exec`, `shell`):** Sync your active Windows repo to the MacBook in seconds (protecting uncommitted manual M1 edits by default), run native macOS/ARM64 builds from Windows, forward dev ports (`3000`, `5173`, `8080`) to Windows `localhost`, or log straight into a persistent `manual` `tmux` terminal on the M1 (`cheap-otto shell`).
-2. **Parallel Agent Worktree Farm & Live Visibility (`delegate`, `attach`, `logs`, `jobs`, `pull`):** Offload coding tasks (`claude`, `agy`, `kiro-cli`) to **isolated Git worktrees** (`otto/<task-id>`) with `remain-on-exit` `tmux` panes and persistent logs (`~/.cheap-otto/logs/`), attach live (`cheap-otto attach --id <id>`) or tail output (`cheap-otto logs --id <id> -f`), and fetch verified branches back to Windows.
+2. **Multi-Harness Parallel Agent Farm & Per-Agent Direct Querying (`harnesses`, `delegate`, `inspect`, `ask`, `pull`):** Switch effortlessly between **Claude Code** (`claude`), **Antigravity** (`agy`), **Kiro CLI** (`kiro`), and **Custom Shell** (`custom`), pick exact `--model` (`sonnet`, `opus`, `gemini-4-carbon-high`, etc.) and `--effort` (`low`..`max`), and query or instruct any individual agent directly (`cheap-otto inspect --id <id>` / `cheap-otto ask --id <id> --prompt "..."`) with full `--resume` conversation continuity.
+3. **Mission Control Web GUI + `pixel-agents` Visual Office (`serve`, `ui`, `template`):** Watch your agents work inside a live **Pixel Office** (`pixel-agents` Flat & 3D Diorama views on `:7421` — strictly decoupled as the visual layer) alongside a full **Mission Control GUI & REST API** (`http://localhost:7420`) with repeatable task playbooks (`cheap-otto template`) that work identically from the browser and from external AI agents (`--json` / `/api/*`).
 3. **Recurring CI & Scheduled Agents (`schedule`, `runs`):** Set up recurring native macOS `launchd` jobs (`--every 15m --on-change`, `--daily 02:00`, `--weekly MON@03:00`) for commit-polled CI pipelines or overnight autonomous agent runs with Draft PRs—gated automatically by AC-power and passive M1 thermal checks, with structured JSONL history (`cheap-otto runs`).
 4. **100% Reversible Clamshell & Battery Guardrails (`init`, `doctor`, `arbiter`, `restore`):** Disables AC lid-close sleep (`disablesleep 1`), caps battery charge at **78%** so staying plugged in 24/7 never swells the battery, keeps 5-minute battery fallback sleep if unplugged, and arbitrates unified RAM/thermals on fanless M1/M2/M3 MacBook Airs.
 
@@ -49,24 +50,45 @@ cargo run -- sync --execute
 cargo run -- exec --cmd "cargo test --all-targets" --execute
 ```
 
-### 3. Delegate Parallel Coding Tasks & Pull Branches Back (`src/worktree.rs`)
+### 3. Multi-Harness Delegation, Direct Per-Agent Querying & Pull (`src/worktree.rs`, `src/agent_session.rs`)
 ```bash
-# Delegate a task to an isolated Git worktree + background tmux session on the MacBook
-cargo run -- delegate \
+# Discover installed harnesses (`claude`, `agy`, `kiro`, `custom`), auth state, and models on the M1
+cheap-otto harnesses --remote
+
+# Delegate a task with explicit harness, model, and reasoning effort
+cheap-otto delegate \
   --id fix-auth-race \
   --agent claude \
+  --model sonnet \
+  --effort high \
   --verify "cargo test --all-targets" \
   --task "Fix the token refresh race condition and add unit tests" \
   --execute
 
-# Check active agent tmux sessions and Git worktrees on the MacBook
-cargo run -- jobs --execute
-
-# Inspect auto-detected repo, config path, and multi-project workspace registry
-cargo run -- projects
+# Query or instruct that specific agent directly (with automatic `--resume` continuity or model/harness switch!)
+cheap-otto inspect --id fix-auth-race --execute
+cheap-otto ask --id fix-auth-race --model opus --prompt "Summarize your root-cause fix and edge cases" --execute
 
 # Fetch (and optionally --merge / --cleanup) the finished `otto/fix-auth-race` branch into Windows
-cargo run -- pull --id fix-auth-race --execute --merge
+cheap-otto pull --id fix-auth-race --execute --merge
+```
+
+### 4. Mission Control Web GUI, `pixel-agents` Visual Office & Playbook Templates (`src/server.rs`, `src/template.rs`)
+```bash
+# Start `pixel-agents` (:7421, strictly visual Flat & 3D Diorama office) + `cheap-otto serve` (:7420),
+# establish SSH localhost port-forwarding, and open Mission Control at http://localhost:7420
+cheap-otto ui --execute
+
+# Save repeatable task playbooks usable from both the Web GUI and agentic CLI (`--json`)
+cheap-otto template add \
+  --id edge-audit \
+  --title "Edge-Case Test Audit" \
+  --agent agy \
+  --model gemini-4-carbon-high \
+  --effort high \
+  --task "Audit public modules for missing error-path tests and add them" \
+  --draft-pr
+cheap-otto template run --id edge-audit --execute
 ```
 
 ### 4. Interactive M1 Terminal & Live Job Visibility (`src/terminal.rs`)

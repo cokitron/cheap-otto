@@ -9,6 +9,7 @@
 
 use crate::bridge::{BridgeError, PeerNode, validate_safe_identifier};
 use crate::command::CommandSpec;
+use crate::harness::{HarnessError, HarnessRunConfig, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -27,6 +28,9 @@ pub enum WorktreeError {
     /// Unrecognized `--agent` runner string.
     #[error("unsupported agent runner '{0}': expected 'claude', 'agy', 'kiro', or 'custom'")]
     UnsupportedAgent(String),
+    /// Invalid `--model` or `--session-id` argument.
+    #[error("{0}")]
+    InvalidHarnessOption(String),
 }
 
 /// Coding agent CLI invoked inside the remote MacBook Git worktree.
@@ -57,6 +61,17 @@ impl AgentRunner {
         }
     }
 
+    /// Canonical short identifier (`"claude"`, `"agy"`, `"kiro"`, `"custom"`).
+    #[must_use = "returns the canonical harness slug"]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Antigravity => "agy",
+            Self::KiroCli => "kiro",
+            Self::CustomShell => "custom",
+        }
+    }
+
     /// Formats the headless invocation command for human-readable display.
     #[must_use = "returns the shell command to invoke the agent"]
     pub fn build_agent_command(self, escaped_prompt: &str) -> String {
@@ -64,8 +79,12 @@ impl AgentRunner {
             Self::ClaudeCode => {
                 format!("claude -p \"{escaped_prompt}\" --dangerously-skip-permissions")
             }
-            Self::Antigravity => format!("agy --prompt \"{escaped_prompt}\""),
-            Self::KiroCli => format!("kiro-cli chat --non-interactive \"{escaped_prompt}\""),
+            Self::Antigravity => {
+                format!("agy -p \"{escaped_prompt}\" --dangerously-skip-permissions")
+            }
+            Self::KiroCli => format!(
+                "kiro-cli chat --no-interactive --trust-all-tools --trust-workspace \"{escaped_prompt}\""
+            ),
             Self::CustomShell => escaped_prompt.to_string(),
         }
     }
@@ -76,15 +95,18 @@ impl AgentRunner {
         let quoted = posix_single_quote(raw_prompt);
         match self {
             Self::ClaudeCode => format!("claude -p {quoted} --dangerously-skip-permissions"),
-            Self::Antigravity => format!("agy --prompt {quoted}"),
-            Self::KiroCli => format!("kiro-cli chat --non-interactive {quoted}"),
+            Self::Antigravity => format!("agy -p {quoted} --dangerously-skip-permissions"),
+            Self::KiroCli => format!(
+                "kiro-cli chat --no-interactive --trust-all-tools --trust-workspace {quoted}"
+            ),
             Self::CustomShell => raw_prompt.to_string(),
         }
     }
 }
 
 /// Wraps an arbitrary string in POSIX single quotes (`'...'`), escaping embedded single quotes as `'\''`.
-pub(crate) fn posix_single_quote(input: &str) -> String {
+#[must_use = "returns POSIX single-quoted string safe for remote shell interpolation"]
+pub fn posix_single_quote(input: &str) -> String {
     let mut quoted = String::with_capacity(input.len() + 2);
     quoted.push('\'');
     for ch in input.chars() {
@@ -114,8 +136,20 @@ pub struct DelegatedWorktreePlan {
     /// Persistent log file path on the MacBook (`~/.cheap-otto/logs/<project>/<task-id>.log`).
     #[serde(default)]
     pub remote_log_file: String,
+    /// Persistent `stream-json` NDJSON event log (`~/.cheap-otto/events/<project>/<task-id>.ndjson`).
+    #[serde(default)]
+    pub remote_events_file: String,
     /// Selected coding agent runner.
     pub agent: AgentRunner,
+    /// Optional model override (`sonnet`, `gemini-4-carbon-high`, etc.).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional reasoning effort override (`low`..`max`).
+    #[serde(default)]
+    pub effort: Option<ReasoningEffort>,
+    /// Optional bound session/conversation ID for follow-up queries (`cheap-otto ask`).
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Verification command run prior to committing changes.
     pub verify_command: String,
     /// Whether the arbiter should evict idle local LLM weights before running verification.
@@ -203,6 +237,38 @@ pub fn build_delegate_plan(
     agent: AgentRunner,
     verify_command: &str,
 ) -> Result<DelegatedWorktreePlan, WorktreeError> {
+    let cfg = HarnessRunConfig {
+        runner: agent,
+        model: None,
+        effort: None,
+        session_id: None,
+        resume_existing: false,
+        stream_json: matches!(agent, AgentRunner::ClaudeCode | AgentRunner::Antigravity),
+    };
+    build_delegate_plan_with_harness(
+        peer,
+        project_name,
+        prompt,
+        custom_task_id,
+        &cfg,
+        verify_command,
+    )
+}
+
+/// Builds a worktree delegation plan with explicit [`HarnessRunConfig`] (`--model`, `--effort`,
+/// `--session-id`, and `stream-json` telemetry teeing into `~/.cheap-otto/events/`).
+///
+/// # Errors
+/// Returns [`WorktreeError`] if `project_name`, `prompt`, `custom_task_id`, or `harness` is invalid.
+#[must_use = "delegated worktree plan must be executed or displayed"]
+pub fn build_delegate_plan_with_harness(
+    peer: &PeerNode,
+    project_name: &str,
+    prompt: &str,
+    custom_task_id: Option<&str>,
+    harness: &HarnessRunConfig,
+    verify_command: &str,
+) -> Result<DelegatedWorktreePlan, WorktreeError> {
     let remote_repo_dir = peer.remote_project_dir(project_name)?;
     let trimmed_prompt = prompt.trim();
     if trimmed_prompt.is_empty() {
@@ -220,26 +286,29 @@ pub fn build_delegate_plan(
         _ => slugify_task_prompt(trimmed_prompt),
     };
 
+    let safe_agent_cmd = harness
+        .build_remote_command(trimmed_prompt)
+        .map_err(|e| match e {
+            HarnessError::Worktree(w) => w,
+            other => WorktreeError::InvalidHarnessOption(other.to_string()),
+        })?;
+
     let clean_project = project_name.trim().to_string();
     let branch_name = format!("otto/{task_id}");
     let remote_worktree_dir = format!("{remote_repo_dir}/.otto-worktrees/{task_id}");
     let tmux_session_name = format!("otto-{task_id}");
     let remote_log_dir = format!("~/.cheap-otto/logs/{clean_project}");
+    let remote_events_dir = format!("~/.cheap-otto/events/{clean_project}");
     let remote_log_file = format!("{remote_log_dir}/{task_id}.log");
+    let remote_events_file = format!("{remote_events_dir}/{task_id}.ndjson");
     let remote_rc_file = format!("{remote_log_dir}/.{task_id}.rc");
+    let agent_rc_file = format!("{remote_log_dir}/.{task_id}.agent_rc");
 
     let verify_cmd = if verify_command.trim().is_empty() {
         "cargo test".to_string()
     } else {
         verify_command.trim().to_string()
     };
-
-    let escaped_prompt = trimmed_prompt
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`");
-    let agent_invocation = agent.build_agent_command(&escaped_prompt);
 
     let ssh_dest = peer.ssh_destination();
     let port = peer.ssh_port;
@@ -250,30 +319,36 @@ pub fn build_delegate_plan(
     );
 
     let execution_steps = vec![
-        // Step 1: Ensure remote base repository exists and push current Windows HEAD
         format!(
-            "ssh -p {port} {ssh_dest} \"mkdir -p {remote_repo_dir} {remote_log_dir} && git -C {remote_repo_dir} init\""
+            "ssh -p {port} {ssh_dest} \"mkdir -p {remote_repo_dir} {remote_log_dir} {remote_events_dir} && git -C {remote_repo_dir} init\""
         ),
         format!("git push {git_remote_url} HEAD:refs/heads/otto-base/{task_id} --force"),
-        // Step 2: Create isolated Git worktree for this parallel task on the MacBook
         format!(
             "ssh -p {port} {ssh_dest} \"git -C {remote_repo_dir} worktree add -B {branch_name} {remote_worktree_dir} refs/heads/otto-base/{task_id}\""
         ),
-        // Step 3: Launch detached tmux session (remain-on-exit + persistent log tee)
         format!(
-            "ssh -p {port} {ssh_dest} \"tmux new-session -d -s {tmux_session_name} 'cd {remote_worktree_dir} && ({agent_invocation} && {verify_cmd} && git add -A && git commit -m \\\"otto({task_id}): completed delegated task\\\") 2>&1 | tee -a {remote_log_file}' \\; set-option -t {tmux_session_name} remain-on-exit on\""
+            "ssh -p {port} {ssh_dest} \"tmux new-session -d -s {tmux_session_name} 'cd {remote_worktree_dir} && ({safe_agent_cmd} && {verify_cmd} && git add -A && git commit -m \\\"otto({task_id}): completed delegated task\\\") 2>&1 | tee -a {remote_log_file}' \\; set-option -t {tmux_session_name} remain-on-exit on\""
         ),
     ];
 
-    let remote_init_script =
-        format!("mkdir -p {remote_repo_dir} {remote_log_dir} && git -C {remote_repo_dir} init");
+    let remote_init_script = format!(
+        "mkdir -p {remote_repo_dir} {remote_log_dir} {remote_events_dir} && git -C {remote_repo_dir} init"
+    );
     let push_refspec = format!("HEAD:refs/heads/otto-base/{task_id}");
     let remote_worktree_script = format!(
         "git -C {remote_repo_dir} worktree add -B {branch_name} {remote_worktree_dir} refs/heads/otto-base/{task_id}"
     );
-    let safe_agent_cmd = agent.build_remote_safe_command(trimmed_prompt);
+
+    let agent_stage = if harness.stream_json {
+        format!(
+            "rm -f {agent_rc_file}; {{ {safe_agent_cmd}; printf '%s' \"$?\" > {agent_rc_file}; }} | tee -a {remote_events_file}; test \"$(cat {agent_rc_file} 2>/dev/null || echo 1)\" = \"0\""
+        )
+    } else {
+        safe_agent_cmd
+    };
+
     let inner_tmux_pipeline = format!(
-        "cd {remote_worktree_dir} && source ~/.zshrc 2>/dev/null || true; source ~/.cargo/env 2>/dev/null || true; {{ {{ {safe_agent_cmd} && {verify_cmd} && git add -A && git commit -m \"otto({task_id}): completed delegated task\"; printf '%s' \"$?\" > {remote_rc_file}; }} 2>&1 | tee -a {remote_log_file}; }}; rc=$(cat {remote_rc_file} 2>/dev/null || echo 1); rm -f {remote_rc_file}; printf '\\n[OTTO_STATUS exit=%s]\\n' \"$rc\" | tee -a {remote_log_file}; exit \"$rc\""
+        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; cd {remote_worktree_dir} && source ~/.zshrc 2>/dev/null || true; source ~/.cargo/env 2>/dev/null || true; {{ {{ {agent_stage} && {verify_cmd} && (git diff --quiet && git diff --cached --quiet || (git add -A && git commit -m \"otto({task_id}): completed delegated task\")); printf '%s' \"$?\" > {remote_rc_file}; }} 2>&1 | tee -a {remote_log_file}; }}; rc=$(cat {remote_rc_file} 2>/dev/null || echo 1); rm -f {remote_rc_file} {agent_rc_file}; printf '\\n[OTTO_STATUS exit=%s]\\n' \"$rc\" | tee -a {remote_log_file}; exit \"$rc\""
     );
     let remote_tmux_script = format!(
         "tmux kill-session -t {tmux_session_name} 2>/dev/null || true; tmux new-session -d -s {tmux_session_name} {} && tmux set-option -t {tmux_session_name} remain-on-exit on",
@@ -282,7 +357,7 @@ pub fn build_delegate_plan(
 
     let execution_specs = vec![
         CommandSpec::new(
-            "Initialize base Git repository and log directory on MacBook",
+            "Initialize base Git repository, logs, and event directories on MacBook",
             "ssh",
             ["-p", &port_str, &ssh_dest, &remote_init_script],
         ),
@@ -310,7 +385,11 @@ pub fn build_delegate_plan(
         remote_worktree_dir,
         tmux_session_name,
         remote_log_file,
-        agent,
+        remote_events_file,
+        agent: harness.runner,
+        model: harness.model.clone(),
+        effort: harness.effort,
+        session_id: harness.session_id.clone(),
         verify_command: verify_cmd,
         evict_idle_llm_for_headroom: true,
         execution_steps,

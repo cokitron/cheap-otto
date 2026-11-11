@@ -361,3 +361,172 @@ fn schedule_lifecycle_persists_launchd_jobs_and_supports_runs_and_restore()
     let _ = fs::remove_dir_all(&temp);
     Ok(())
 }
+
+#[test]
+fn multi_harness_delegate_inspect_ask_and_templates_work_end_to_end()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = create_isolated_temp_dir("multi-harness-control-plane")?;
+    let repo_dir = temp.join("office-fleet");
+    fs::create_dir_all(&repo_dir)?;
+
+    let _ = Command::new("git")
+        .current_dir(&repo_dir)
+        .args(["init", "-b", "main"])
+        .status();
+
+    let state_dir = repo_dir.join(".cheap-otto");
+    let state_str = state_dir.to_string_lossy().into_owned();
+
+    // 1. Discover local harnesses in JSON mode
+    let (h_ok, h_out, h_err) = run_cli_in(
+        &repo_dir,
+        &["harnesses", "--json", "--state-dir", &state_str],
+    )?;
+    assert!(h_ok, "harnesses --json failed: {h_err}");
+    assert!(h_out.contains("\"id\": \"claude\""));
+    assert!(h_out.contains("\"id\": \"agy\""));
+
+    // 2. Delegate an addressable agent with explicit harness + model + effort in JSON mode
+    let (del_ok, del_out, del_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "delegate",
+            "--id",
+            "auth-worker",
+            "--agent",
+            "claude",
+            "--model",
+            "sonnet",
+            "--effort",
+            "high",
+            "--task",
+            "Audit auth token lifetimes",
+            "--json",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(del_ok, "delegate --json failed: {del_err}");
+    assert!(del_out.contains("\"agent_id\": \"auth-worker\""));
+    assert!(del_out.contains("\"model\": \"sonnet\""));
+    assert!(state_dir.join("agents.json").exists());
+
+    // 3. Inspect & Ask dry-run against `auth-worker` (preserves `--resume` on same harness, allows model upgrade)
+    let (ins_ok, ins_out, ins_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "inspect",
+            "--id",
+            "auth-worker",
+            "--json",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(ins_ok, "inspect --json failed: {ins_err}");
+    assert!(ins_out.contains("\"agent_id\": \"auth-worker\""));
+
+    let (ask_ok, ask_out, ask_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "ask",
+            "--id",
+            "auth-worker",
+            "--model",
+            "opus",
+            "--prompt",
+            "Summarize your findings in two bullet points",
+            "--json",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(ask_ok, "ask --json failed: {ask_err}");
+    assert!(ask_out.contains("\"resume_existing\": true"));
+    assert!(ask_out.contains("--resume"));
+    assert!(ask_out.contains("\"model\": \"opus\""));
+
+    // 4. Repeatable template lifecycle (`add` -> `list` -> `run` with override -> `schedule` -> `remove`)
+    let (tadd_ok, _, tadd_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "template",
+            "add",
+            "--id",
+            "edge-case-audit",
+            "--title",
+            "Edge Case Test Audit",
+            "--agent",
+            "agy",
+            "--model",
+            "gemini-4-carbon-high",
+            "--effort",
+            "high",
+            "--task",
+            "Add edge-case unit tests for parsers",
+            "--draft-pr",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(tadd_ok, "template add failed: {tadd_err}");
+    assert!(state_dir.join("templates.json").exists());
+
+    let (tls_ok, tls_out, tls_err) = run_cli_in(
+        &repo_dir,
+        &["template", "list", "--json", "--state-dir", &state_str],
+    )?;
+    assert!(tls_ok, "template list failed: {tls_err}");
+    assert!(tls_out.contains("edge-case-audit"));
+    assert!(tls_out.contains("gemini-4-carbon-high"));
+
+    let (trun_ok, trun_out, trun_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "template",
+            "run",
+            "--id",
+            "edge-case-audit",
+            "--task-id",
+            "audit-run-1",
+            "--json",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(trun_ok, "template run failed: {trun_err}");
+    assert!(trun_out.contains("\"agent_id\": \"audit-run-1\""));
+    assert!(trun_out.contains("\"harness\": \"agy\""));
+
+    let (tsch_ok, tsch_out, tsch_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "template",
+            "schedule",
+            "--id",
+            "edge-case-audit",
+            "--daily",
+            "03:15",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(tsch_ok, "template schedule failed: {tsch_err}");
+    assert!(tsch_out.contains("daily at 03:15"));
+
+    let (trm_ok, _, trm_err) = run_cli_in(
+        &repo_dir,
+        &[
+            "template",
+            "remove",
+            "--id",
+            "edge-case-audit",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(trm_ok, "template remove failed: {trm_err}");
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}

@@ -7,6 +7,7 @@
 
 use crate::bridge::{BridgeError, PeerNode, validate_safe_identifier};
 use crate::command::CommandSpec;
+use crate::harness::{HarnessError, HarnessRunConfig, ReasoningEffort};
 use crate::workspace::parse_git_branch;
 use crate::worktree::{AgentRunner, WorktreeError, posix_single_quote};
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,9 @@ pub enum ScheduleError {
     /// Scheduled agent task prompt was empty.
     #[error("scheduled agent task prompt cannot be empty")]
     EmptyPrompt,
+    /// Invalid `--model` or `--effort` flag on a scheduled agent job.
+    #[error(transparent)]
+    Harness(#[from] HarnessError),
 }
 
 /// Day of week for weekly `launchd` `StartCalendarInterval` rules (`0 = Sunday .. 6 = Saturday`).
@@ -272,6 +276,12 @@ pub enum ScheduledWorkload {
         branch: String,
         /// Coding agent CLI (`claude`, `agy`, `kiro`, or `custom`).
         agent: AgentRunner,
+        /// Optional model override (`sonnet`, `gemini-4-carbon-high`, etc.).
+        #[serde(default)]
+        model: Option<String>,
+        /// Optional reasoning effort override (`low`..`max`).
+        #[serde(default)]
+        effort: Option<ReasoningEffort>,
         /// Task prompt passed to the agent.
         prompt: String,
         /// Verification gate command that must pass before committing.
@@ -486,6 +496,8 @@ pub fn build_schedule_install_plan(
         ScheduledWorkload::AgentTask {
             branch,
             agent,
+            model,
+            effort,
             prompt,
             verify_command,
             create_draft_pr,
@@ -496,6 +508,15 @@ pub fn build_schedule_install_plan(
             if clean_prompt.is_empty() {
                 return Err(ScheduleError::EmptyPrompt);
             }
+            let h_cfg = HarnessRunConfig {
+                runner: *agent,
+                model: model.clone(),
+                effort: *effort,
+                session_id: None,
+                resume_existing: false,
+                stream_json: false,
+            };
+            h_cfg.validate()?;
             let clean_verify = if verify_command.trim().is_empty() {
                 "cargo test".to_string()
             } else {
@@ -504,6 +525,8 @@ pub fn build_schedule_install_plan(
             ScheduledWorkload::AgentTask {
                 branch: clean_branch,
                 agent: *agent,
+                model: model.clone(),
+                effort: *effort,
                 prompt: clean_prompt.to_string(),
                 verify_command: clean_verify,
                 create_draft_pr: *create_draft_pr,
@@ -676,11 +699,23 @@ pub fn render_runner_script(peer: &PeerNode, spec: &ScheduledJobSpec) -> String 
         ScheduledWorkload::AgentTask {
             branch,
             agent,
+            model,
+            effort,
             prompt,
             verify_command,
             create_draft_pr,
         } => {
-            let safe_agent = agent.build_remote_safe_command(prompt);
+            let h_cfg = HarnessRunConfig {
+                runner: *agent,
+                model: model.clone(),
+                effort: *effort,
+                session_id: None,
+                resume_existing: false,
+                stream_json: false,
+            };
+            let safe_agent = h_cfg
+                .build_remote_command(prompt)
+                .unwrap_or_else(|_| agent.build_remote_safe_command(prompt));
             let pr_tail = if *create_draft_pr {
                 format!(
                     " && git push origin HEAD:refs/heads/otto/sched-{job_id} --force && (gh pr create --draft --title \"otto({job_id}): scheduled agent update\" --body \"Automated scheduled run from cheap-otto.\" --head \"otto/sched-{job_id}\" --base \"{branch}\" 2>/dev/null || true)"
@@ -1007,6 +1042,8 @@ mod tests {
                 workload: ScheduledWorkload::AgentTask {
                     branch: "main".to_string(),
                     agent: AgentRunner::ClaudeCode,
+                    model: Some("opus".to_string()),
+                    effort: Some(ReasoningEffort::High),
                     prompt: "Audit dependencies & fix compiler warnings".to_string(),
                     verify_command: "cargo test --all-targets".to_string(),
                     create_draft_pr: true,

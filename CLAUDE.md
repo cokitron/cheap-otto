@@ -37,6 +37,11 @@ cheapotto/
     ├── workspace.rs                  # Multi-project Git discovery, config hierarchy & WorkspaceRegistry
     ├── bridge.rs                     # Option 5: PeerNode, dirty-guarded WorkspaceSyncPlan, RemoteExec, PortTunnelPlan
     ├── terminal.rs                   # Interactive M1 shell (`manual` tmux / zsh), live `attach`, and `logs`
+    ├── harness.rs                    # Multi-harness catalog (`claude`, `agy`, `kiro`, `custom`), `--model`/`--effort`, `stream-json` -> PixelHookPayload
+    ├── agent_session.rs              # Addressable per-agent session registry (`agents.json`), `inspect`, and stateful `ask` (`--resume`)
+    ├── template.rs                   # Repeatable task playbooks (`templates.json`) for one-click UI/CLI delegation & scheduling
+    ├── server.rs                     # `cheap-otto serve` (`axum` `:7420`) shared REST API + `pixel-agents` (`:7421`) event forwarder
+    ├── ui_assets.rs                  # Embedded single-page Mission Control Web GUI (Split/Office/Console views)
     ├── worktree.rs                   # Option 1: AgentRunner, DelegatedWorktreePlan (remain-on-exit + tee logs), WorktreePullPlan
     ├── schedule.rs                   # Reversible macOS launchd CI & autonomous agent scheduler + JSONL run ledger
     ├── hardware.rs                   # HardwareProfile, CpuArch, ThermalLevel, MemoryBudget, sysctl/vm_stat parsers

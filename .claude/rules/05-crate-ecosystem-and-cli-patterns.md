@@ -15,9 +15,10 @@ paths:
 | Crate | Version | Purpose & Idiomatic Usage |
 | :--- | :--- | :--- |
 | **`clap`** | `4.5` (`derive`) | Declarative CLI argument & subcommand parsing (`#[derive(Parser, Subcommand, Debug)]`). |
-| **`serde`** | `1.0` (`derive`) | Deterministic serialization/deserialization of hardware profiles, `pmset` backups, and reports. |
-| **`serde_json`** | `1.0` | Human-readable JSON persistence (`serde_json::to_string_pretty` for `.cheap-otto/state-backup.json`). |
+| **`serde`** | `1.0` (`derive`) | Deterministic serialization/deserialization of hardware profiles, `pmset` backups, agent sessions, and templates. |
+| **`serde_json`** | `1.0` | Human-readable JSON persistence & `stream-json` NDJSON parsing. |
 | **`thiserror`** | `2.0` | Zero-boilerplate `std::error::Error` and `Display` implementations on domain error enums. |
+| **`axum` / `tokio` / `tower-http`** | `0.8` / `1.43` / `0.6` | Powers the `cheap-otto serve` HTTP/JSON Mission Control & REST API daemon (`:7420`) and `pixel-agents` hook forwarder. |
 
 ### Dependency Addition Policy
 - **Prefer `std` first:** Do not add external crates for string manipulation, simple path joining, or basic formatting when the Rust standard library (`std::str`, `std::path`, `std::fs`, `std::fmt`) suffices.
