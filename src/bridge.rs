@@ -314,18 +314,22 @@ impl PeerNode {
             "node_modules/".to_string(),
             ".git/index.lock".to_string(),
             ".cheap-otto/".to_string(),
+            ".otto-worktrees/".to_string(),
             ".DS_Store".to_string(),
         ];
 
         let port_str = self.ssh_port.to_string();
         let dest = self.ssh_destination();
+        let exclude_worktrees = format!(
+            "(grep -qxF '/.otto-worktrees/' {remote_project_dir}/.git/info/exclude 2>/dev/null || echo '/.otto-worktrees/' >> {remote_project_dir}/.git/info/exclude)"
+        );
         let remote_init_script = if force_overwrite {
             format!(
-                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if git -C {remote_project_dir} rev-parse --verify HEAD >/dev/null 2>&1; then git -C {remote_project_dir} reset --hard HEAD && git -C {remote_project_dir} clean -fd; fi"
+                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && {exclude_worktrees} && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if git -C {remote_project_dir} rev-parse --verify HEAD >/dev/null 2>&1; then git -C {remote_project_dir} reset --hard HEAD && git -C {remote_project_dir} clean -fd -e .otto-worktrees/; fi"
             )
         } else {
             format!(
-                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if [ -n \"$(git -C {remote_project_dir} status --porcelain 2>/dev/null)\" ]; then echo 'Refusing to overwrite uncommitted manual changes in {remote_project_dir}; commit/stash via cheap-otto shell or pass --force.' >&2; exit 2; fi"
+                "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && {exclude_worktrees} && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if [ -n \"$(git -C {remote_project_dir} status --porcelain 2>/dev/null)\" ]; then echo 'Refusing to overwrite uncommitted manual changes in {remote_project_dir}; commit/stash via cheap-otto shell or pass --force.' >&2; exit 2; fi"
             )
         };
         let remote_checkout_script =

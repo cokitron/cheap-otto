@@ -1,4 +1,5 @@
 /target/
 /.cheap-otto/
+/.otto-worktrees/
 *.pdb
 *.DS_Store
