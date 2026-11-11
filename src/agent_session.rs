@@ -459,20 +459,40 @@ pub fn build_agent_ask_plan(
              {agent_exec}; rc=$?; printf '\\n[OTTO_STATUS exit=%s]\\n' \"$rc\" | tee -a {log_file}; exit \"$rc\""
         );
         format!(
-            "tmux kill-session -t {tmux_name} 2>/dev/null || true; tmux new-session -d -s {tmux_name} {} && tmux set-option -t {tmux_name} remain-on-exit on",
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; \
+             tmux kill-session -t {tmux_name} 2>/dev/null || true; \
+             tmux new-session -d -s {tmux_name} {} && tmux set-option -t {tmux_name} remain-on-exit on",
             posix_single_quote(&inner)
         )
     } else {
-        format!(
+        // Execute synchronous `ask` inside the `tmux` server so macOS Login Keychain OAuth
+        // credentials (`claude` / `agy`) are inherited identically to `delegate`, while blocking
+        // cleanly via `tmux wait-for` (zero polling).
+        let out_tmp = format!("~/.cheap-otto/logs/{project}/.{agent_id}.ask_out");
+        let sync_rc_tmp = format!("~/.cheap-otto/logs/{project}/.{agent_id}.ask_sync_rc");
+        let wait_chan = format!("otto-ask-{project}-{agent_id}");
+        let inner = format!(
             "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; \
              cd {wt_dir} && source ~/.zshrc 2>/dev/null || true; source ~/.cargo/env 2>/dev/null || true; \
-             {agent_exec}"
+             {{ {agent_exec}; }} > {out_tmp} 2>&1; rc=$?; printf '%s' \"$rc\" > {sync_rc_tmp}; \
+             printf '\\n[OTTO_STATUS exit=%s]\\n' \"$rc\" >> {log_file}; \
+             tmux wait-for -S {wait_chan}; exit \"$rc\""
+        );
+        format!(
+            "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; \
+             mkdir -p ~/.cheap-otto/logs/{project}; rm -f {out_tmp} {sync_rc_tmp}; \
+             tmux kill-session -t {tmux_name} 2>/dev/null || true; \
+             tmux new-session -d -s {tmux_name} {} && tmux set-option -t {tmux_name} remain-on-exit on && \
+             tmux wait-for {wait_chan} && cat {out_tmp} && test \"$(cat {sync_rc_tmp} 2>/dev/null || echo 1)\" = \"0\"",
+            posix_single_quote(&inner)
         )
     };
 
     let port_str = peer.ssh_port.to_string();
     let dest = peer.ssh_destination();
-    let display_command = format!("ssh -p {port_str} {dest} \"{full_remote}\"");
+    let display_command = format!(
+        "ssh -p {port_str} {dest} \"tmux [{tmux_name}] -> cd {wt_dir} && {safe_agent_cmd}\""
+    );
     let exec_spec = CommandSpec::new(
         "Send direct query/instruction to addressable agent worktree on MacBook",
         "ssh",

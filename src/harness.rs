@@ -217,7 +217,7 @@ impl HarnessRunConfig {
                     ""
                 };
                 format!(
-                    "claude -p {quoted_prompt} --dangerously-skip-permissions{model_flag}{effort_flag}{session_flag}{format_flag}"
+                    "claude -p {quoted_prompt} --dangerously-skip-permissions{model_flag}{effort_flag}{session_flag}{format_flag} < /dev/null"
                 )
             }
             AgentRunner::Antigravity => {
@@ -232,7 +232,7 @@ impl HarnessRunConfig {
                     ""
                 };
                 format!(
-                    "agy -p {quoted_prompt} --dangerously-skip-permissions{model_flag}{effort_flag}{session_flag}{format_flag}"
+                    "agy -p {quoted_prompt} --dangerously-skip-permissions{model_flag}{effort_flag}{session_flag}{format_flag} < /dev/null"
                 )
             }
             AgentRunner::KiroCli => {
@@ -244,7 +244,7 @@ impl HarnessRunConfig {
                     _ => String::new(),
                 };
                 format!(
-                    "kiro-cli chat --no-interactive --trust-all-tools --trust-workspace{model_flag}{effort_flag}{session_flag} {quoted_prompt}"
+                    "kiro-cli chat --no-interactive --trust-all-tools --trust-workspace{model_flag}{effort_flag}{session_flag} {quoted_prompt} < /dev/null"
                 )
             }
             AgentRunner::CustomShell => raw_prompt.trim().to_string(),

@@ -3191,7 +3191,7 @@ fn run_ask(opts: &AskOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!(
             "agent query exited with {}: {}",
             output.status,
-            if stderr_raw.trim().is_empty() {
+            if !clean_answer.is_empty() {
                 clean_answer
             } else {
                 stderr_raw.trim().to_string()
