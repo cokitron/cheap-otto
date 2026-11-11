@@ -328,11 +328,8 @@ impl PeerNode {
                 "mkdir -p {remote_project_dir} && git -C {remote_project_dir} init && git -C {remote_project_dir} config receive.denyCurrentBranch updateInstead && if [ -n \"$(git -C {remote_project_dir} status --porcelain 2>/dev/null)\" ]; then echo 'Refusing to overwrite uncommitted manual changes in {remote_project_dir}; commit/stash via cheap-otto shell or pass --force.' >&2; exit 2; fi"
             )
         };
-        let remote_checkout_script = if force_overwrite {
-            format!("git -C {remote_project_dir} checkout -f -B otto-sync")
-        } else {
-            format!("git -C {remote_project_dir} checkout -B otto-sync")
-        };
+        let remote_checkout_script =
+            format!("git -C {remote_project_dir} checkout -f -B otto-sync refs/heads/otto-sync");
 
         let sync_commands = vec![
             format!("ssh -p {port_str} {dest} \"{remote_init_script}\""),
