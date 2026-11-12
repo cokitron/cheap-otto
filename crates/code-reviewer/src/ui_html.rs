@@ -544,7 +544,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <div class="card">
             <h2>Watched Repositories (`config/repos.toml`)</h2>
             <table>
-              <thead><tr><th>Repository</th><th>Branch</th><th>Identity Policy</th><th>Review Event</th><th>Reviewer</th><th>Tender</th><th>Actions</th></tr></thead>
+              <thead><tr><th>Repository</th><th>Branch</th><th>Identity Policy</th><th>Review Event</th><th>Reviewer</th><th>Tender</th><th>Local Checkout / Check</th><th>Actions</th></tr></thead>
               <tbody id="repos-tbody"></tbody>
             </table>
           </div>
@@ -553,6 +553,31 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             <div class="form-row">
               <div><label>Owner / Repo</label><input id="r-name" placeholder="acme-org/web-app" /></div>
               <div><label>Default Branch</label><input id="r-branch" value="main" /></div>
+            </div>
+            <div class="form-row">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="r-enabled" checked style="width:auto;" />
+                <span>Run Multi-Lens Code Reviewer</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="r-tender-enabled" checked style="width:auto;" />
+                <span>Run Code Tender (Auto-Fix PR Reviews)</span>
+              </label>
+            </div>
+            <div class="form-row">
+              <div style="grid-column: span 2;">
+                <label>Local App Checkout Path on M1 (Code Tender spawns grounded in this app's deps &amp; docs; blank = auto-detect)</label>
+                <div style="display:flex;gap:8px;">
+                  <input id="r-local-path" placeholder="~/apps/web-app" />
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('r')">🔎 Auto-Detect Local Clone</button>
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div style="grid-column: span 2;">
+                <label>Local Verification Check Command (required before push; auto-inferred from package.json/Cargo.toml if blank)</label>
+                <input id="r-check" placeholder="npm run typecheck && npm test" />
+              </div>
             </div>
             <div class="form-row">
               <div>
@@ -574,10 +599,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
               </div>
               <div><label>Google Drive Folder ID (optional)</label><input id="r-drive" placeholder="1AbCdEfGhIj..." /></div>
             </div>
-            <div class="form-row">
-              <div><label>Local Check Command (optional)</label><input id="r-check" placeholder="npm run check" /></div>
-            </div>
-            <button onclick="addWatchedRepo()">Save Watched Repository</button>
+            <button onclick="submitWatchedRepoForm('r')">Save Watched Repository</button>
           </div>
         </div>
       </section>
@@ -787,14 +809,118 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         </div>
       </section>
 
-      <!-- TENDER TAB 3: REPOS & TENDER AGENT PROMPTS -->
+      <!-- TENDER TAB 3: REPOS, TENDER KB & AGENT PROMPTS -->
       <section id="tab-tender-repos" class="hidden">
+        <div class="grid-2" style="margin-bottom:16px;">
+          <div class="card">
+            <h2><span>Watched Repositories (`config/repos.toml`)</span></h2>
+            <table>
+              <thead><tr><th>Repository</th><th>Branch</th><th>Local App Checkout</th><th>Check Gate Command</th><th>Reviewer</th><th>Code Tender</th><th>Actions</th></tr></thead>
+              <tbody id="tender-repos-tbody"></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <h2>Add / Update Watched Repository</h2>
+            <div class="form-row">
+              <div><label>Owner / Repo</label><input id="tr-name" placeholder="acme-org/web-app" /></div>
+              <div><label>Default Branch</label><input id="tr-branch" value="main" /></div>
+            </div>
+            <div class="form-row">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="tr-enabled" checked style="width:auto;" />
+                <span>Run Multi-Lens Code Reviewer</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="tr-tender-enabled" checked style="width:auto;" />
+                <span>Run Code Tender (Auto-Fix PR Reviews)</span>
+              </label>
+            </div>
+            <div class="form-row">
+              <div style="grid-column: span 2;">
+                <label>Local App Checkout Path on M1 (links node_modules/.venv + injects README/CLAUDE.md context)</label>
+                <div style="display:flex;gap:8px;">
+                  <input id="tr-local-path" placeholder="~/apps/web-app" />
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('tr')">🔎 Auto-Detect Local Clone</button>
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div style="grid-column: span 2;">
+                <label>Local Verification Check Command (runs locally before push; auto-inferred if blank)</label>
+                <input id="tr-check" placeholder="npm run typecheck && npm test" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label>Account Policy</label>
+                <select id="tr-acct-pol">
+                  <option value="swap">swap (primary ⇄ secondary)</option>
+                  <option value="forced">forced (single account)</option>
+                </select>
+              </div>
+              <div><label>Forced Account (if forced)</label><input id="tr-forced" placeholder="alice-dev" /></div>
+            </div>
+            <div class="form-row">
+              <div>
+                <label>GitHub Event Policy</label>
+                <select id="tr-ev-pol">
+                  <option value="formal_verdict">formal_verdict</option>
+                  <option value="comment_only">comment_only</option>
+                </select>
+              </div>
+              <div><label>Google Drive Folder ID (optional)</label><input id="tr-drive" placeholder="1AbCdEfGhIj..." /></div>
+            </div>
+            <button class="tender-btn" onclick="submitWatchedRepoForm('tr')">Save Watched Repository</button>
+          </div>
+        </div>
+
         <div class="card" style="margin-bottom:16px;">
-          <h2><span>Repository Auto-Tending Toggles (`config/repos.toml`)</span></h2>
-          <table>
-            <thead><tr><th>Repository</th><th>Branch</th><th>Verification Check Command</th><th>Reviewer</th><th>Code Tender</th><th>Actions</th></tr></thead>
-            <tbody id="tender-repos-tbody"></tbody>
-          </table>
+          <h2><span>🧠 Code Tender Continuous-Learning Knowledge Base (`tender-agents/kb/`)</span></h2>
+          <div class="card" style="background:var(--panel-2);margin-bottom:14px;">
+            <h3>+ Append Learned Rule</h3>
+            <div class="form-row">
+              <div>
+                <label>Target KB File</label>
+                <select id="tkb-target">
+                  <option value="patterns-fixed">Patterns Fixed (`patterns-fixed.md`)</option>
+                  <option value="check-recipes">Local Check Recipes (`check-recipes.md`)</option>
+                  <option value="do-not-repeat">Do Not Repeat Guardrails (`do-not-repeat.md`)</option>
+                  <option value="agent-lesson">Specific Agent Lessons (`kb/lessons.md`)</option>
+                </select>
+              </div>
+              <div>
+                <label>Target Agent (if Agent Lessons)</label>
+                <select id="tkb-agent">
+                  <option value="01-tender-triage">01-tender-triage</option>
+                  <option value="02-tender-fixer">02-tender-fixer</option>
+                  <option value="03-tender-verifier">03-tender-verifier</option>
+                </select>
+              </div>
+              <div style="grid-column: span 2;">
+                <label>Imperative Rule (include `[Owner/repo]` or `[*]`)</label>
+                <input id="tkb-rule" placeholder="[acme-org/web-app] Always run Vitest before marking UI fixes done." />
+              </div>
+            </div>
+            <button class="tender-btn" onclick="submitTenderKbRule()">+ Append to Code Tender KB</button>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <label>Patterns Fixed (`tender-agents/kb/patterns-fixed.md`)</label>
+              <textarea id="tkb-patterns" class="code-editor" style="min-height:170px;"></textarea>
+              <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('patterns-fixed', 'tkb-patterns')">💾 Save `patterns-fixed.md`</button>
+            </div>
+            <div>
+              <label>Local Check Recipes (`tender-agents/kb/check-recipes.md`)</label>
+              <textarea id="tkb-recipes" class="code-editor" style="min-height:170px;"></textarea>
+              <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('check-recipes', 'tkb-recipes')">💾 Save `check-recipes.md`</button>
+            </div>
+          </div>
+          <div style="margin-top:12px;">
+            <label>Do Not Repeat Guardrails (`tender-agents/kb/do-not-repeat.md`)</label>
+            <textarea id="tkb-dnr" class="code-editor" style="min-height:150px;"></textarea>
+            <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('do-not-repeat', 'tkb-dnr')">💾 Save `do-not-repeat.md`</button>
+          </div>
         </div>
 
         <div class="split-pr">
@@ -803,16 +929,20 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             <div id="tender-agents-list-box"></div>
           </div>
           <div class="card">
-            <h2 id="tender-agent-detail-title">Tender Agent Prompt &amp; Playbook Notes</h2>
+            <h2 id="tender-agent-detail-title">Tender Agent Prompt, Guardrails &amp; Lessons</h2>
             <div style="margin-bottom:12px;">
               <label>System Instructions (`PROMPT.md`)</label>
               <textarea id="ta-prompt" class="code-editor"></textarea>
             </div>
             <div style="margin-bottom:12px;">
               <label>Operator Notes / Guardrails (`notes.md`)</label>
-              <textarea id="ta-notes" class="code-editor" style="min-height:130px;"></textarea>
+              <textarea id="ta-notes" class="code-editor" style="min-height:120px;"></textarea>
             </div>
-            <button class="tender-btn" onclick="saveTenderAgentPrompt()">💾 Save Prompt &amp; Notes</button>
+            <div style="margin-bottom:12px;">
+              <label>Learned Agent Lessons (`kb/lessons.md` — auto-updated by `03-tender-verifier`)</label>
+              <textarea id="ta-lessons" class="code-editor" style="min-height:130px;"></textarea>
+            </div>
+            <button class="tender-btn" onclick="saveTenderAgentPrompt()">💾 Save Prompt, Notes &amp; Lessons</button>
           </div>
         </div>
       </section>
@@ -976,6 +1106,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       renderTopStatusBar();
       if (isTender && ACTIVE_TENDER_TAB === 'tender-repos') {
         loadTenderAgentDetail(SELECTED_TENDER_AGENT);
+        loadTenderKb();
       }
     }
 
@@ -1003,7 +1134,10 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       ['tender-live', 'tender-prs', 'tender-repos'].forEach(t => {
         document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
       });
-      if (tab === 'tender-repos') loadTenderAgentDetail(SELECTED_TENDER_AGENT);
+      if (tab === 'tender-repos') {
+        loadTenderAgentDetail(SELECTED_TENDER_AGENT);
+        loadTenderKb();
+      }
     }
 
     function openPrInTender(repo, prNumber) {
@@ -1283,7 +1417,12 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <td><code>${esc(r.review_event_policy)}</code></td>
           <td><span class="badge ${r.enabled ? 'b-pass' : 'b-muted'}">${r.enabled ? 'ENABLED' : 'PAUSED'}</span></td>
           <td><span class="badge ${r.tender_enabled ? 'b-pass' : 'b-muted'}">${r.tender_enabled ? 'TENDER ON' : 'OFF'}</span></td>
+          <td style="font-size:11.5px;">
+            <div><code>${esc(r.local_repo_path || '(auto-detect)')}</code></div>
+            <div style="color:var(--muted);"><code>${esc(r.local_check_cmd || '(auto-infer)')}</code></div>
+          </td>
           <td style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="loadRepoIntoForm('r', '${esc(r.full_name)}')">Edit</button>
             <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepo('${esc(r.full_name)}')">${r.enabled ? 'Pause Rev' : 'Enable Rev'}</button>
             <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepoTender('${esc(r.full_name)}')">${r.tender_enabled ? 'Pause Tend' : 'Enable Tend'}</button>
             <button class="danger" style="padding:4px 8px;font-size:11.5px;" onclick="removeRepo('${esc(r.full_name)}')">Remove</button>
@@ -1383,15 +1522,61 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       refreshAll();
     }
 
-    async function addWatchedRepo() {
+    async function detectLocalRepo(prefix) {
+      const repo = document.getElementById(prefix + '-name').value.trim();
+      if (!repo) {
+        showToast('Enter Owner / Repo first (e.g. owner/repo)');
+        return;
+      }
+      try {
+        const res = await api('/api/repos/detect-local?repo=' + encodeURIComponent(repo));
+        if (res.local_repo_path) {
+          document.getElementById(prefix + '-local-path').value = res.local_repo_path;
+        }
+        if (res.inferred_check_cmd && !document.getElementById(prefix + '-check').value.trim()) {
+          document.getElementById(prefix + '-check').value = res.inferred_check_cmd;
+        }
+        showToast(res.local_repo_path
+          ? `Detected local clone: ${res.local_repo_path}`
+          : `No local clone found on M1 for ${repo} (will use PR worktree fallback)`);
+      } catch (e) {
+        showToast('Detect failed: ' + e.message);
+      }
+    }
+
+    function loadRepoIntoForm(prefix, fullName) {
+      const r = (STATE.repos || []).find(x => x.full_name === fullName);
+      if (!r) return;
+      document.getElementById(prefix + '-name').value = r.full_name || '';
+      document.getElementById(prefix + '-branch').value = r.default_branch || 'main';
+      document.getElementById(prefix + '-enabled').checked = Boolean(r.enabled);
+      document.getElementById(prefix + '-tender-enabled').checked = Boolean(r.tender_enabled);
+      document.getElementById(prefix + '-local-path').value = r.local_repo_path || '';
+      document.getElementById(prefix + '-check').value = r.local_check_cmd || '';
+      document.getElementById(prefix + '-acct-pol').value = r.account_policy || 'swap';
+      document.getElementById(prefix + '-forced').value = r.forced_account || '';
+      document.getElementById(prefix + '-ev-pol').value = r.review_event_policy || 'formal_verdict';
+      document.getElementById(prefix + '-drive').value = r.gdrive_folder_id || '';
+      showToast(`Loaded ${r.full_name} into editor`);
+    }
+
+    async function submitWatchedRepoForm(prefix) {
+      const fullName = document.getElementById(prefix + '-name').value.trim();
+      if (!fullName) {
+        showToast('Please enter Owner / Repo');
+        return;
+      }
       const payload = {
-        full_name: document.getElementById('r-name').value.trim(),
-        default_branch: document.getElementById('r-branch').value.trim() || 'main',
-        account_policy: document.getElementById('r-acct-pol').value,
-        forced_account: document.getElementById('r-forced').value.trim() || null,
-        review_event_policy: document.getElementById('r-ev-pol').value,
-        gdrive_folder_id: document.getElementById('r-drive').value.trim() || null,
-        local_check_cmd: document.getElementById('r-check').value.trim() || null
+        full_name: fullName,
+        default_branch: document.getElementById(prefix + '-branch').value.trim() || 'main',
+        enabled: document.getElementById(prefix + '-enabled').checked,
+        tender_enabled: document.getElementById(prefix + '-tender-enabled').checked,
+        local_repo_path: document.getElementById(prefix + '-local-path').value.trim() || null,
+        local_check_cmd: document.getElementById(prefix + '-check').value.trim() || null,
+        account_policy: document.getElementById(prefix + '-acct-pol').value,
+        forced_account: document.getElementById(prefix + '-forced').value.trim() || null,
+        review_event_policy: document.getElementById(prefix + '-ev-pol').value,
+        gdrive_folder_id: document.getElementById(prefix + '-drive').value.trim() || null
       };
       await api('/api/repos/add', { method: 'POST', body: JSON.stringify(payload) });
       showToast(`Saved watched repo ${payload.full_name}`);
@@ -1632,12 +1817,31 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         </div>`;
       }).join('') || '<div style="color:var(--muted);padding:10px 0;">No handled items match this filter yet.</div>';
 
+      const learningList = p.learned_rules || [];
+      const learningHtml = learningList.length ? `
+        <div class="card" style="background:rgba(16,185,129,0.08);border-color:rgba(16,185,129,0.35);margin-top:12px;">
+          <h3 style="color:#6ee7b7;margin-bottom:8px;">🧠 Continuous-Learning Rule Adjustments (${learningList.length})</h3>
+          ${learningList.map(lr => `
+            <div style="border-top:1px solid var(--border);padding:8px 0;font-size:12.5px;">
+              <div>
+                <span class="badge b-pass">${esc(lr.scope)}</span>
+                <code>${esc(lr.target)}</code>
+              </div>
+              <div style="margin-top:4px;"><strong>Rule:</strong> ${esc(lr.rule)}</div>
+              ${lr.rationale ? `<div style="margin-top:3px;color:var(--muted);">Rationale: ${esc(lr.rationale)}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>` : '';
+
       box.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
           <div>
             <h2 style="margin-bottom:4px;">${esc(p.repo)} #${p.pr_number} — ${esc(p.title)}</h2>
             <div style="font-size:12px;color:var(--muted);">
               Branch: <code>${esc(p.head_ref)}</code> → <code>${esc(p.base_ref)}</code> • Author: <code>${esc(p.author)}</code> • Tended SHA: <code>${esc((p.last_tended_sha || '-').slice(0, 7))}</code>${p.last_commit_pushed ? ` • Pushed: <code>${esc(p.last_commit_pushed.slice(0, 7))}</code>` : ''}
+            </div>
+            <div style="font-size:12px;color:var(--muted);margin-top:4px;">
+              Local Context: <code>${esc(p.local_context_used || 'PR worktree only')}</code> • Local Check Gate: <code>${esc(p.last_check_cmd_used || 'none')}</code>
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1648,6 +1852,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           </div>
         </div>
         ${p.last_summary ? `<div class="card" style="background:var(--panel-2);margin-top:12px;"><strong>Latest Tender Summary:</strong> ${esc(p.last_summary)}</div>` : ''}
+        ${learningHtml}
         ${stagedHtml}
         ${pendingHtml}
         <h3 style="margin-top:18px;">Handled Review Items &amp; Replies (${handledAll.length})</h3>
@@ -1667,13 +1872,17 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         <tr>
           <td><strong>${esc(r.full_name)}</strong></td>
           <td><code>${esc(r.default_branch)}</code></td>
-          <td><code>${esc(r.local_check_cmd || '(auto-detect)')}</code></td>
+          <td><code>${esc(r.local_repo_path || '(auto-detect)')}</code></td>
+          <td><code>${esc(r.local_check_cmd || '(auto-infer)')}</code></td>
           <td><span class="badge ${r.enabled ? 'b-pass' : 'b-muted'}">${r.enabled ? 'REVIEWER ON' : 'PAUSED'}</span></td>
-          <td><span class="badge ${r.tender_enabled ? 'b-pass' : 'b-muted'}">${r.tender_enabled ? 'TENDER ENABLED' : 'TENDER PAUSED'}</span></td>
-          <td>
-            <button class="${r.tender_enabled ? 'secondary' : 'tender-btn'}" style="padding:4px 10px;font-size:11.5px;" onclick="toggleRepoTender('${esc(r.full_name)}')">
+          <td><span class="badge ${r.tender_enabled ? 'b-pass' : 'b-muted'}">${r.tender_enabled ? 'TENDER ON' : 'PAUSED'}</span></td>
+          <td style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="loadRepoIntoForm('tr', '${esc(r.full_name)}')">Edit</button>
+            <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepo('${esc(r.full_name)}')">${r.enabled ? 'Pause Rev' : 'Enable Rev'}</button>
+            <button class="${r.tender_enabled ? 'secondary' : 'tender-btn'}" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepoTender('${esc(r.full_name)}')">
               ${r.tender_enabled ? 'Pause Tender' : 'Enable Tender'}
             </button>
+            <button class="danger" style="padding:4px 8px;font-size:11.5px;" onclick="removeRepo('${esc(r.full_name)}')">Remove</button>
           </td>
         </tr>
       `).join('');
@@ -1693,20 +1902,56 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       const d = await api('/api/tender-agent?id=' + encodeURIComponent(agentId));
       document.getElementById('ta-prompt').value = d.prompt || '';
       document.getElementById('ta-notes').value = d.notes || '';
+      document.getElementById('ta-lessons').value = d.lessons || '';
     }
 
     async function saveTenderAgentPrompt() {
       const prompt = document.getElementById('ta-prompt').value;
       const notes = document.getElementById('ta-notes').value;
+      const lessons = document.getElementById('ta-lessons').value;
       await api('/api/tender-agent/save', {
         method: 'POST',
         body: JSON.stringify({
           agent: SELECTED_TENDER_AGENT,
           prompt,
-          notes
+          notes,
+          lessons
         })
       });
-      showToast(`Saved prompt & notes for ${SELECTED_TENDER_AGENT}`);
+      showToast(`Saved prompt, notes & lessons for ${SELECTED_TENDER_AGENT}`);
+    }
+
+    async function loadTenderKb() {
+      const kb = await api('/api/tender-kb');
+      document.getElementById('tkb-patterns').value = kb.patterns_fixed || '';
+      document.getElementById('tkb-recipes').value = kb.check_recipes || '';
+      document.getElementById('tkb-dnr').value = kb.do_not_repeat || '';
+    }
+
+    async function saveTenderKbFile(fileKey, elId) {
+      const content = document.getElementById(elId).value;
+      await api('/api/tender-kb/save', {
+        method: 'POST',
+        body: JSON.stringify({ file_key: fileKey, content })
+      });
+      showToast(`Saved ${fileKey}.md`);
+    }
+
+    async function submitTenderKbRule() {
+      const target = document.getElementById('tkb-target').value;
+      const target_agent = document.getElementById('tkb-agent').value;
+      const rule = document.getElementById('tkb-rule').value.trim();
+      if (!rule) return;
+      const res = await api('/api/tender-kb/add', {
+        method: 'POST',
+        body: JSON.stringify({ target, target_agent, rule })
+      });
+      document.getElementById('tkb-rule').value = '';
+      showToast(res.added ? `Appended rule to Code Tender KB (${target})` : 'Rule already present (deduplicated)');
+      loadTenderKb();
+      if (target === 'agent-lesson') {
+        loadTenderAgentDetail(SELECTED_TENDER_AGENT);
+      }
     }
 
     function selectTenderPr(key) { SELECTED_TENDER_PR_KEY = key; renderTenderPrList(); }

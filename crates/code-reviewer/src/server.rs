@@ -13,7 +13,11 @@ use crate::github::GitHubClient;
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderRunStatus, TrackedPrState,
 };
-use crate::tender::{TENDER_AGENTS, approve_and_push_staged_patch, save_tender_agent_notes};
+use crate::tender::{
+    TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch,
+    detect_local_repo_checkout, infer_local_check_cmd, load_tender_kb_payload,
+    save_tender_agent_notes, save_tender_kb_file,
+};
 use crate::ui_html::DASHBOARD_HTML;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -303,6 +307,8 @@ fn dispatch_api(
                 agent: String,
                 prompt: Option<String>,
                 notes: Option<String>,
+                #[serde(default)]
+                lessons: Option<String>,
             }
             let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
             save_tender_agent_notes(
@@ -311,7 +317,58 @@ fn dispatch_api(
                 req.prompt.as_deref(),
                 req.notes.as_deref(),
             )?;
+            if let Some(lessons) = req.lessons {
+                if !TENDER_AGENTS.contains(&req.agent.as_str()) {
+                    return Err(format!("unknown tender agent `{}`", req.agent));
+                }
+                let kb_dir = ctx
+                    .workspace
+                    .join("tender-agents")
+                    .join(&req.agent)
+                    .join("kb");
+                fs::create_dir_all(&kb_dir).map_err(|e| e.to_string())?;
+                fs::write(kb_dir.join("lessons.md"), lessons).map_err(|e| e.to_string())?;
+            }
             Ok(json!({ "ok": true }))
+        }
+        ("GET", "/api/tender-kb") => Ok(load_tender_kb_payload(&ctx.workspace)),
+        ("POST", "/api/tender-kb/add") => {
+            #[derive(Deserialize)]
+            struct Req {
+                target: String,
+                #[serde(default)]
+                target_agent: Option<String>,
+                rule: String,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let added = append_tender_kb_entry(
+                &ctx.workspace,
+                &req.target,
+                req.target_agent.as_deref(),
+                &req.rule,
+            )?;
+            Ok(json!({ "ok": true, "added": added }))
+        }
+        ("POST", "/api/tender-kb/save") => {
+            #[derive(Deserialize)]
+            struct Req {
+                file_key: String,
+                content: String,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            save_tender_kb_file(&ctx.workspace, &req.file_key, &req.content)?;
+            Ok(json!({ "ok": true }))
+        }
+        ("GET", "/api/repos/detect-local") => {
+            let repo = parse_query_param(query, "repo")
+                .ok_or_else(|| "missing `repo` query parameter".to_string())?;
+            let detected = detect_local_repo_checkout(&repo);
+            let inferred_check_cmd = detected.as_deref().and_then(infer_local_check_cmd);
+            Ok(json!({
+                "repo": repo,
+                "local_repo_path": detected.map(|p| p.display().to_string()),
+                "inferred_check_cmd": inferred_check_cmd,
+            }))
         }
         ("POST", "/api/actions/poll") => {
             spawn_detached_self(&ctx.workspace, "sched-pr-poller.log", &["poll"])?;
@@ -571,7 +628,11 @@ fn dispatch_api(
                 forced_account: Option<String>,
                 review_event_policy: String,
                 gdrive_folder_id: Option<String>,
+                #[serde(default)]
+                local_repo_path: Option<String>,
                 local_check_cmd: Option<String>,
+                #[serde(default)]
+                enabled: Option<bool>,
                 #[serde(default)]
                 tender_enabled: Option<bool>,
             }
@@ -586,16 +647,17 @@ fn dispatch_api(
                 } else {
                     AccountPolicy::Swap
                 },
-                forced_account: req.forced_account.filter(|s| !s.is_empty()),
+                forced_account: req.forced_account.filter(|s| !s.trim().is_empty()),
                 review_event_policy: if req.review_event_policy.eq_ignore_ascii_case("comment_only")
                 {
                     ReviewEventPolicy::CommentOnly
                 } else {
                     ReviewEventPolicy::FormalVerdict
                 },
-                gdrive_folder_id: req.gdrive_folder_id.filter(|s| !s.is_empty()),
-                local_check_cmd: req.local_check_cmd.filter(|s| !s.is_empty()),
-                enabled: true,
+                gdrive_folder_id: req.gdrive_folder_id.filter(|s| !s.trim().is_empty()),
+                local_repo_path: req.local_repo_path.filter(|s| !s.trim().is_empty()),
+                local_check_cmd: req.local_check_cmd.filter(|s| !s.trim().is_empty()),
+                enabled: req.enabled.unwrap_or(true),
                 tender_enabled: req.tender_enabled.unwrap_or(true),
             })
             .map_err(|e| e.to_string())?;
@@ -981,10 +1043,12 @@ fn build_tender_agent_payload(workspace: &Path, agent_id: &str) -> Result<Value,
     let dir = workspace.join("tender-agents").join(agent_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
     let notes = fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+    let lessons = fs::read_to_string(dir.join("kb/lessons.md")).unwrap_or_default();
     Ok(json!({
         "id": agent_id,
         "prompt": prompt,
         "notes": notes,
+        "lessons": lessons,
     }))
 }
 

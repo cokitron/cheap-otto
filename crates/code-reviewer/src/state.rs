@@ -1246,6 +1246,16 @@ pub struct TenderHandledItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedRuleRecord {
+    pub scope: String,
+    pub target: String,
+    pub rule: String,
+    #[serde(default)]
+    pub rationale: String,
+    pub learned_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenderPrState {
     pub repo: String,
     pub pr_number: u64,
@@ -1273,6 +1283,12 @@ pub struct TenderPrState {
     pub staged_patch: Option<String>,
     #[serde(default)]
     pub staged_commit_message: Option<String>,
+    #[serde(default)]
+    pub local_context_used: Option<String>,
+    #[serde(default)]
+    pub last_check_cmd_used: Option<String>,
+    #[serde(default)]
+    pub learned_rules: Vec<LearnedRuleRecord>,
     #[serde(default)]
     pub pending_items: Vec<TenderHandledItem>,
     #[serde(default)]
@@ -1306,6 +1322,9 @@ impl TenderPrState {
             last_summary: None,
             staged_patch: None,
             staged_commit_message: None,
+            local_context_used: None,
+            last_check_cmd_used: None,
+            learned_rules: Vec::new(),
             pending_items: Vec::new(),
             handled_items: Vec::new(),
             updated_at: Utc::now(),

@@ -199,6 +199,9 @@ pub struct WatchedRepoConfig {
     pub review_event_policy: ReviewEventPolicy,
     #[serde(default)]
     pub gdrive_folder_id: Option<String>,
+    /// Optional local app checkout directory (e.g. `~/apps/web-app`) so Code Tender inherits local dependencies, context docs, and build caches.
+    #[serde(default)]
+    pub local_repo_path: Option<String>,
     #[serde(default)]
     pub local_check_cmd: Option<String>,
     #[serde(default = "default_true")]
@@ -494,6 +497,7 @@ mod tests {
             forced_account: None,
             review_event_policy: ReviewEventPolicy::FormalVerdict,
             gdrive_folder_id: None,
+            local_repo_path: None,
             local_check_cmd: None,
             enabled: true,
             tender_enabled: true,
@@ -524,6 +528,7 @@ mod tests {
             forced_account: Some("alice-dev".to_string()),
             review_event_policy: ReviewEventPolicy::CommentOnly,
             gdrive_folder_id: Some("folder123".to_string()),
+            local_repo_path: Some("~/apps/web-app".to_string()),
             local_check_cmd: Some("npm run check".to_string()),
             enabled: true,
             tender_enabled: true,
@@ -552,6 +557,7 @@ mod tests {
             forced_account: None,
             review_event_policy: ReviewEventPolicy::FormalVerdict,
             gdrive_folder_id: None,
+            local_repo_path: None,
             local_check_cmd: None,
             enabled: true,
             tender_enabled: true,

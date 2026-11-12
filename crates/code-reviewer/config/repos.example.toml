@@ -45,6 +45,7 @@ language = "en"
 # "forced" locks reviews to `forced_account` (pair with `comment_only` for single-account org access).
 account_policy = "swap"
 review_event_policy = "formal_verdict"
+local_repo_path = "~/apps/web-app"
 local_check_cmd = "npm run check"
 enabled = false
 tender_enabled = true

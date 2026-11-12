@@ -2,18 +2,19 @@
 //! intercalated triage/fixer/verifier agents, local check gates, git push, and GitHub thread replies.
 
 use crate::brains::{
-    BrainError, RunnerPair, agy_binary, base64_basic::encode_basic_auth, claude_binary, git_binary,
-    load_living_docs_bundle, notify_pixel_hook, parse_json_from_llm, resolve_intercalated_runners,
-    run_git, truncate_chars,
+    BrainError, RunnerPair, agy_binary, append_kb_entry, base64_basic::encode_basic_auth,
+    claude_binary, git_binary, load_living_docs_bundle, notify_pixel_hook, parse_json_from_llm,
+    resolve_intercalated_runners, run_git, truncate_chars,
 };
 use crate::config::{
-    AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, repo_fs_slug,
+    AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
+    home_dir, repo_fs_slug,
 };
 use crate::github::GitHubClient;
 use crate::state::{
-    ActiveTenderWorkerState, BOT_TENDER_MARKER, BrainLiveState, LedgerStore, TenderActionStatus,
-    TenderFeedbackItem, TenderHandledItem, TenderPrSnapshot, TenderPrState, TenderRunStatus,
-    acquire_file_spinlock,
+    ActiveTenderWorkerState, BOT_TENDER_MARKER, BrainLiveState, LearnedRuleRecord, LedgerStore,
+    TenderActionStatus, TenderFeedbackItem, TenderHandledItem, TenderPrSnapshot, TenderPrState,
+    TenderRunStatus, acquire_file_spinlock,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -132,6 +133,478 @@ pub fn checkout_writable_pr_worktree(
     })
 }
 
+/// Checks if a remote URL matches `owner/repo` cleanly.
+fn remote_url_matches_repo(remote_url: &str, full_name: &str) -> bool {
+    let norm = remote_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .replace(':', "/");
+    let needle = format!("/{}", full_name.trim().trim_end_matches('/'));
+    norm.to_ascii_lowercase()
+        .ends_with(&needle.to_ascii_lowercase())
+}
+
+/// Resolves the local checkout directory for a repository (using explicit `local_repo_path` or auto-discovering local clones under `$HOME`).
+pub fn resolve_local_checkout_dir(repo_cfg: &WatchedRepoConfig) -> Option<PathBuf> {
+    if let Some(raw) = repo_cfg
+        .local_repo_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let expanded = expand_tilde(raw);
+        if expanded.join(".git").exists() {
+            return Some(expanded);
+        }
+    }
+    detect_local_repo_checkout(&repo_cfg.full_name)
+}
+
+/// Scans standard local workspace roots (`~/`, `~/otto-workspaces`, `~/projects`, `~/repos`, `~/code`)
+/// up to 2 levels deep for a full non-bare git checkout matching `owner/repo`.
+/// Explicitly skips hidden directories and macOS TCC/system folders so background daemons never stall.
+pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
+    let home = home_dir();
+    let skip_home_dirs = [
+        "Library",
+        "Applications",
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Movies",
+        "Music",
+        "Pictures",
+        "Public",
+        "node_modules",
+        "target",
+    ];
+    let roots = [
+        (home.clone(), true),
+        (home.join("otto-workspaces"), false),
+        (home.join("projects"), false),
+        (home.join("repos"), false),
+        (home.join("code"), false),
+    ];
+
+    let mut candidates = Vec::new();
+    for (root, is_home_root) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.')
+                || (is_home_root && skip_home_dirs.contains(&name_str.as_ref()))
+            {
+                continue;
+            }
+            if !p.is_dir() {
+                continue;
+            }
+            if p.join(".git").is_dir() {
+                candidates.push(p);
+                continue;
+            }
+            if let Ok(sub_entries) = fs::read_dir(&p) {
+                for sub in sub_entries.flatten() {
+                    let sub_name = sub.file_name();
+                    let sub_name_str = sub_name.to_string_lossy();
+                    if sub_name_str.starts_with('.')
+                        || sub_name_str == "node_modules"
+                        || sub_name_str == "target"
+                    {
+                        continue;
+                    }
+                    let sp = sub.path();
+                    if sp.is_dir() && sp.join(".git").is_dir() {
+                        candidates.push(sp);
+                    }
+                }
+            }
+        }
+    }
+
+    for dir in candidates {
+        if let Some(origin) = read_git_origin_url(&dir)
+            && remote_url_matches_repo(&origin, full_name)
+        {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+fn read_git_origin_url(repo_dir: &Path) -> Option<String> {
+    let git_cfg = fs::read_to_string(repo_dir.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+    for line in git_cfg.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_origin = t.eq_ignore_ascii_case("[remote \"origin\"]");
+            continue;
+        }
+        if in_origin
+            && let Some((k, v)) = t.split_once('=')
+            && k.trim().eq_ignore_ascii_case("url")
+        {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Links heavy gitignored local dependencies (`node_modules`, `.venv`, etc.) from the user's local checkout
+/// into the isolated PR worktree so tests, typechecks, and linters run locally without reinstalling or dirtying git status.
+fn link_local_dependencies_into_worktree(local_checkout: &Path, workdir: &Path) -> Vec<String> {
+    let mut linked = Vec::new();
+    let mut candidate_rel_paths: Vec<PathBuf> = vec![
+        PathBuf::from("node_modules"),
+        PathBuf::from(".venv"),
+        PathBuf::from("venv"),
+        PathBuf::from(".pnpm-store"),
+        PathBuf::from("vendor"),
+    ];
+
+    for monorepo_root in ["apps", "packages"] {
+        let root_dir = local_checkout.join(monorepo_root);
+        if let Ok(entries) = fs::read_dir(&root_dir) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    candidate_rel_paths.push(
+                        PathBuf::from(monorepo_root)
+                            .join(e.file_name())
+                            .join("node_modules"),
+                    );
+                }
+            }
+        }
+    }
+
+    for rel in candidate_rel_paths {
+        let src = local_checkout.join(&rel);
+        let dst = workdir.join(&rel);
+        if !src.is_dir() || dst.exists() {
+            continue;
+        }
+        // Only link paths that git explicitly ignores so `git status` and `git add -A` never stage them.
+        let ignored = Command::new(git_binary())
+            .args(["-C", &workdir.to_string_lossy(), "check-ignore", "-q"])
+            .arg(&rel)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ignored {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(&src, &dst).is_ok() {
+                linked.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    linked
+}
+
+/// Automatically infers a fast, real verification command (`typecheck`, `lint`, `test`) for a repo when
+/// `local_check_cmd` is not explicitly configured—so Code Tender verifies locally instead of pushing blindly to CI.
+pub fn infer_local_check_cmd(workdir: &Path) -> Option<String> {
+    if workdir.join("Cargo.toml").is_file() {
+        return Some(
+            "cargo clippy --all-targets -- -D warnings && cargo test --all-targets".to_string(),
+        );
+    }
+
+    let pkg_path = workdir.join("package.json");
+    if pkg_path.is_file()
+        && let Ok(raw) = fs::read_to_string(&pkg_path)
+        && let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&raw)
+    {
+        let pm = if workdir.join("pnpm-lock.yaml").is_file() {
+            "pnpm"
+        } else if workdir.join("yarn.lock").is_file() {
+            "yarn"
+        } else if workdir.join("bun.lockb").is_file() {
+            "bun"
+        } else {
+            "npm"
+        };
+        let scripts = pkg.get("scripts").and_then(|s| s.as_object());
+        let mut cmds: Vec<String> = Vec::new();
+        if let Some(map) = scripts {
+            for key in ["typecheck", "check", "lint"] {
+                if map.contains_key(key) {
+                    let prefix = if pm == "npm" { "npm run" } else { pm };
+                    cmds.push(format!("{} {}", prefix, key));
+                }
+            }
+            if let Some(test_val) = map.get("test").and_then(|v| v.as_str())
+                && !test_val.contains("no test specified")
+            {
+                cmds.push(format!("{} test", pm));
+            }
+        }
+        if cmds.is_empty() && workdir.join("tsconfig.json").is_file() {
+            cmds.push("npx --no-install tsc --noEmit".to_string());
+        }
+        if !cmds.is_empty() {
+            return Some(cmds.join(" && "));
+        }
+    }
+
+    if workdir.join("pyproject.toml").is_file() || workdir.join("pytest.ini").is_file() {
+        if workdir.join(".venv/bin/pytest").exists() {
+            return Some(".venv/bin/pytest -q".to_string());
+        }
+        return Some("pytest -q".to_string());
+    }
+
+    if workdir.join("go.mod").is_file() {
+        return Some("go test ./...".to_string());
+    }
+
+    None
+}
+
+/// Collects project guides, manifest scripts, and workspace structure directly from the local app checkout
+/// so Code Tender triage/fixer/verifier agents operate with full architectural context.
+pub fn load_repo_app_context(workdir: &Path, local_checkout: Option<&Path>) -> String {
+    let mut out = String::new();
+    if let Some(lc) = local_checkout {
+        out.push_str(&format!(
+            "- **Local App Checkout:** `{}` (dependencies & build caches linked into worktree `{}`)\n",
+            lc.display(),
+            workdir.display()
+        ));
+    }
+
+    for doc_name in ["CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md", "README.md"] {
+        let p = workdir.join(doc_name);
+        if p.is_file()
+            && let Ok(text) = fs::read_to_string(&p)
+        {
+            out.push_str(&format!(
+                "\n### Repo Doc `{doc_name}`\n{}\n",
+                truncate_chars(text.trim(), 3_500)
+            ));
+        }
+    }
+
+    for manifest in ["package.json", "Cargo.toml", "pyproject.toml"] {
+        let p = workdir.join(manifest);
+        if p.is_file()
+            && let Ok(text) = fs::read_to_string(&p)
+        {
+            out.push_str(&format!(
+                "\n### Manifest `{manifest}`\n```\n{}\n```\n",
+                truncate_chars(text.trim(), 2_500)
+            ));
+        }
+    }
+
+    if out.is_empty() {
+        "(No project manifest or CLAUDE.md/README.md found at worktree root)".to_string()
+    } else {
+        out
+    }
+}
+
+/// Ensures `tender-agents/kb/*.md` and per-agent `kb/lessons.md` exist with non-destructive defaults.
+pub fn ensure_tender_kb_scaffold(workspace_root: &Path) {
+    let shared_dir = workspace_root.join("tender-agents").join("kb");
+    let _ = fs::create_dir_all(&shared_dir);
+    let defaults = [
+        (
+            "patterns-fixed.md",
+            "# Code Tender KB — Verified Fix Patterns\n\n- `[*]` Always pair behavior fixes with a targeted regression test covering the failure mode.\n",
+        ),
+        (
+            "check-recipes.md",
+            "# Code Tender KB — Local Verification & Check Recipes\n\n- `[*]` Run the project's typechecker, linter, and tests locally before finalizing edits.\n",
+        ),
+        (
+            "do-not-repeat.md",
+            "# Code Tender KB — Anti-Regression & Do-Not-Repeat Rules\n\n- `[*]` Never guess contracts from the diff alone—verify full definitions in the local app checkout.\n",
+        ),
+    ];
+    for (name, content) in defaults {
+        let path = shared_dir.join(name);
+        if !path.exists() {
+            let _ = fs::write(path, content);
+        }
+    }
+
+    for agent_id in TENDER_AGENTS {
+        let agent_kb = workspace_root
+            .join("tender-agents")
+            .join(agent_id)
+            .join("kb");
+        let _ = fs::create_dir_all(&agent_kb);
+        let lessons = agent_kb.join("lessons.md");
+        if !lessons.exists() {
+            let _ = fs::write(lessons, format!("# `{}` Agent Lessons\n\n", agent_id));
+        }
+    }
+}
+
+fn filter_kb_for_repo(raw: &str, repo_full_name: &str) -> String {
+    let repo_tag = format!("[{}]", repo_full_name.to_ascii_lowercase());
+    let kept: Vec<&str> = raw
+        .lines()
+        .filter(|line| {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') || l.starts_with('>') {
+                return true;
+            }
+            let lower = l.to_ascii_lowercase();
+            // Keep universal `[*]` rules, matching `[owner/repo]` rules, or unbracketed bullets.
+            if lower.contains("[*]") || lower.contains(&repo_tag) {
+                return true;
+            }
+            !lower.contains('[') || !lower.contains('/')
+        })
+        .collect();
+    kept.join("\n")
+}
+
+/// Loads Code Tender's dedicated Knowledge Base (`patterns-fixed`, `check-recipes`, `do-not-repeat` + agent lessons).
+pub fn load_tender_kb_bundle(
+    workspace_root: &Path,
+    agent_id: &str,
+    repo_full_name: &str,
+) -> String {
+    ensure_tender_kb_scaffold(workspace_root);
+    let root = workspace_root.join("tender-agents");
+    let sections = [
+        ("Verified Fix Patterns", root.join("kb/patterns-fixed.md")),
+        ("Local Check Recipes", root.join("kb/check-recipes.md")),
+        ("Do-Not-Repeat Guardrails", root.join("kb/do-not-repeat.md")),
+        (
+            "Agent-Specific Lessons",
+            root.join(agent_id).join("kb/lessons.md"),
+        ),
+    ];
+
+    let mut out = String::new();
+    for (title, path) in sections {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            let filtered = filter_kb_for_repo(&raw, repo_full_name);
+            if !filtered.trim().is_empty() {
+                out.push_str(&format!(
+                    "### {title}\n{}\n\n",
+                    truncate_chars(filtered.trim(), 3_000)
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Appends a deduplicated rule line into Code Tender's KB (`patterns-fixed`, `check-recipes`, `do-not-repeat`, or `agent-lesson`).
+/// Returns `Ok(true)` if newly added, `Ok(false)` if an identical rule already existed.
+pub fn append_tender_kb_entry(
+    workspace_root: &Path,
+    target: &str,
+    target_agent: Option<&str>,
+    rule: &str,
+) -> Result<bool, String> {
+    let clean_rule = rule.trim();
+    if clean_rule.is_empty() {
+        return Ok(false);
+    }
+    ensure_tender_kb_scaffold(workspace_root);
+
+    let path = match target {
+        "patterns-fixed" | "patterns_fixed" => {
+            workspace_root.join("tender-agents/kb/patterns-fixed.md")
+        }
+        "check-recipes" | "check_recipes" => {
+            workspace_root.join("tender-agents/kb/check-recipes.md")
+        }
+        "do-not-repeat" | "do_not_repeat" => {
+            workspace_root.join("tender-agents/kb/do-not-repeat.md")
+        }
+        "agent-lesson" | "agent_lesson" => {
+            let agent = target_agent
+                .filter(|a| TENDER_AGENTS.contains(a))
+                .unwrap_or("02-tender-fixer");
+            workspace_root
+                .join("tender-agents")
+                .join(agent)
+                .join("kb/lessons.md")
+        }
+        other => return Err(format!("unknown tender KB target `{}`", other)),
+    };
+
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let norm_new = clean_rule.to_ascii_lowercase();
+    let norm_new_stripped = norm_new.trim_start_matches("- ").trim();
+    if existing.lines().any(|line| {
+        let l = line
+            .trim()
+            .trim_start_matches("- ")
+            .trim()
+            .to_ascii_lowercase();
+        l == norm_new_stripped
+    }) {
+        return Ok(false);
+    }
+
+    let formatted = if clean_rule.starts_with("- ") {
+        clean_rule.to_string()
+    } else {
+        format!("- {}", clean_rule)
+    };
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    use std::io::Write as _;
+    writeln!(file, "{}", formatted).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+pub fn load_tender_kb_payload(workspace_root: &Path) -> serde_json::Value {
+    ensure_tender_kb_scaffold(workspace_root);
+    let root = workspace_root.join("tender-agents");
+    let patterns_fixed = fs::read_to_string(root.join("kb/patterns-fixed.md")).unwrap_or_default();
+    let check_recipes = fs::read_to_string(root.join("kb/check-recipes.md")).unwrap_or_default();
+    let do_not_repeat = fs::read_to_string(root.join("kb/do-not-repeat.md")).unwrap_or_default();
+    serde_json::json!({
+        "patterns_fixed": patterns_fixed,
+        "check_recipes": check_recipes,
+        "do_not_repeat": do_not_repeat,
+    })
+}
+
+pub fn save_tender_kb_file(
+    workspace_root: &Path,
+    file_key: &str,
+    content: &str,
+) -> Result<(), String> {
+    ensure_tender_kb_scaffold(workspace_root);
+    let rel = match file_key {
+        "patterns-fixed" => "tender-agents/kb/patterns-fixed.md",
+        "check-recipes" => "tender-agents/kb/check-recipes.md",
+        "do-not-repeat" => "tender-agents/kb/do-not-repeat.md",
+        _ => return Err(format!("invalid tender KB key `{}`", file_key)),
+    };
+    fs::write(workspace_root.join(rel), content).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TriagePlanEnvelope {
     #[serde(default)]
@@ -186,6 +659,34 @@ struct VerifierOutcomeEnvelope {
     summary: String,
     #[serde(default)]
     item_outcomes: Vec<VerifiedItemOutcome>,
+    #[serde(default)]
+    tender_kb_updates: Vec<TenderKbRuleProposal>,
+    #[serde(default)]
+    reviewer_kb_updates: Vec<ReviewerKbRuleProposal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TenderKbRuleProposal {
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    target_agent: Option<String>,
+    #[serde(default)]
+    rule: String,
+    #[serde(default)]
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewerKbRuleProposal {
+    #[serde(default)]
+    brain_id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    rule: String,
+    #[serde(default)]
+    rationale: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +894,33 @@ pub fn execute_tender_pr_cycle(
         &token,
     )?;
 
+    // Ground the isolated worktree with the user's local app checkout (linked dependencies, build cache, CLAUDE.md/README/manifests).
+    let local_checkout = resolve_local_checkout_dir(repo_cfg);
+    let mut cargo_target_dir: Option<PathBuf> = None;
+    if let Some(ref lc) = local_checkout {
+        let linked_deps = link_local_dependencies_into_worktree(lc, &wt.path);
+        let target_candidate = lc.join("target");
+        if target_candidate.is_dir() && wt.path.join("Cargo.toml").is_file() {
+            cargo_target_dir = Some(target_candidate);
+        }
+        eprintln!(
+            "[tender] Grounded {}#{} with local checkout `{}` (linked deps: {:?})",
+            repo_cfg.full_name,
+            pr_snap.pr_number,
+            lc.display(),
+            linked_deps
+        );
+    }
+
+    let app_context = load_repo_app_context(&wt.path, local_checkout.as_deref());
+    let effective_check_cmd = repo_cfg
+        .local_check_cmd
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| infer_local_check_cmd(&wt.path));
+
     // Pull any prior Multi-Lens Code Reviewer observations for additional structured precision.
     let key = LedgerStore::pr_key(&repo_cfg.full_name, pr_snap.pr_number);
     let ledger_snap = LedgerStore::load_or_default(state_dir)?;
@@ -402,6 +930,7 @@ pub fn execute_tender_pr_cycle(
         .map(|pr| serde_json::to_string_pretty(&pr.observations).unwrap_or_default())
         .unwrap_or_else(|| "[]".to_string());
     let living_docs = load_living_docs_bundle(workspace, &repo_cfg.full_name);
+    let triage_kb = load_tender_kb_bundle(workspace, "01-tender-triage", &repo_cfg.full_name);
 
     // STAGE 1: Triage & Disjoint Packet Planner
     update_worker_chip(
@@ -415,6 +944,8 @@ pub fn execute_tender_pr_cycle(
     let triage_prompt_hdr = load_tender_agent_prompt(workspace, "01-tender-triage");
     let triage_plan = run_triage_agent(
         &triage_prompt_hdr,
+        &triage_kb,
+        &app_context,
         &living_docs,
         &prior_reviewer_obs,
         &cfg.agents,
@@ -455,14 +986,18 @@ pub fn execute_tender_pr_cycle(
         g.save(state_dir);
     }
 
-    // STAGE 2: Parallel Intercalated Domain Fixer Workers
+    // STAGE 2: Parallel Intercalated Domain Fixer Workers (grounded with Tender KB + full app context)
     if !packets.is_empty() {
+        let fixer_kb = load_tender_kb_bundle(workspace, "02-tender-fixer", &repo_cfg.full_name);
         run_parallel_fixer_packets(
             workspace,
             state_dir,
             cfg,
             runners,
             &wt.path,
+            &fixer_kb,
+            &app_context,
+            effective_check_cmd.as_deref(),
             &packets,
             items,
             live_worker,
@@ -480,16 +1015,11 @@ pub fn execute_tender_pr_cycle(
         .into());
     }
 
-    // STAGE 3A: Local Check Verification Gate + 1 bounded repair attempt if failed
+    // STAGE 3A: Mandatory Local Check Verification Gate + 1 bounded repair attempt if failed
     let has_dirty_changes = !status_out.trim().is_empty();
     let mut check_passed = true;
-    let mut check_log = String::from("(no local_check_cmd configured)");
-    if has_dirty_changes
-        && let Some(check_cmd) = repo_cfg
-            .local_check_cmd
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-    {
+    let mut check_log = String::from("(no code edits or no runnable test suite detected)");
+    if has_dirty_changes && let Some(ref check_cmd) = effective_check_cmd {
         update_worker_chip(
             live_worker,
             state_dir,
@@ -498,7 +1028,7 @@ pub fn execute_tender_pr_cycle(
             "shell",
             "running",
         );
-        let (ok1, log1) = run_local_check_gate(&wt.path, check_cmd);
+        let (ok1, log1) = run_local_check_gate(&wt.path, check_cmd, cargo_target_dir.as_deref());
         check_passed = ok1;
         check_log = log1.clone();
         if !ok1 {
@@ -516,10 +1046,12 @@ pub fn execute_tender_pr_cycle(
                 runners.alt,
                 runners.lead,
                 &wt.path,
+                &app_context,
                 check_cmd,
                 &log1,
             );
-            let (ok2, log2) = run_local_check_gate(&wt.path, check_cmd);
+            let (ok2, log2) =
+                run_local_check_gate(&wt.path, check_cmd, cargo_target_dir.as_deref());
             check_passed = ok2;
             check_log = log2;
             update_worker_chip(
@@ -559,7 +1091,7 @@ pub fn execute_tender_pr_cycle(
     }
     let git_diff_text = run_git(Some(&wt.path), &["diff", "--cached"])?;
 
-    // STAGE 3B: Cross-Model Adversarial Diff Verifier (`03-tender-verifier`, opposite runner)
+    // STAGE 3B: Cross-Model Adversarial Diff Verifier & Learner (`03-tender-verifier`, opposite runner)
     update_worker_chip(
         live_worker,
         state_dir,
@@ -569,8 +1101,11 @@ pub fn execute_tender_pr_cycle(
         "running",
     );
     let verifier_prompt_hdr = load_tender_agent_prompt(workspace, "03-tender-verifier");
+    let verifier_kb = load_tender_kb_bundle(workspace, "03-tender-verifier", &repo_cfg.full_name);
     let verified = run_verifier_agent(
         &verifier_prompt_hdr,
+        &verifier_kb,
+        &app_context,
         &cfg.agents,
         runners.alt,
         runners.lead,
@@ -590,6 +1125,8 @@ pub fn execute_tender_pr_cycle(
         runners.alt.slug(),
         "done",
     );
+
+    let applied_learning = apply_learned_kb_updates(workspace, &verified);
 
     // Map verifier outcomes onto `TenderHandledItem`s
     let mut handled_now = build_handled_items(items, &triage_plan, &verified);
@@ -620,6 +1157,15 @@ pub fn execute_tender_pr_cycle(
     tender_state.last_tended_feedback_at = Some(latest_feedback_at.to_string());
     tender_state.last_attempt_key = None;
     tender_state.attempts_for_key = 0;
+    tender_state.local_context_used = local_checkout.as_ref().map(|p| p.display().to_string());
+    tender_state.last_check_cmd_used = effective_check_cmd.clone();
+    if !applied_learning.is_empty() {
+        tender_state.learned_rules.extend(applied_learning);
+        if tender_state.learned_rules.len() > 40 {
+            let overflow = tender_state.learned_rules.len() - 40;
+            tender_state.learned_rules.drain(..overflow);
+        }
+    }
     tender_state.last_summary = Some(if !verified.summary.trim().is_empty() {
         verified.summary.trim().to_string()
     } else {
@@ -819,9 +1365,107 @@ pub fn approve_and_push_staged_patch(
     Ok(pushed_sha)
 }
 
+fn apply_learned_kb_updates(
+    workspace: &Path,
+    verified: &VerifierOutcomeEnvelope,
+) -> Vec<LearnedRuleRecord> {
+    let mut recorded = Vec::new();
+    let now = Utc::now().to_rfc3339();
+
+    for prop in &verified.tender_kb_updates {
+        let rule = prop.rule.trim();
+        if rule.is_empty() {
+            continue;
+        }
+        let target_norm = match prop.target.trim() {
+            "patterns-fixed" | "patterns_fixed" => "patterns-fixed",
+            "check-recipes" | "check_recipes" => "check-recipes",
+            "do-not-repeat" | "do_not_repeat" => "do-not-repeat",
+            "agent-lesson" | "agent_lesson" => "agent-lesson",
+            _ => "do-not-repeat",
+        };
+        let agent_opt = prop
+            .target_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| TENDER_AGENTS.contains(a));
+
+        if matches!(
+            append_tender_kb_entry(workspace, target_norm, agent_opt, rule),
+            Ok(true)
+        ) {
+            let target_label = if target_norm == "agent-lesson" {
+                format!(
+                    "tender-agents/{}/kb/lessons.md",
+                    agent_opt.unwrap_or("02-tender-fixer")
+                )
+            } else {
+                format!("tender-agents/kb/{}.md", target_norm)
+            };
+            eprintln!("[tender-kb] Learned rule -> {}: {}", target_label, rule);
+            recorded.push(LearnedRuleRecord {
+                scope: "tender_kb".to_string(),
+                target: target_label,
+                rule: rule.to_string(),
+                rationale: prop.rationale.trim().to_string(),
+                learned_at_utc: now.clone(),
+            });
+        }
+    }
+
+    for prop in &verified.reviewer_kb_updates {
+        let rule = prop.rule.trim();
+        if rule.is_empty() {
+            continue;
+        }
+        let brain = prop.brain_id.trim();
+        let kind = match prop.kind.trim() {
+            "lesson" | "false-positive" | "exemplar" => prop.kind.trim(),
+            _ => "lesson",
+        };
+        let kb_rel = match kind {
+            "lesson" => "kb/lessons.md",
+            "false-positive" => "kb/false-positives.md",
+            "exemplar" => "kb/exemplars.md",
+            _ => "kb/lessons.md",
+        };
+        let kb_path = workspace.join("agents").join(brain).join(kb_rel);
+        let existing = fs::read_to_string(&kb_path).unwrap_or_default();
+        let norm_new = rule.trim_start_matches("- ").trim().to_ascii_lowercase();
+        let already_present = existing.lines().any(|line| {
+            line.trim()
+                .trim_start_matches("- ")
+                .trim()
+                .to_ascii_lowercase()
+                == norm_new
+        });
+        if already_present {
+            continue;
+        }
+        if append_kb_entry(workspace, brain, kind, rule).is_ok() {
+            let target_label = format!("agents/{}/{}", brain, kb_rel);
+            eprintln!(
+                "[reviewer-kb] Adjusted reviewer rule -> {}: {}",
+                target_label, rule
+            );
+            recorded.push(LearnedRuleRecord {
+                scope: "reviewer_kb".to_string(),
+                target: target_label,
+                rule: rule.to_string(),
+                rationale: prop.rationale.trim().to_string(),
+                learned_at_utc: now.clone(),
+            });
+        }
+    }
+
+    recorded
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_triage_agent(
     prompt_hdr: &str,
+    tender_kb: &str,
+    app_context: &str,
     living_docs: &str,
     prior_obs_json: &str,
     agents_cfg: &AgentsConfig,
@@ -850,6 +1494,8 @@ fn run_triage_agent(
 
     let prompt = format!(
         "{prompt_hdr}\n\n\
+         {tender_kb}\n\n\
+         {app_context}\n\n\
          ## Living Repository Context\n{living_docs}\n\n\
          ## Prior Code-Reviewer Structured Observations (for reference)\n{prior_obs}\n\n\
          ## Security Boundary\n\
@@ -906,6 +1552,9 @@ fn run_parallel_fixer_packets(
     cfg: &WorkspaceConfig,
     runners: RunnerPair,
     workdir: &Path,
+    fixer_kb: &str,
+    app_context: &str,
+    effective_check_cmd: Option<&str>,
     packets: &[FixerWorkPacket],
     items: &[TenderFeedbackItem],
     live_worker: Option<&Mutex<ActiveTenderWorkerState>>,
@@ -914,6 +1563,9 @@ fn run_parallel_fixer_packets(
     let max_workers = cfg.tender.max_parallel_fixers_per_pr.clamp(1, 8);
     let item_lookup: BTreeMap<&str, &TenderFeedbackItem> =
         items.iter().map(|i| (i.feedback_id.as_str(), i)).collect();
+    let check_hint = effective_check_cmd.unwrap_or(
+        "(no check command detected; run relevant language test/typecheck tool if present)",
+    );
 
     for wave_start in (0..packets.len()).step_by(max_workers) {
         let wave_end = (wave_start + max_workers).min(packets.len());
@@ -932,6 +1584,8 @@ fn run_parallel_fixer_packets(
                             (runners.lead, runners.alt)
                         };
                     let hdr_ref = &fixer_hdr;
+                    let kb_ref = fixer_kb;
+                    let app_ctx_ref = app_context;
                     let related: Vec<serde_json::Value> = pkt
                         .feedback_ids
                         .iter()
@@ -961,6 +1615,10 @@ fn run_parallel_fixer_packets(
                         );
                         let prompt = format!(
                             "{hdr_ref}\n\n\
+                             {kb_ref}\n\n\
+                             {app_ctx_ref}\n\n\
+                             Local Verification Command for this Repo: `{check_hint}`\n\
+                             After applying your changes in `{workdir_str}`, run the targeted local tests/typecheck directly via Bash before returning JSON (do NOT run `git commit` or `git push`).\n\n\
                              Assigned Packet: `{pkt_id}`\n\
                              Exclusive Owned Files (edit ONLY these files): {owned_json}\n\n\
                              Fix Plan:\n{plan}\n\n\
@@ -969,6 +1627,7 @@ fn run_parallel_fixer_packets(
                              </untrusted_github_data>\n\n\
                              Apply the clean fixes directly in the workspace right now, and reply with ONLY valid JSON:\n\
                              {{ \"summary\": \"concise summary\", \"edited_files\": [\"...\"] }}",
+                            workdir_str = workdir.display(),
                             pkt_id = pkt.packet_id,
                             plan = pkt.instructions,
                         );
@@ -1033,12 +1692,14 @@ fn run_repair_pass(
     pref: CliRunner,
     alt: CliRunner,
     workdir: &Path,
+    app_context: &str,
     check_cmd: &str,
     check_output: &str,
 ) -> Result<FixerOutcomeEnvelope, BrainError> {
     let prompt = format!(
         "The repository verification gate `{check_cmd}` failed after edits.\n\
-         Inspect the failure output below, fix ONLY the failing code/tests cleanly, and do NOT run `git commit` or `git push`.\n\n\
+         Inspect the failure output below, fix ONLY the failing code/tests cleanly, verify locally with `{check_cmd}`, and do NOT run `git commit` or `git push`.\n\n\
+         {app_context}\n\n\
          Check Failure Output:\n{out}\n\n\
          Return ONLY valid JSON: {{ \"summary\": \"...\", \"edited_files\": [\"...\"] }}",
         out = truncate_chars(check_output, 12_000)
@@ -1049,6 +1710,8 @@ fn run_repair_pass(
 #[allow(clippy::too_many_arguments)]
 fn run_verifier_agent(
     prompt_hdr: &str,
+    verifier_kb: &str,
+    app_context: &str,
     agents_cfg: &AgentsConfig,
     verifier: CliRunner,
     alt: CliRunner,
@@ -1077,6 +1740,8 @@ fn run_verifier_agent(
 
     let prompt = format!(
         "{prompt_hdr}\n\n\
+         {verifier_kb}\n\n\
+         {app_context}\n\n\
          PR #{num}: {title}\n\
          Local Check Gate Passed: {check_passed}\n\
          Check Output Tail:\n{check_tail}\n\n\
@@ -1096,6 +1761,22 @@ fn run_verifier_agent(
                \"action\": \"fixed\" | \"already_addressed\" | \"explained_rationale\" | \"needs_human\",\n\
                \"reply_text\": \"Concise technical response citing exact files/lines or check evidence\",\n\
                \"resolve_thread\": true\n\
+             }}\n\
+           ],\n\
+           \"tender_kb_updates\": [\n\
+             {{\n\
+               \"target\": \"patterns-fixed\" | \"check-recipes\" | \"do-not-repeat\" | \"agent-lesson\",\n\
+               \"target_agent\": \"01-tender-triage\" | \"02-tender-fixer\" | \"03-tender-verifier\" | null,\n\
+               \"rule\": \"One generalizable non-redundant rule worth remembering across PRs\",\n\
+               \"rationale\": \"Why this rule prevents a repeated bug or noisy fix\"\n\
+             }}\n\
+           ],\n\
+           \"reviewer_kb_updates\": [\n\
+             {{\n\
+               \"brain_id\": \"01-correctness\" | \"02-security\" | \"03-concurrency\" | \"04-tests\" | \"05-architecture\" | \"06-adversarial\",\n\
+               \"kind\": \"lesson\" | \"false-positive\" | \"exemplar\",\n\
+               \"rule\": \"One concise rule only when prudent to tune the upstream Code Reviewer\",\n\
+               \"rationale\": \"Why adjusting this reviewer rule reduces false positives or catches a real gap\"\n\
              }}\n\
            ]\n\
          }}",
@@ -1318,25 +1999,46 @@ fn post_replies_and_resolve_threads(
     );
 }
 
-fn run_local_check_gate(workdir: &Path, check_cmd: &str) -> (bool, String) {
-    #[cfg(unix)]
-    let out = Command::new("/bin/sh")
-        .args(["-c", check_cmd])
-        .current_dir(workdir)
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
-        .stdin(Stdio::null())
-        .output();
-    #[cfg(windows)]
-    let out = Command::new("cmd")
-        .args(["/C", check_cmd])
-        .current_dir(workdir)
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
-        .stdin(Stdio::null())
-        .output();
+fn run_local_check_gate(
+    workdir: &Path,
+    check_cmd: &str,
+    cargo_target_dir: Option<&Path>,
+) -> (bool, String) {
+    let home = home_dir();
+    let local_bins = vec![
+        workdir.join("node_modules").join(".bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        home.join(".cargo").join("bin"),
+        home.join(".local").join("bin"),
+    ];
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_parts: Vec<PathBuf> = local_bins.into_iter().filter(|p| p.is_dir()).collect();
+    path_parts.extend(std::env::split_paths(&existing_path));
+    let merged_path = std::env::join_paths(path_parts).unwrap_or(existing_path);
 
-    match out {
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", check_cmd]);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", check_cmd]);
+        c
+    };
+
+    cmd.current_dir(workdir)
+        .env("PATH", merged_path)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .stdin(Stdio::null());
+    if let Some(target_dir) = cargo_target_dir {
+        cmd.env("CARGO_TARGET_DIR", target_dir);
+    }
+
+    match cmd.output() {
         Ok(o) => {
             let combined = format!(
                 "{}\n{}",
@@ -1565,5 +2267,71 @@ mod tests {
         let reply = format_tender_reply_body("Added explicit bounds check", Some("1234567890"));
         assert!(reply.contains(BOT_TENDER_MARKER));
         assert!(reply.contains("`1234567`"));
+    }
+
+    #[test]
+    fn infers_local_check_cmd_from_repo_manifests() {
+        let dir = std::env::temp_dir().join(format!("otto_infer_cmd_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+        assert_eq!(
+            infer_local_check_cmd(&dir).as_deref(),
+            Some("cargo clippy --all-targets -- -D warnings && cargo test --all-targets")
+        );
+
+        fs::remove_file(dir.join("Cargo.toml")).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"web-app","scripts":{"typecheck":"tsc --noEmit","test":"vitest run"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            infer_local_check_cmd(&dir).as_deref(),
+            Some("npm run typecheck && npm test")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matches_github_remotes_and_deduplicates_tender_kb_rules() {
+        assert!(remote_url_matches_repo(
+            "git@github.com:acme-org/web-app.git",
+            "acme-org/web-app"
+        ));
+        assert!(remote_url_matches_repo(
+            "https://github.com/Acme-Org/Web-App",
+            "acme-org/web-app"
+        ));
+        assert!(!remote_url_matches_repo(
+            "https://github.com/acme-org/other.git",
+            "acme-org/web-app"
+        ));
+
+        let ws = std::env::temp_dir().join(format!("otto_tender_kb_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+
+        assert_eq!(
+            append_tender_kb_entry(
+                &ws,
+                "do-not-repeat",
+                None,
+                "Always check gitignored symlinks before git add -A"
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            append_tender_kb_entry(
+                &ws,
+                "do-not-repeat",
+                None,
+                "always check gitignored symlinks before git add -A"
+            ),
+            Ok(false)
+        );
+        let _ = fs::remove_dir_all(&ws);
     }
 }

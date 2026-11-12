@@ -217,7 +217,13 @@ enum WatchAction {
         #[arg(long)]
         gdrive_folder_id: Option<String>,
         #[arg(long)]
+        local_repo_path: Option<String>,
+        #[arg(long)]
         local_check_cmd: Option<String>,
+        #[arg(long)]
+        no_review: bool,
+        #[arg(long)]
+        no_tender: bool,
     },
     Remove {
         full_name: String,
@@ -517,7 +523,10 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
             forced_account,
             event_policy,
             gdrive_folder_id,
+            local_repo_path,
             local_check_cmd,
+            no_review,
+            no_tender,
         } => {
             let acct_pol = if account_policy.eq_ignore_ascii_case("forced") {
                 AccountPolicy::Forced
@@ -537,9 +546,10 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
                 forced_account,
                 review_event_policy: ev_pol,
                 gdrive_folder_id,
+                local_repo_path,
                 local_check_cmd,
-                enabled: true,
-                tender_enabled: true,
+                enabled: !no_review,
+                tender_enabled: !no_tender,
             })?;
             cfg.save(config_path)?;
             println!("Registered watched repository `{}`.", full_name);
