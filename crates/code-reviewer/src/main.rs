@@ -8,6 +8,7 @@ mod github;
 mod m1;
 mod server;
 mod state;
+mod tender;
 mod ui_html;
 
 use crate::brains::{
@@ -29,11 +30,14 @@ use crate::m1::{
 };
 use crate::server::{DEFAULT_UI_BIND, DEFAULT_UI_PORT, open_tunneled_ui, run_ui_server};
 use crate::state::{
-    ActiveWorkerState, CompletedBannerOutcome, LedgerStore, StatusBannerContext, TrackedPrState,
-    TriggerDecision, build_github_review_artifacts, evaluate_pr_trigger,
-    format_completed_status_banner, format_interrupted_status_banner, format_queued_status_banner,
-    format_running_status_banner, format_superseded_status_banner, is_process_alive_str,
+    ActiveTenderWorkerState, ActiveWorkerState, BOT_TENDER_MARKER, CompletedBannerOutcome,
+    LedgerStore, STATUS_BANNER_MARKER, StatusBannerContext, TenderPrSnapshot, TenderPrState,
+    TenderTriggerDecision, TrackedPrState, TriggerDecision, build_github_review_artifacts,
+    evaluate_pr_trigger, evaluate_tender_trigger, format_completed_status_banner,
+    format_interrupted_status_banner, format_queued_status_banner, format_running_status_banner,
+    format_superseded_status_banner, is_process_alive_str,
 };
+use crate::tender::execute_tender_pr_cycle;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -88,6 +92,30 @@ enum Commands {
         /// Optional preferred lead runner (`claude` or `agy`) for intercalated load splitting.
         #[arg(long)]
         lead_runner: Option<String>,
+    },
+    /// Poll all enabled repositories for unhandled PR code reviews (0 AI tokens when idle) and dispatch Code Tender async workers.
+    TendPoll {
+        /// Preview tender trigger decisions without invoking LLMs or pushing commits.
+        #[arg(long)]
+        dry_run: bool,
+        /// Optional filter to poll only a single `<owner>/<repo>`.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Handle PR review feedback for a specific Pull Request immediately in an isolated writable Code Tender worker session.
+    Tend {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        pr: u64,
+        #[arg(long)]
+        dry_run: bool,
+        /// Optional preferred lead runner (`claude` or `agy`) for intercalated load splitting.
+        #[arg(long)]
+        lead_runner: Option<String>,
+        /// Stage the generated patch and draft replies in the Code Tender UI instead of pushing directly.
+        #[arg(long)]
+        stage_only: bool,
     },
     /// Publish/refresh a repository's Living Documentation bundle in Google Drive (`00 Living Docs`).
     SyncDocs {
@@ -248,6 +276,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pr,
             dry_run,
             lead_runner.as_deref(),
+        )?,
+        Commands::TendPoll { dry_run, repo } => {
+            run_tender_poll(&workspace, &config_path, dry_run, repo.as_deref())?
+        }
+        Commands::Tend {
+            repo,
+            pr,
+            dry_run,
+            lead_runner,
+            stage_only,
+        } => run_single_pr_tend(
+            &workspace,
+            &config_path,
+            &repo,
+            pr,
+            dry_run,
+            lead_runner.as_deref(),
+            stage_only,
         )?,
         Commands::SyncDocs { repo } => run_sync_docs(&workspace, &config_path, &repo)?,
         Commands::Kb { action } => match action {
@@ -493,6 +539,7 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
                 gdrive_folder_id,
                 local_check_cmd,
                 enabled: true,
+                tender_enabled: true,
             })?;
             cfg.save(config_path)?;
             println!("Registered watched repository `{}`.", full_name);
@@ -515,36 +562,7 @@ struct PollLockGuard {
 
 impl PollLockGuard {
     fn try_acquire(state_dir: &Path) -> Result<Option<Self>, std::io::Error> {
-        fs::create_dir_all(state_dir)?;
-        let lock_path = state_dir.join("poll.lock");
-
-        if lock_path.exists() {
-            let stale = match fs::read_to_string(&lock_path) {
-                Ok(raw) => {
-                    let pid_str = raw.lines().next().unwrap_or("").trim();
-                    !is_process_alive_str(pid_str)
-                }
-                Err(_) => true,
-            };
-            if stale {
-                let _ = fs::remove_file(&lock_path);
-            } else {
-                return Ok(None);
-            }
-        }
-
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(mut f) => {
-                let _ = writeln!(f, "{}", std::process::id());
-                Ok(Some(Self { lock_path }))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-            Err(e) => Err(e),
-        }
+        try_acquire_named_lock(state_dir, "poll.lock")
     }
 }
 
@@ -1640,5 +1658,491 @@ fn run_status(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             pr.gdrive_doc_url.as_deref().unwrap_or("(local-only)")
         );
     }
+    println!(
+        "\n=== Code Tender PRs ({}) ===",
+        ledger.tender_pull_requests.len()
+    );
+    for t in ledger.tender_pull_requests.values() {
+        println!(
+            "- {}#{} [{}] cycles={} sha={} handled={} staged={}",
+            t.repo,
+            t.pr_number,
+            t.last_status.badge(),
+            t.runs_count,
+            t.last_tended_sha.as_deref().unwrap_or("-"),
+            t.handled_items.len(),
+            t.staged_patch.is_some()
+        );
+    }
+    Ok(())
+}
+
+struct TenderWorkerCleanupGuard {
+    state_dir: PathBuf,
+    repo: String,
+    pr_number: u64,
+}
+
+impl Drop for TenderWorkerCleanupGuard {
+    fn drop(&mut self) {
+        ActiveTenderWorkerState::remove(&self.state_dir, &self.repo, self.pr_number);
+    }
+}
+
+fn try_acquire_named_lock(
+    state_dir: &Path,
+    filename: &str,
+) -> Result<Option<PollLockGuard>, std::io::Error> {
+    fs::create_dir_all(state_dir)?;
+    let lock_path = state_dir.join(filename);
+    if lock_path.exists() {
+        let stale = match fs::read_to_string(&lock_path) {
+            Ok(raw) => {
+                let pid_str = raw.lines().next().unwrap_or("").trim();
+                !is_process_alive_str(pid_str)
+            }
+            Err(_) => true,
+        };
+        if stale {
+            let _ = fs::remove_file(&lock_path);
+        } else {
+            return Ok(None);
+        }
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{}", std::process::id());
+            Ok(Some(PollLockGuard { lock_path }))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn run_tender_poll(
+    workspace: &Path,
+    config_path: &Path,
+    dry_run: bool,
+    only_repo: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = WorkspaceConfig::load(config_path)?;
+    if !cfg.tender.enabled {
+        println!("[TENDER-DISABLED] `tender.enabled = false` in config/repos.toml (0 AI tokens).");
+        return Ok(());
+    }
+
+    let state_dir = expand_tilde(&cfg.state_dir);
+    let _lock = if !dry_run {
+        match try_acquire_named_lock(&state_dir, "tender-poll.lock")? {
+            Some(g) => Some(g),
+            None => {
+                println!("[SKIP-ACTIVE] Another `code-reviewer tend-poll` is active.");
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
+    let gh = GitHubClient::new(&cfg);
+    let max_parallel = cfg.tender.max_parallel_prs.clamp(1, 12);
+    let mut active_count = ActiveTenderWorkerState::list_active(&state_dir).len();
+
+    for repo_cfg in cfg.repos.iter().filter(|r| r.enabled && r.tender_enabled) {
+        if let Some(filter) = only_repo
+            && !repo_cfg.full_name.eq_ignore_ascii_case(filter)
+        {
+            continue;
+        }
+        let poll_account = repo_cfg
+            .forced_account
+            .as_deref()
+            .unwrap_or(cfg.accounts.primary.as_str());
+        let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+        let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
+
+        for snap in &snapshots {
+            if let Some(running) = ActiveTenderWorkerState::is_pr_worker_running(
+                &state_dir,
+                &repo_cfg.full_name,
+                snap.pr_number,
+            ) {
+                println!(
+                    "[TENDER-IN-FLIGHT] {}#{} already running PID {} (phase={})",
+                    repo_cfg.full_name, snap.pr_number, running.pid, running.phase
+                );
+                continue;
+            }
+
+            let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
+            let existing = ledger_snap.tender_pull_requests.get(&key);
+            let allowed = cfg.is_tender_author_allowed(repo_cfg, &snap.author);
+            let decision = evaluate_tender_trigger(
+                existing,
+                snap,
+                allowed,
+                cfg.tender.max_autonomous_cycles_per_pr.clamp(1, 10),
+                cfg.tender.ignore_clean_pass_reviews,
+            );
+
+            match decision {
+                TenderTriggerDecision::SkipDraft => println!(
+                    "[TENDER-SKIP-DRAFT] {}#{} ({})",
+                    repo_cfg.full_name, snap.pr_number, snap.title
+                ),
+                TenderTriggerDecision::SkipFork => println!(
+                    "[TENDER-SKIP-FORK] {}#{} is a cross-repository fork",
+                    repo_cfg.full_name, snap.pr_number
+                ),
+                TenderTriggerDecision::SkipUnownedAuthor => println!(
+                    "[TENDER-SKIP-AUTHOR] {}#{} author `{}` not in Code Tender allowlist",
+                    repo_cfg.full_name, snap.pr_number, snap.author
+                ),
+                TenderTriggerDecision::SkipMaxCyclesReached => println!(
+                    "[TENDER-MAX-CYCLES] {}#{} reached max_autonomous_cycles_per_pr ({})",
+                    repo_cfg.full_name, snap.pr_number, cfg.tender.max_autonomous_cycles_per_pr
+                ),
+                TenderTriggerDecision::UpToDate => println!(
+                    "[TENDER-UP-TO-DATE] {}#{} @ {}",
+                    repo_cfg.full_name,
+                    snap.pr_number,
+                    &snap.head_sha[..snap.head_sha.len().min(7)]
+                ),
+                TenderTriggerDecision::HandleFeedback {
+                    head_sha,
+                    items,
+                    latest_feedback_at,
+                } => {
+                    println!(
+                        "[TENDER-TRIGGER] {}#{} @ {} ({} feedback item(s))",
+                        repo_cfg.full_name,
+                        snap.pr_number,
+                        &head_sha[..head_sha.len().min(7)],
+                        items.len()
+                    );
+                    if dry_run {
+                        continue;
+                    }
+                    if cfg.tender.poll_only_mode {
+                        println!(
+                            "[TENDER-POLL-ONLY-NO-AI] {}#{} needs tending, but `tender.poll_only_mode = true` (0 AI tokens).",
+                            repo_cfg.full_name, snap.pr_number
+                        );
+                        continue;
+                    }
+                    if let Err(e) = resolve_active_runners(&cfg) {
+                        println!(
+                            "[TENDER-WAIT-AUTH] Deferring {}#{} ({})",
+                            repo_cfg.full_name, snap.pr_number, e
+                        );
+                        continue;
+                    }
+
+                    let attempt_key = format!("{}:{}", head_sha, latest_feedback_at);
+                    let prior_attempts = existing
+                        .and_then(|t| {
+                            (t.last_attempt_key.as_deref() == Some(attempt_key.as_str()))
+                                .then_some(t.attempts_for_key)
+                        })
+                        .unwrap_or(0);
+                    if prior_attempts >= 2 {
+                        println!(
+                            "[TENDER-CIRCUIT-BREAKER] {}#{} hit {} failed attempts for `{}`; pausing auto retries (0 AI tokens).",
+                            repo_cfg.full_name, snap.pr_number, prior_attempts, attempt_key
+                        );
+                        continue;
+                    }
+
+                    if active_count >= max_parallel {
+                        println!(
+                            "[TENDER-SLOT-WAIT] {}#{} waiting (active {}/{})",
+                            repo_cfg.full_name, snap.pr_number, active_count, max_parallel
+                        );
+                        continue;
+                    }
+
+                    let slot = LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                        let s = store.tender_dispatch_counter;
+                        store.tender_dispatch_counter =
+                            store.tender_dispatch_counter.wrapping_add(1);
+                        let t = store
+                            .tender_pull_requests
+                            .entry(key.clone())
+                            .or_insert_with(|| {
+                                TenderPrState::new(
+                                    &repo_cfg.full_name,
+                                    snap.pr_number,
+                                    &snap.title,
+                                    &snap.author,
+                                    &snap.base_ref,
+                                    &snap.head_ref,
+                                )
+                            });
+                        if t.last_attempt_key.as_deref() == Some(attempt_key.as_str()) {
+                            t.attempts_for_key = t.attempts_for_key.saturating_add(1);
+                        } else {
+                            t.last_attempt_key = Some(attempt_key);
+                            t.attempts_for_key = 1;
+                        }
+                        s
+                    })?;
+
+                    let preferred_lead = if cfg.tender.intercalate_providers {
+                        if slot.is_multiple_of(2) {
+                            CliRunner::Claude
+                        } else {
+                            CliRunner::Agy
+                        }
+                    } else {
+                        cfg.agents.primary_runner
+                    };
+                    let runners = resolve_intercalated_runners(&cfg, Some(preferred_lead))?;
+                    let tender_account = cfg.select_tender_account(repo_cfg, &snap.author);
+                    let pid = spawn_async_tender_worker(
+                        workspace,
+                        &state_dir,
+                        &repo_cfg.full_name,
+                        snap,
+                        tender_account,
+                        runners,
+                    )?;
+                    active_count += 1;
+                    println!(
+                        "[TENDER-DISPATCHED] {}#{} -> async PID {} (runners=`{}`, active={}/{})",
+                        repo_cfg.full_name,
+                        snap.pr_number,
+                        pid,
+                        runners.label(),
+                        active_count,
+                        max_parallel
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn spawn_async_tender_worker(
+    workspace: &Path,
+    state_dir: &Path,
+    repo_full_name: &str,
+    snap: &TenderPrSnapshot,
+    tender_account: &str,
+    runners: RunnerPair,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let log_dir = home_dir().join(".cheap-otto/logs/code-reviewer");
+    fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join(format!(
+        "tender-{}-{}.log",
+        repo_fs_slug(repo_full_name),
+        snap.pr_number
+    ));
+    let out_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let err_file = out_file.try_clone()?;
+
+    let mut cmd = Command::new(exe);
+    cmd.current_dir(workspace)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("tend")
+        .arg("--repo")
+        .arg(repo_full_name)
+        .arg("--pr")
+        .arg(snap.pr_number.to_string())
+        .arg("--lead-runner")
+        .arg(runners.lead.slug())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let now = Utc::now().to_rfc3339();
+    let mut initial = ActiveTenderWorkerState {
+        pid,
+        repo: repo_full_name.to_string(),
+        pr_number: snap.pr_number,
+        title: snap.title.clone(),
+        head_sha: snap.head_sha.clone(),
+        tender_account: tender_account.to_string(),
+        lead_runner: runners.lead.slug().to_string(),
+        alt_runner: runners.alt.slug().to_string(),
+        phase: "spawning".to_string(),
+        packets_total: 0,
+        packets_done: 0,
+        started_at_utc: now.clone(),
+        updated_at_utc: now,
+        workers: BTreeMap::new(),
+    };
+    initial.save(state_dir);
+    Ok(pid)
+}
+
+fn run_single_pr_tend(
+    workspace: &Path,
+    config_path: &Path,
+    repo_name: &str,
+    pr_number: u64,
+    dry_run: bool,
+    lead_runner_arg: Option<&str>,
+    stage_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = WorkspaceConfig::load(config_path)?;
+    let repo_cfg = cfg
+        .repos
+        .iter()
+        .find(|r| r.full_name.eq_ignore_ascii_case(repo_name))
+        .ok_or_else(|| {
+            format!(
+                "repo `{}` is not registered in config/repos.toml",
+                repo_name
+            )
+        })?;
+    let state_dir = expand_tilde(&cfg.state_dir);
+
+    if !dry_run
+        && let Some(existing) = ActiveTenderWorkerState::is_pr_worker_running(
+            &state_dir,
+            &repo_cfg.full_name,
+            pr_number,
+        )
+        && existing.pid != std::process::id()
+    {
+        println!(
+            "[TENDER-SKIP-IN-FLIGHT] {}#{} already running PID {} (phase={}).",
+            repo_cfg.full_name, pr_number, existing.pid, existing.phase
+        );
+        return Ok(());
+    }
+
+    let _cleanup = if !dry_run {
+        Some(TenderWorkerCleanupGuard {
+            state_dir: state_dir.clone(),
+            repo: repo_cfg.full_name.clone(),
+            pr_number,
+        })
+    } else {
+        None
+    };
+
+    let gh = GitHubClient::new(&cfg);
+    let poll_account = repo_cfg
+        .forced_account
+        .as_deref()
+        .unwrap_or(cfg.accounts.primary.as_str());
+    let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+    let snap = snapshots
+        .iter()
+        .find(|p| p.pr_number == pr_number)
+        .ok_or_else(|| format!("open PR #{} not found on {}", pr_number, repo_cfg.full_name))?;
+
+    let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
+    let key = LedgerStore::pr_key(&repo_cfg.full_name, pr_number);
+    let existing = ledger_snap.tender_pull_requests.get(&key);
+
+    let items = match evaluate_tender_trigger(
+        existing,
+        snap,
+        true,
+        u32::MAX,
+        cfg.tender.ignore_clean_pass_reviews,
+    ) {
+        TenderTriggerDecision::HandleFeedback { items, .. } => items,
+        _ => {
+            // Manual UI trigger: collect unresolved threads or latest non-tender review feedback
+            snap.feedback_items
+                .iter()
+                .filter(|f| !f.body.contains(BOT_TENDER_MARKER))
+                .filter(|f| !f.body.contains(STATUS_BANNER_MARKER))
+                .filter(|f| !f.is_resolved && !f.body.trim().is_empty())
+                .cloned()
+                .collect()
+        }
+    };
+
+    if items.is_empty() {
+        println!(
+            "[TENDER-NOTHING-TO-DO] {}#{} has no open review feedback.",
+            repo_cfg.full_name, pr_number
+        );
+        return Ok(());
+    }
+
+    let latest_feedback_at = items
+        .iter()
+        .map(|i| i.created_at.as_str())
+        .max()
+        .unwrap_or("")
+        .to_string();
+
+    if dry_run {
+        println!(
+            "[TENDER-DRY-RUN] Would tend {}#{} ({} feedback items, latest={})",
+            repo_cfg.full_name,
+            pr_number,
+            items.len(),
+            latest_feedback_at
+        );
+        return Ok(());
+    }
+
+    let preferred = lead_runner_arg.and_then(CliRunner::from_slug);
+    let runners = resolve_intercalated_runners(&cfg, preferred)?;
+    let tender_account = cfg.select_tender_account(repo_cfg, &snap.author);
+    let now = Utc::now().to_rfc3339();
+    let mut init_worker = ActiveTenderWorkerState {
+        pid: std::process::id(),
+        repo: repo_cfg.full_name.clone(),
+        pr_number,
+        title: snap.title.clone(),
+        head_sha: snap.head_sha.clone(),
+        tender_account: tender_account.to_string(),
+        lead_runner: runners.lead.slug().to_string(),
+        alt_runner: runners.alt.slug().to_string(),
+        phase: "starting".to_string(),
+        packets_total: 0,
+        packets_done: 0,
+        started_at_utc: now.clone(),
+        updated_at_utc: now,
+        workers: BTreeMap::new(),
+    };
+    init_worker.save(&state_dir);
+    let live_worker = Mutex::new(init_worker);
+
+    let outcome = execute_tender_pr_cycle(
+        workspace,
+        &cfg,
+        repo_cfg,
+        &state_dir,
+        &gh,
+        snap,
+        &items,
+        &latest_feedback_at,
+        tender_account,
+        preferred,
+        stage_only,
+        Some(&live_worker),
+    )?;
+    println!(
+        "[TENDER-DONE] {}#{} status={} pushed={}",
+        repo_cfg.full_name,
+        pr_number,
+        outcome.last_status.badge(),
+        outcome.last_commit_pushed.as_deref().unwrap_or("(none)")
+    );
     Ok(())
 }

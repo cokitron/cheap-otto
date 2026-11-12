@@ -6,6 +6,7 @@
 use crate::config::{WorkspaceConfig, expand_tilde, validate_repo_slug};
 use crate::state::{
     BOT_COMMENT_MARKER, GitHubInlineCommentPayload, HumanReplyItem, OpenPrSnapshot,
+    TenderFeedbackItem, TenderFeedbackKind, TenderPrSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -379,6 +380,139 @@ query($owner: String!, $name: String!) {
         self.create_issue_comment(account, repo_full_name, pr_number, body)
     }
 
+    /// Polls open Pull Requests and all review summaries, inline review threads, and comments
+    /// for Code Tender in a single 1-point GraphQL request (0 AI tokens).
+    pub fn poll_tender_repository(
+        &self,
+        account: &str,
+        repo_full_name: &str,
+    ) -> Result<Vec<TenderPrSnapshot>, GitHubError> {
+        let (owner, name) = validate_repo_slug(repo_full_name)
+            .map_err(|_| GitHubError::InvalidRepo(repo_full_name.to_string()))?;
+
+        let query = r#"
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    openPrs: pullRequests(states: [OPEN], first: 25, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        isDraft
+        isCrossRepository
+        baseRefName
+        headRefName
+        headRefOid
+        author { login }
+        reviews(last: 20) {
+          nodes {
+            id
+            state
+            body
+            submittedAt
+            author { login }
+          }
+        }
+        comments(last: 25) {
+          nodes {
+            databaseId
+            author { login }
+            body
+            createdAt
+          }
+        }
+        reviewThreads(last: 40) {
+          nodes {
+            id
+            isResolved
+            path
+            line
+            originalLine
+            comments(last: 15) {
+              nodes {
+                databaseId
+                author { login }
+                body
+                createdAt
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+        let payload = serde_json::json!({
+            "query": query,
+            "variables": {
+                "owner": owner,
+                "name": name,
+            }
+        });
+        let raw = self.run_gh(
+            account,
+            &["api", "graphql", "--input", "-"],
+            Some(&serde_json::to_vec(&payload)?),
+        )?;
+        let root: Value = serde_json::from_str(&raw)?;
+        parse_graphql_tender_response(&root)
+    }
+
+    /// Posts an inline reply to a specific Pull Request review comment thread.
+    pub fn reply_to_pull_request_review_comment(
+        &self,
+        account: &str,
+        repo_full_name: &str,
+        pr_number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<PostedIssueComment, GitHubError> {
+        let endpoint = format!(
+            "repos/{}/pulls/{}/comments/{}/replies",
+            repo_full_name, pr_number, comment_id
+        );
+        let payload = serde_json::json!({ "body": body });
+        let out = self.run_gh(
+            account,
+            &["api", "--method", "POST", &endpoint, "--input", "-"],
+            Some(&serde_json::to_vec(&payload)?),
+        )?;
+        let resp: Value = serde_json::from_str(&out)?;
+        Ok(PostedIssueComment {
+            id: resp.get("id").and_then(Value::as_u64).unwrap_or(0),
+            html_url: resp
+                .get("html_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    /// Resolves a GitHub Pull Request review thread by its GraphQL node ID.
+    pub fn resolve_review_thread(
+        &self,
+        account: &str,
+        thread_node_id: &str,
+    ) -> Result<(), GitHubError> {
+        let query = r#"
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { id isResolved }
+  }
+}
+"#;
+        let payload = serde_json::json!({
+            "query": query,
+            "variables": { "threadId": thread_node_id }
+        });
+        let _ = self.run_gh(
+            account,
+            &["api", "graphql", "--input", "-"],
+            Some(&serde_json::to_vec(&payload)?),
+        )?;
+        Ok(())
+    }
+
     fn run_gh(
         &self,
         account: &str,
@@ -558,4 +692,193 @@ fn parse_linked_issues(nodes_val: &Value) -> Vec<LinkedIssue> {
         }
     }
     out
+}
+
+fn parse_graphql_tender_response(root: &Value) -> Result<Vec<TenderPrSnapshot>, GitHubError> {
+    let mut out = Vec::new();
+    let Some(nodes) = root["data"]["repository"]["openPrs"]["nodes"].as_array() else {
+        return Ok(out);
+    };
+
+    for pr in nodes {
+        let pr_number = pr["number"].as_u64().unwrap_or(0);
+        if pr_number == 0 {
+            continue;
+        }
+        let mut feedback_items = Vec::new();
+
+        if let Some(reviews) = pr["reviews"]["nodes"].as_array() {
+            for r in reviews {
+                let rev_id = r["id"].as_str().unwrap_or("");
+                let submitted_at = r["submittedAt"].as_str().unwrap_or("").to_string();
+                let body = r["body"].as_str().unwrap_or("").to_string();
+                if submitted_at.is_empty() || body.trim().is_empty() {
+                    continue;
+                }
+                feedback_items.push(TenderFeedbackItem {
+                    feedback_id: format!("review:{}", rev_id),
+                    thread_node_id: None,
+                    reply_comment_id: None,
+                    kind: TenderFeedbackKind::ReviewSummary,
+                    author: r["author"]["login"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    created_at: submitted_at,
+                    path: None,
+                    line: None,
+                    review_state: r["state"].as_str().map(ToString::to_string),
+                    is_resolved: false,
+                    body,
+                });
+            }
+        }
+
+        if let Some(comments) = pr["comments"]["nodes"].as_array() {
+            for c in comments {
+                let db_id = c["databaseId"].as_u64().unwrap_or(0);
+                let created_at = c["createdAt"].as_str().unwrap_or("").to_string();
+                let body = c["body"].as_str().unwrap_or("").to_string();
+                if created_at.is_empty() || body.trim().is_empty() {
+                    continue;
+                }
+                feedback_items.push(TenderFeedbackItem {
+                    feedback_id: format!("comment:{}", db_id),
+                    thread_node_id: None,
+                    reply_comment_id: Some(db_id),
+                    kind: TenderFeedbackKind::IssueComment,
+                    author: c["author"]["login"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    created_at,
+                    path: None,
+                    line: None,
+                    review_state: None,
+                    is_resolved: false,
+                    body,
+                });
+            }
+        }
+
+        if let Some(threads) = pr["reviewThreads"]["nodes"].as_array() {
+            for t in threads {
+                let thread_id = t["id"].as_str().map(ToString::to_string);
+                let is_resolved = t["isResolved"].as_bool().unwrap_or(false);
+                let path = t["path"].as_str().map(ToString::to_string);
+                let line = t["line"]
+                    .as_u64()
+                    .or_else(|| t["originalLine"].as_u64())
+                    .map(|n| n as u32);
+                if let Some(t_comments) = t["comments"]["nodes"].as_array() {
+                    for c in t_comments {
+                        let db_id = c["databaseId"].as_u64().unwrap_or(0);
+                        let created_at = c["createdAt"].as_str().unwrap_or("").to_string();
+                        let body = c["body"].as_str().unwrap_or("").to_string();
+                        if created_at.is_empty() {
+                            continue;
+                        }
+                        feedback_items.push(TenderFeedbackItem {
+                            feedback_id: format!("thread-comment:{}", db_id),
+                            thread_node_id: thread_id.clone(),
+                            reply_comment_id: if db_id > 0 { Some(db_id) } else { None },
+                            kind: TenderFeedbackKind::ReviewThreadComment,
+                            author: c["author"]["login"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            created_at,
+                            path: path.clone(),
+                            line,
+                            review_state: None,
+                            is_resolved,
+                            body,
+                        });
+                    }
+                }
+            }
+        }
+
+        feedback_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.push(TenderPrSnapshot {
+            pr_number,
+            title: pr["title"].as_str().unwrap_or("").to_string(),
+            author: pr["author"]["login"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            is_draft: pr["isDraft"].as_bool().unwrap_or(false),
+            is_fork: pr["isCrossRepository"].as_bool().unwrap_or(false),
+            base_ref: pr["baseRefName"].as_str().unwrap_or("main").to_string(),
+            head_ref: pr["headRefName"].as_str().unwrap_or("").to_string(),
+            head_sha: pr["headRefOid"].as_str().unwrap_or("").to_string(),
+            feedback_items,
+        });
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_graphql_tender_threads_and_reviews() {
+        let sample = serde_json::json!({
+            "data": {
+                "repository": {
+                    "openPrs": {
+                        "nodes": [{
+                            "number": 9,
+                            "title": "fix: null guard",
+                            "isDraft": false,
+                            "isCrossRepository": false,
+                            "baseRefName": "main",
+                            "headRefName": "fix/null-guard",
+                            "headRefOid": "deadbeef1234",
+                            "author": { "login": "alice-dev" },
+                            "reviews": {
+                                "nodes": [{
+                                    "id": "PRR_1",
+                                    "state": "CHANGES_REQUESTED",
+                                    "body": "Please fix edge case",
+                                    "submittedAt": "2026-11-12T11:00:00Z",
+                                    "author": { "login": "bob-reviewer" }
+                                }]
+                            },
+                            "comments": { "nodes": [] },
+                            "reviewThreads": {
+                                "nodes": [{
+                                    "id": "PRRT_99",
+                                    "isResolved": false,
+                                    "path": "src/auth.rs",
+                                    "line": 42,
+                                    "originalLine": 40,
+                                    "comments": {
+                                        "nodes": [{
+                                            "databaseId": 555,
+                                            "author": { "login": "bob-reviewer" },
+                                            "body": "Missing empty string check",
+                                            "createdAt": "2026-11-12T11:01:00Z"
+                                        }]
+                                    }
+                                }]
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_graphql_tender_response(&sample).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pr_number, 9);
+        assert_eq!(parsed[0].feedback_items.len(), 2);
+        assert_eq!(
+            parsed[0].feedback_items[1].thread_node_id.as_deref(),
+            Some("PRRT_99")
+        );
+        assert_eq!(parsed[0].feedback_items[1].reply_comment_id, Some(555));
+    }
 }

@@ -245,4 +245,86 @@ if ! nc -z 127.0.0.1 7430 2>/dev/null; then
 fi
 echo "[m1-provision] Web Dashboard GUI active on 127.0.0.1:7430"
 
+# 7. Write hardened launchd poller wrapper & LaunchAgent for Code Tender (`tend-poll`, 0 AI tokens when idle)
+cat > "$HOME/.cheap-otto/bin/otto-job-code-reviewer-code-tender.sh" <<'TENDER_WRAPPER_EOF'
+#!/bin/sh
+set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+START_TS=$(date +%s)
+mkdir -p "$HOME/.cheap-otto/logs/code-reviewer" "$HOME/.cheap-otto/runs/code-reviewer"
+
+if [ -f "$HOME/.code-reviewer/tender-poll.lock" ]; then
+  LOCK_PID=$(head -n 1 "$HOME/.code-reviewer/tender-poll.lock" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
+    exit 0
+  fi
+fi
+
+if ! pmset -g batt 2>/dev/null | grep -q "AC Power"; then
+  printf '{"job_id":"code-tender","status":"skipped_hardware_guard","started_epoch_secs":%s,"duration_secs":0}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/tender-history.jsonl"
+  exit 0
+fi
+THERM=$(sysctl -n kern.thermalstate 2>/dev/null || echo 0)
+if [ "$THERM" -ge 2 ] 2>/dev/null; then
+  printf '{"job_id":"code-tender","status":"skipped_hardware_guard","started_epoch_secs":%s,"duration_secs":0}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/tender-history.jsonl"
+  exit 0
+fi
+
+WT_DIR="$HOME/.cheap-otto/scheduled-worktrees/code-reviewer/pr-poller"
+if [ -d "$WT_DIR" ]; then
+  cd "$WT_DIR"
+fi
+"$HOME/.cargo/bin/code-reviewer" --workspace "$HOME/otto-workspaces/code-reviewer" tend-poll >> "$HOME/.cheap-otto/logs/code-reviewer/sched-code-tender.log" 2>&1
+RC=$?
+END_TS=$(date +%s)
+DUR=$((END_TS - START_TS))
+if [ "$RC" -eq 0 ] 2>/dev/null; then STATUS="pass"; else STATUS="fail"; fi
+printf '{"job_id":"code-tender","status":"%s","started_epoch_secs":%s,"duration_secs":%s}\n' "$STATUS" "$START_TS" "$DUR" >> "$HOME/.cheap-otto/runs/code-reviewer/tender-history.jsonl"
+exit "$RC"
+TENDER_WRAPPER_EOF
+chmod +x "$HOME/.cheap-otto/bin/otto-job-code-reviewer-code-tender.sh"
+
+TENDER_PLIST_PATH="$HOME/Library/LaunchAgents/com.cheapotto.code-reviewer.code-tender.plist"
+TENDER_RELOAD=0
+if ! grep -q "AbandonProcessGroup" "$TENDER_PLIST_PATH" 2>/dev/null; then
+  TENDER_RELOAD=1
+fi
+cat > "$TENDER_PLIST_PATH" <<TENDER_PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cheapotto.code-reviewer.code-tender</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>$HOME/.cheap-otto/bin/otto-job-code-reviewer-code-tender.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>$HOME/.cheap-otto/logs/code-reviewer/launchd-code-tender.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.cheap-otto/logs/code-reviewer/launchd-code-tender.err.log</string>
+</dict>
+</plist>
+TENDER_PLIST_EOF
+
+if [ "$TENDER_RELOAD" -eq 1 ]; then
+  launchctl bootout "gui/$UID_NUM/com.cheapotto.code-reviewer.code-tender" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID_NUM" "$TENDER_PLIST_PATH" 2>/dev/null || true
+elif ! launchctl print "gui/$UID_NUM/com.cheapotto.code-reviewer.code-tender" >/dev/null 2>&1; then
+  launchctl bootstrap "gui/$UID_NUM" "$TENDER_PLIST_PATH" 2>/dev/null || true
+fi
+echo "[m1-provision] Code Tender LaunchAgent active (com.cheapotto.code-reviewer.code-tender, 120s)"
+
 echo "[m1-provision] Provisioning complete."

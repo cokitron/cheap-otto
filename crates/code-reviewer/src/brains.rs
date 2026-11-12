@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use thiserror::Error;
 
-mod base64_basic {
+pub(crate) mod base64_basic {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode_basic_auth(token: &str) -> String {
@@ -1448,7 +1448,7 @@ pub fn parse_json_from_llm<T: serde::de::DeserializeOwned>(raw: &str) -> Result<
     Err("no JSON object found in model output".to_string())
 }
 
-fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<String, BrainError> {
+pub(crate) fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<String, BrainError> {
     let mut cmd = Command::new(git_binary());
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -1486,7 +1486,7 @@ pub fn git_binary() -> PathBuf {
     if p.exists() { p } else { PathBuf::from("git") }
 }
 
-fn truncate_chars(input: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_string();
     }

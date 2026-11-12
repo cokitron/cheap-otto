@@ -61,7 +61,17 @@ Each brain lives in `brains/<id>/` with its own `PROMPT.md` and isolated knowled
 
 ---
 
-## 3. Quickstart
+## 3. Code Tender — Autonomous Review Handler
+
+Code Tender listens for actionable PR review comments and review summaries on watched repositories, groups feedback into disjoint file packets, applies fixes in parallel (`claude` ⇄ `agy` load intercalation), runs repo checks (`local_check_cmd` or auto-detected check), verifies diffs via an opposite-provider verifier agent, commits/pushes (or stages unified patches for human approval), replies inline, and resolves addressed GraphQL threads.
+
+- **Web UI Navigation:** Switch cleanly between `🔍 Multi-Lens Code Reviewer` (`/reviewer`) and `🛠️ Code Tender` (`/tender`) in the top dashboard bar (`http://127.0.0.1:7430/`), or jump per-PR between views.
+- **Agents (`tender-agents/`):** `01-tender-triage`, `02-tender-fixer`, `03-tender-verifier`.
+- **Safety Boundaries:** Enforces `BOT_TENDER_MARKER` loop prevention, ignores clean `PASS`/`APPROVED` reviews and resolved threads, restricts auto-tending to non-fork PRs by `allowed_authors` (defaulting to `[accounts.primary, accounts.secondary]`), blocks secret/env edits, and strips `GH_TOKEN`/`GITHUB_TOKEN` from child LLM agent processes.
+
+---
+
+## 4. Quickstart
 
 ```bash
 # 1. Copy the example configuration (gitignored so private org settings stay local)

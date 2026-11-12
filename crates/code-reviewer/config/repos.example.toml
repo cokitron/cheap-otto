@@ -18,6 +18,18 @@ agy_model = ""
 reasoning_effort = "medium"
 poll_only_mode = false
 
+[tender]
+enabled = true
+poll_only_mode = false
+delivery_mode = "auto_push"
+intercalate_providers = true
+max_parallel_prs = 4
+max_parallel_fixers_per_pr = 4
+max_autonomous_cycles_per_pr = 3
+resolve_threads_on_fix = true
+ignore_clean_pass_reviews = true
+allowed_authors = []
+
 [gdrive]
 enabled = false
 root_folder_id = ""
@@ -35,3 +47,4 @@ account_policy = "swap"
 review_event_policy = "formal_verdict"
 local_check_cmd = "npm run check"
 enabled = false
+tender_enabled = true

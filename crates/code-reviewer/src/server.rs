@@ -4,11 +4,15 @@ use crate::brains::{
     ADVERSARIAL_BRAIN, SPECIALIST_BRAINS, append_kb_entry, is_runner_authenticated,
 };
 use crate::config::{
-    AccountPolicy, CliRunner, ReviewEventPolicy, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
-    home_dir, repo_fs_slug,
+    AccountPolicy, CliRunner, ReviewEventPolicy, TenderDeliveryMode, WatchedRepoConfig,
+    WorkspaceConfig, expand_tilde, home_dir, repo_fs_slug,
 };
 use crate::drive::sync_living_docs_to_drive;
-use crate::state::{ActiveWorkerState, LedgerStore, TrackedPrState};
+use crate::github::GitHubClient;
+use crate::state::{
+    ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderRunStatus, TrackedPrState,
+};
+use crate::tender::{TENDER_AGENTS, approve_and_push_staged_patch, save_tender_agent_notes};
 use crate::ui_html::DASHBOARD_HTML;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -207,7 +211,9 @@ fn handle_http_connection(
         None => (full_target, ""),
     };
 
-    if method == "GET" && (path == "/" || path == "/index.html") {
+    if method == "GET"
+        && (path == "/" || path == "/index.html" || path == "/reviewer" || path == "/tender")
+    {
         return write_http_response(
             &mut stream,
             200,
@@ -273,9 +279,34 @@ fn dispatch_api(
                 .ok_or_else(|| "missing `repo` query parameter".to_string())?;
             build_living_docs_payload(&ctx.workspace, &repo)
         }
+        ("GET", "/api/tender-agent") => {
+            let agent_id = parse_query_param(query, "id")
+                .ok_or_else(|| "missing `id` query parameter".to_string())?;
+            build_tender_agent_payload(&ctx.workspace, &agent_id)
+        }
+        ("POST", "/api/tender-agent/save") => {
+            #[derive(Deserialize)]
+            struct Req {
+                agent: String,
+                prompt: Option<String>,
+                notes: Option<String>,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            save_tender_agent_notes(
+                &ctx.workspace,
+                &req.agent,
+                req.prompt.as_deref(),
+                req.notes.as_deref(),
+            )?;
+            Ok(json!({ "ok": true }))
+        }
         ("POST", "/api/actions/poll") => {
-            spawn_detached_self(&ctx.workspace, &["poll"])?;
+            spawn_detached_self(&ctx.workspace, "sched-pr-poller.log", &["poll"])?;
             Ok(json!({ "ok": true, "message": "Dispatched parallel async poll batch!" }))
+        }
+        ("POST", "/api/actions/tend-poll") => {
+            spawn_detached_self(&ctx.workspace, "sched-code-tender.log", &["tend-poll"])?;
+            Ok(json!({ "ok": true, "message": "Dispatched Code Tender GraphQL poll batch!" }))
         }
         ("POST", "/api/actions/review") => {
             #[derive(Deserialize)]
@@ -304,6 +335,7 @@ fn dispatch_api(
             };
             spawn_detached_self(
                 &ctx.workspace,
+                "sched-pr-poller.log",
                 &[
                     "review",
                     "--repo",
@@ -318,6 +350,107 @@ fn dispatch_api(
                 "ok": true,
                 "message": format!("Started async session for {}#{} (lead runner: {})", req.repo, req.pr, lead)
             }))
+        }
+        ("POST", "/api/actions/tend") => {
+            #[derive(Deserialize)]
+            struct Req {
+                repo: String,
+                pr: u64,
+                #[serde(default)]
+                stage_only: bool,
+                #[serde(default)]
+                lead_runner: Option<String>,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let pr_key = LedgerStore::pr_key(&req.repo, req.pr);
+            let slot = LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                let s = store.tender_dispatch_counter;
+                store.tender_dispatch_counter = store.tender_dispatch_counter.wrapping_add(1);
+                if let Some(t) = store.tender_pull_requests.get_mut(&pr_key) {
+                    t.attempts_for_key = 0;
+                    t.last_attempt_key = None;
+                }
+                s
+            })
+            .unwrap_or(0);
+            let lead = req
+                .lead_runner
+                .as_deref()
+                .and_then(CliRunner::from_slug)
+                .map(CliRunner::slug)
+                .unwrap_or(if slot.is_multiple_of(2) {
+                    "claude"
+                } else {
+                    "agy"
+                });
+            let pr_str = req.pr.to_string();
+            let mut args = vec![
+                "tend",
+                "--repo",
+                &req.repo,
+                "--pr",
+                &pr_str,
+                "--lead-runner",
+                lead,
+            ];
+            if req.stage_only {
+                args.push("--stage-only");
+            }
+            spawn_detached_self(&ctx.workspace, "sched-code-tender.log", &args)?;
+            Ok(json!({
+                "ok": true,
+                "message": format!("Started Code Tender async session for {}#{} (lead: {})", req.repo, req.pr, lead)
+            }))
+        }
+        ("POST", "/api/actions/tend/approve-push") => {
+            #[derive(Deserialize)]
+            struct Req {
+                repo: String,
+                pr: u64,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let repo_cfg = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&req.repo))
+                .ok_or_else(|| format!("repo `{}` not configured", req.repo))?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let gh = GitHubClient::new(&cfg);
+            let sha = approve_and_push_staged_patch(&cfg, repo_cfg, &state_dir, &gh, req.pr)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "ok": true,
+                "sha": sha,
+                "message": format!("Pushed staged fix commit {} for {}#{}", &sha[..7.min(sha.len())], req.repo, req.pr)
+            }))
+        }
+        ("POST", "/api/actions/tend/discard-patch") => {
+            #[derive(Deserialize)]
+            struct Req {
+                repo: String,
+                pr: u64,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let key = LedgerStore::pr_key(&req.repo, req.pr);
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                if let Some(t) = store.tender_pull_requests.get_mut(&key) {
+                    t.staged_patch = None;
+                    t.staged_commit_message = None;
+                    t.pending_items.clear();
+                    if t.last_status == TenderRunStatus::StagedPatchReady
+                        || t.last_status == TenderRunStatus::CheckFailed
+                    {
+                        t.last_status = TenderRunStatus::Idle;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(json!({ "ok": true, "message": format!("Discarded staged patch for {}", key) }))
         }
         ("POST", "/api/actions/sync-docs") => {
             #[derive(Deserialize)]
@@ -376,6 +509,46 @@ fn dispatch_api(
             cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
             Ok(json!({ "ok": true }))
         }
+        ("POST", "/api/settings/tender") => {
+            #[derive(Deserialize)]
+            struct Req {
+                enabled: bool,
+                poll_only_mode: bool,
+                delivery_mode: String,
+                intercalate_providers: bool,
+                max_parallel_prs: usize,
+                max_parallel_fixers_per_pr: usize,
+                max_autonomous_cycles_per_pr: u32,
+                resolve_threads_on_fix: bool,
+                ignore_clean_pass_reviews: bool,
+                #[serde(default)]
+                allowed_authors: Vec<String>,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            cfg.tender.enabled = req.enabled;
+            cfg.tender.poll_only_mode = req.poll_only_mode;
+            cfg.tender.delivery_mode = if req.delivery_mode.eq_ignore_ascii_case("stage_patch_only")
+            {
+                TenderDeliveryMode::StagePatchOnly
+            } else {
+                TenderDeliveryMode::AutoPush
+            };
+            cfg.tender.intercalate_providers = req.intercalate_providers;
+            cfg.tender.max_parallel_prs = req.max_parallel_prs.clamp(1, 12);
+            cfg.tender.max_parallel_fixers_per_pr = req.max_parallel_fixers_per_pr.clamp(1, 8);
+            cfg.tender.max_autonomous_cycles_per_pr = req.max_autonomous_cycles_per_pr.clamp(1, 10);
+            cfg.tender.resolve_threads_on_fix = req.resolve_threads_on_fix;
+            cfg.tender.ignore_clean_pass_reviews = req.ignore_clean_pass_reviews;
+            cfg.tender.allowed_authors = req
+                .allowed_authors
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
+            Ok(json!({ "ok": true }))
+        }
         ("POST", "/api/repos/add") => {
             #[derive(Deserialize)]
             struct Req {
@@ -386,6 +559,8 @@ fn dispatch_api(
                 review_event_policy: String,
                 gdrive_folder_id: Option<String>,
                 local_check_cmd: Option<String>,
+                #[serde(default)]
+                tender_enabled: Option<bool>,
             }
             let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
             let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
@@ -408,6 +583,7 @@ fn dispatch_api(
                 gdrive_folder_id: req.gdrive_folder_id.filter(|s| !s.is_empty()),
                 local_check_cmd: req.local_check_cmd.filter(|s| !s.is_empty()),
                 enabled: true,
+                tender_enabled: req.tender_enabled.unwrap_or(true),
             })
             .map_err(|e| e.to_string())?;
             cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
@@ -426,6 +602,23 @@ fn dispatch_api(
                 .find(|r| r.full_name.eq_ignore_ascii_case(&req.full_name))
             {
                 r.enabled = !r.enabled;
+            }
+            cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
+            Ok(json!({ "ok": true }))
+        }
+        ("POST", "/api/repos/tender-toggle") => {
+            #[derive(Deserialize)]
+            struct Req {
+                full_name: String,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            if let Some(r) = cfg
+                .repos
+                .iter_mut()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&req.full_name))
+            {
+                r.tender_enabled = !r.tender_enabled;
             }
             cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
             Ok(json!({ "ok": true }))
@@ -533,13 +726,60 @@ fn build_overview_payload(ctx: &ServerContext) -> Result<Value, String> {
         .chain(std::iter::once(ADVERSARIAL_BRAIN))
         .collect();
 
-    let recent_logs = read_tail_logs(&home_dir().join(".cheap-otto/logs/code-reviewer"), 45);
+    let recent_logs = read_tail_logs(
+        &home_dir().join(".cheap-otto/logs/code-reviewer"),
+        "sched-pr-poller.log",
+        45,
+    );
     let run_history = read_recent_history(
         &home_dir().join(".cheap-otto/runs/code-reviewer/history.jsonl"),
         12,
     );
 
+    let tender_active_workers = ActiveTenderWorkerState::list_active(&state_dir);
+    let mut tender_prs_json: Vec<Value> = ledger
+        .tender_pull_requests
+        .into_iter()
+        .map(|(key, tpr)| {
+            let mut v = serde_json::to_value(&tpr).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("key".to_string(), json!(key));
+                obj.insert("status_badge".to_string(), json!(tpr.last_status.badge()));
+            }
+            v
+        })
+        .collect();
+    tender_prs_json.sort_by(|a, b| {
+        let b_num = b["pr_number"].as_u64().unwrap_or(0);
+        let a_num = a["pr_number"].as_u64().unwrap_or(0);
+        b_num.cmp(&a_num)
+    });
+
+    let tender_next_lead = if cfg.tender.intercalate_providers {
+        if ledger.tender_dispatch_counter.is_multiple_of(2) {
+            CliRunner::Claude.slug()
+        } else {
+            CliRunner::Agy.slug()
+        }
+    } else {
+        cfg.agents.primary_runner.slug()
+    };
+
+    let tender_logs = read_tail_logs(
+        &home_dir().join(".cheap-otto/logs/code-reviewer"),
+        "sched-code-tender.log",
+        45,
+    );
+    let tender_history = read_recent_history(
+        &home_dir().join(".cheap-otto/runs/code-reviewer/tender-history.jsonl"),
+        12,
+    );
+
     Ok(json!({
+        "accounts": {
+            "primary": cfg.accounts.primary,
+            "secondary": cfg.accounts.secondary,
+        },
         "runners": {
             "claude_ready": claude_ready,
             "agy_ready": agy_ready,
@@ -556,6 +796,13 @@ fn build_overview_payload(ctx: &ServerContext) -> Result<Value, String> {
         "brains": all_brains,
         "recent_logs": recent_logs,
         "run_history": run_history,
+        "tender": cfg.tender,
+        "tender_next_lead_runner": tender_next_lead,
+        "tender_active_workers": tender_active_workers,
+        "tender_pull_requests": tender_prs_json,
+        "tender_agents": TENDER_AGENTS,
+        "tender_logs": tender_logs,
+        "tender_history": tender_history,
     }))
 }
 
@@ -714,14 +961,28 @@ fn build_living_docs_payload(workspace: &Path, repo: &str) -> Result<Value, Stri
     Ok(json!({ "repo": repo, "files": files }))
 }
 
-fn spawn_detached_self(workspace: &Path, args: &[&str]) -> Result<(), String> {
+fn build_tender_agent_payload(workspace: &Path, agent_id: &str) -> Result<Value, String> {
+    if !TENDER_AGENTS.contains(&agent_id) {
+        return Err(format!("invalid tender agent id `{}`", agent_id));
+    }
+    let dir = workspace.join("tender-agents").join(agent_id);
+    let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
+    let notes = fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+    Ok(json!({
+        "id": agent_id,
+        "prompt": prompt,
+        "notes": notes,
+    }))
+}
+
+fn spawn_detached_self(workspace: &Path, log_filename: &str, args: &[&str]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let logs_dir = home_dir().join(".cheap-otto/logs/code-reviewer");
     let _ = fs::create_dir_all(&logs_dir);
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(logs_dir.join("sched-pr-poller.log"))
+        .open(logs_dir.join(log_filename))
         .map_err(|e| e.to_string())?;
     let err_file = log_file.try_clone().map_err(|e| e.to_string())?;
 
@@ -741,9 +1002,9 @@ fn spawn_detached_self(workspace: &Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_tail_logs(logs_dir: &Path, max_lines: usize) -> String {
+fn read_tail_logs(logs_dir: &Path, filename: &str, max_lines: usize) -> String {
     let mut combined = Vec::new();
-    if let Ok(raw) = fs::read_to_string(logs_dir.join("sched-pr-poller.log")) {
+    if let Ok(raw) = fs::read_to_string(logs_dir.join(filename)) {
         let lines: Vec<&str> = raw.lines().collect();
         let start = lines.len().saturating_sub(max_lines);
         combined.extend(lines[start..].iter().map(|s| (*s).to_string()));

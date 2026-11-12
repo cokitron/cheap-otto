@@ -115,6 +115,67 @@ pub struct AgentsConfig {
     pub poll_only_mode: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenderDeliveryMode {
+    /// Automatically commit fixes, push to the PR branch, reply on review threads, and optionally resolve them.
+    #[default]
+    AutoPush,
+    /// Stage commits/diff patch & draft replies locally so an operator can review & push in 1 click from the Code Tender UI.
+    StagePatchOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenderConfig {
+    /// Enable the autonomous Code Tender feedback-handling subsystem.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// When `true`, `tend-poll` only performs 0-AI GraphQL polling without spawning AI fix agents.
+    #[serde(default)]
+    pub poll_only_mode: bool,
+    /// Whether verified fixes are pushed automatically or staged as a one-click patch in the UI.
+    #[serde(default)]
+    pub delivery_mode: TenderDeliveryMode,
+    /// Intercalate (`claude` <-> `agy`) across tender sessions and parallel fixer packets.
+    #[serde(default = "default_true")]
+    pub intercalate_providers: bool,
+    /// Maximum number of PRs tended concurrently in independent async worker sessions (`1..=12`).
+    #[serde(default = "default_tender_parallel_prs")]
+    pub max_parallel_prs: usize,
+    /// Maximum concurrent domain fixer workers per PR (`1..=8`).
+    #[serde(default = "default_tender_parallel_fixers")]
+    pub max_parallel_fixers_per_pr: usize,
+    /// Maximum autonomous Code Tender fix cycles on the same PR before requiring manual confirmation (`1..=10`).
+    #[serde(default = "default_tender_max_cycles")]
+    pub max_autonomous_cycles_per_pr: u32,
+    /// Resolve GitHub inline review threads automatically when Code Tender pushes a verified fix or answer.
+    #[serde(default = "default_true")]
+    pub resolve_threads_on_fix: bool,
+    /// Ignore clean `PASS` Multi-Lens Code Reviewer summaries unless open/unresolved review threads remain.
+    #[serde(default = "default_true")]
+    pub ignore_clean_pass_reviews: bool,
+    /// Restrict automatic tending to PRs authored by these GitHub logins (`["*"]` allows any non-fork PR author; empty defaults to `[accounts.primary, accounts.secondary]`).
+    #[serde(default)]
+    pub allowed_authors: Vec<String>,
+}
+
+impl Default for TenderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_only_mode: false,
+            delivery_mode: TenderDeliveryMode::AutoPush,
+            intercalate_providers: true,
+            max_parallel_prs: default_tender_parallel_prs(),
+            max_parallel_fixers_per_pr: default_tender_parallel_fixers(),
+            max_autonomous_cycles_per_pr: default_tender_max_cycles(),
+            resolve_threads_on_fix: true,
+            ignore_clean_pass_reviews: true,
+            allowed_authors: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleDriveConfig {
     #[serde(default = "default_true")]
@@ -142,6 +203,8 @@ pub struct WatchedRepoConfig {
     pub local_check_cmd: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub tender_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +213,8 @@ pub struct WorkspaceConfig {
     pub state_dir: String,
     pub accounts: AccountsConfig,
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub tender: TenderConfig,
     pub gdrive: GoogleDriveConfig,
     #[serde(default)]
     pub repos: Vec<WatchedRepoConfig>,
@@ -165,6 +230,18 @@ fn default_max_parallel_prs() -> usize {
 
 fn default_max_parallel_brains() -> usize {
     8
+}
+
+fn default_tender_parallel_prs() -> usize {
+    4
+}
+
+fn default_tender_parallel_fixers() -> usize {
+    4
+}
+
+fn default_tender_max_cycles() -> u32 {
+    3
 }
 
 fn default_claude_model() -> String {
@@ -251,6 +328,49 @@ impl WorkspaceConfig {
                 }
             }
         }
+    }
+
+    /// Selects which GitHub account (`primary` or `secondary`) Code Tender pushes commits and replies as.
+    ///
+    /// Preserves dual-account separation by matching `pr_author` when possible (falling back to
+    /// `forced_account` or `accounts.primary`), so Multi-Lens Reviewer continues reviewing with the peer account.
+    pub fn select_tender_account<'a>(
+        &'a self,
+        repo: &'a WatchedRepoConfig,
+        pr_author: &str,
+    ) -> &'a str {
+        if pr_author.eq_ignore_ascii_case(&self.accounts.secondary) {
+            return self.accounts.secondary.as_str();
+        }
+        if pr_author.eq_ignore_ascii_case(&self.accounts.primary) {
+            return self.accounts.primary.as_str();
+        }
+        repo.forced_account
+            .as_deref()
+            .unwrap_or(self.accounts.primary.as_str())
+    }
+
+    /// Returns `true` when `pr_author` is permitted for automatic Code Tender handling.
+    ///
+    /// Empty `tender.allowed_authors` safely defaults to `[accounts.primary, accounts.secondary]` (plus
+    /// `repo.forced_account` when set) so Code Tender never unexpectedly pushes to external contributors' PRs.
+    pub fn is_tender_author_allowed(&self, repo: &WatchedRepoConfig, pr_author: &str) -> bool {
+        if self.tender.allowed_authors.iter().any(|a| a.trim() == "*") {
+            return true;
+        }
+        if !self.tender.allowed_authors.is_empty() {
+            return self
+                .tender
+                .allowed_authors
+                .iter()
+                .any(|a| a.trim().eq_ignore_ascii_case(pr_author));
+        }
+        pr_author.eq_ignore_ascii_case(&self.accounts.primary)
+            || pr_author.eq_ignore_ascii_case(&self.accounts.secondary)
+            || repo
+                .forced_account
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case(pr_author))
     }
 
     /// Selects the GitHub Pull Request Review API `event` string (`"COMMENT"`, `"APPROVE"`, or `"REQUEST_CHANGES"`).
@@ -351,6 +471,7 @@ mod tests {
                 reasoning_effort: "medium".to_string(),
                 poll_only_mode: false,
             },
+            tender: TenderConfig::default(),
             gdrive: GoogleDriveConfig {
                 enabled: true,
                 root_folder_id: "root123".to_string(),
@@ -375,6 +496,7 @@ mod tests {
             gdrive_folder_id: None,
             local_check_cmd: None,
             enabled: true,
+            tender_enabled: true,
         };
 
         assert_eq!(
@@ -404,6 +526,7 @@ mod tests {
             gdrive_folder_id: Some("folder123".to_string()),
             local_check_cmd: Some("npm run check".to_string()),
             enabled: true,
+            tender_enabled: true,
         };
 
         let reviewer = cfg.select_reviewer_account(&org_repo, "alice-dev", Some("alice-dev"));
@@ -416,5 +539,34 @@ mod tests {
             WorkspaceConfig::select_github_review_event(&org_repo, reviewer, "other-dev", false),
             "COMMENT"
         );
+    }
+
+    #[test]
+    fn tender_author_allowlist_and_identity_selection_preserve_separation() {
+        let mut cfg = sample_config();
+        let repo = WatchedRepoConfig {
+            full_name: "cokitron/cheap-otto".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_check_cmd: None,
+            enabled: true,
+            tender_enabled: true,
+        };
+
+        assert!(cfg.is_tender_author_allowed(&repo, "alice-dev"));
+        assert!(cfg.is_tender_author_allowed(&repo, "BOB-REVIEWER"));
+        assert!(!cfg.is_tender_author_allowed(&repo, "random-stranger"));
+        assert_eq!(cfg.select_tender_account(&repo, "alice-dev"), "alice-dev");
+        assert_eq!(
+            cfg.select_tender_account(&repo, "bob-reviewer"),
+            "bob-reviewer"
+        );
+
+        cfg.tender.allowed_authors = vec!["*".to_string()];
+        assert!(cfg.is_tender_author_allowed(&repo, "random-stranger"));
     }
 }

@@ -347,12 +347,17 @@ pub fn print_m1_live_status(host: &str, remote_repo_path: &str) -> Result<(), St
          else\n\
            echo 'poller service : NOT LOADED'\n\
          fi\n\
+         if launchctl print \"gui/$UID_NUM/com.cheapotto.code-reviewer.code-tender\" >/dev/null 2>&1; then\n\
+           echo 'tender service : LOADED (every 120s)'\n\
+         else\n\
+           echo 'tender service : NOT LOADED'\n\
+         fi\n\
          if nc -z 127.0.0.1 7430 2>/dev/null; then\n\
            echo 'web ui server  : LISTENING on 127.0.0.1:7430 (open via `code-reviewer ui`)'\n\
          else\n\
            echo 'web ui server  : OFFLINE'\n\
          fi\n\
-         ps aux | grep -E '[c]ode-reviewer.*(poll|review|serve)|[c]laude -p|[a]gy -p' | cut -c1-150 || echo '(no active review process running right now)'\n\
+         ps aux | grep -E '[c]ode-reviewer.*(poll|review|tend|serve)|[c]laude -p|[a]gy -p' | cut -c1-150 || echo '(no active review/tender process running right now)'\n\
          echo ''\n\
          echo '=== 3. Tracked Pull Requests Ledger ==='\n\
          code-reviewer --workspace \"{repo}\" status || true\n\

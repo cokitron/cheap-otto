@@ -26,6 +26,10 @@ pub const BOT_COMMENT_MARKER: &str = "<!-- otto-code-reviewer:v1 -->";
 /// Sub-marker identifying the live pickup/completion status banner comment on a PR timeline.
 pub const STATUS_BANNER_MARKER: &str = "<!-- otto-code-reviewer:status-banner -->";
 
+/// Invisible HTML marker embedded in every GitHub reply/comment authored by Code Tender.
+/// Prevents Code Tender from ever re-triggering on its own replies or commit summaries.
+pub const BOT_TENDER_MARKER: &str = "<!-- otto-code-tender:v1 -->";
+
 #[derive(Debug, Error)]
 pub enum StateError {
     #[error("failed to read state file {path}: {source}")]
@@ -289,12 +293,18 @@ pub struct LedgerStore {
     /// Round-robin counter used to intercalate lead AI provider (`claude` <-> `agy`) across parallel PR sessions.
     #[serde(default)]
     pub provider_dispatch_counter: u64,
+    /// Round-robin counter used to intercalate lead AI provider (`claude` <-> `agy`) across parallel Code Tender sessions.
+    #[serde(default)]
+    pub tender_dispatch_counter: u64,
     /// Keyed by `<owner>/<repo>`.
     #[serde(default)]
     pub repo_cursors: BTreeMap<String, RepoPollCursor>,
     /// Keyed by `<owner>/<repo>#<pr_number>`.
     #[serde(default)]
     pub pull_requests: BTreeMap<String, TrackedPrState>,
+    /// Persistent Code Tender state keyed by `<owner>/<repo>#<pr_number>`.
+    #[serde(default)]
+    pub tender_pull_requests: BTreeMap<String, TenderPrState>,
 }
 
 impl LedgerStore {
@@ -1125,6 +1135,384 @@ pub fn format_interrupted_status_banner(ctx: &StatusBannerContext<'_>, reason: &
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenderFeedbackKind {
+    ReviewThreadComment,
+    ReviewSummary,
+    IssueComment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenderFeedbackItem {
+    pub feedback_id: String,
+    #[serde(default)]
+    pub thread_node_id: Option<String>,
+    #[serde(default)]
+    pub reply_comment_id: Option<u64>,
+    pub kind: TenderFeedbackKind,
+    pub author: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub review_state: Option<String>,
+    #[serde(default)]
+    pub is_resolved: bool,
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TenderPrSnapshot {
+    pub pr_number: u64,
+    pub title: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub is_fork: bool,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub head_sha: String,
+    pub feedback_items: Vec<TenderFeedbackItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenderActionStatus {
+    Fixed,
+    AlreadyAddressed,
+    ExplainedRationale,
+    NeedsHuman,
+}
+
+impl TenderActionStatus {
+    pub const fn badge(self) -> &'static str {
+        match self {
+            Self::Fixed => "FIXED",
+            Self::AlreadyAddressed => "ALREADY_FIXED",
+            Self::ExplainedRationale => "EXPLAINED",
+            Self::NeedsHuman => "NEEDS_HUMAN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenderRunStatus {
+    #[default]
+    Idle,
+    FixedAndPushed,
+    StagedPatchReady,
+    RepliedOnly,
+    NeedsHuman,
+    CheckFailed,
+}
+
+impl TenderRunStatus {
+    pub const fn badge(self) -> &'static str {
+        match self {
+            Self::Idle => "IDLE",
+            Self::FixedAndPushed => "FIXED_PUSHED",
+            Self::StagedPatchReady => "STAGED_PATCH",
+            Self::RepliedOnly => "REPLIED_ONLY",
+            Self::NeedsHuman => "NEEDS_HUMAN",
+            Self::CheckFailed => "CHECK_FAILED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenderHandledItem {
+    pub feedback_id: String,
+    pub source_author: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub thread_node_id: Option<String>,
+    #[serde(default)]
+    pub reply_comment_id: Option<u64>,
+    pub summary: String,
+    pub action: TenderActionStatus,
+    pub reply_text: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub resolved_thread: bool,
+    #[serde(default)]
+    pub reply_posted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenderPrState {
+    pub repo: String,
+    pub pr_number: u64,
+    pub title: String,
+    pub author: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    #[serde(default)]
+    pub runs_count: u32,
+    #[serde(default)]
+    pub last_tended_sha: Option<String>,
+    #[serde(default)]
+    pub last_tended_feedback_at: Option<String>,
+    #[serde(default)]
+    pub last_attempt_key: Option<String>,
+    #[serde(default)]
+    pub attempts_for_key: u32,
+    #[serde(default)]
+    pub last_status: TenderRunStatus,
+    #[serde(default)]
+    pub last_commit_pushed: Option<String>,
+    #[serde(default)]
+    pub last_summary: Option<String>,
+    #[serde(default)]
+    pub staged_patch: Option<String>,
+    #[serde(default)]
+    pub staged_commit_message: Option<String>,
+    #[serde(default)]
+    pub pending_items: Vec<TenderHandledItem>,
+    #[serde(default)]
+    pub handled_items: Vec<TenderHandledItem>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TenderPrState {
+    pub fn new(
+        repo: &str,
+        pr_number: u64,
+        title: &str,
+        author: &str,
+        base_ref: &str,
+        head_ref: &str,
+    ) -> Self {
+        Self {
+            repo: repo.to_string(),
+            pr_number,
+            title: title.to_string(),
+            author: author.to_string(),
+            base_ref: base_ref.to_string(),
+            head_ref: head_ref.to_string(),
+            runs_count: 0,
+            last_tended_sha: None,
+            last_tended_feedback_at: None,
+            last_attempt_key: None,
+            attempts_for_key: 0,
+            last_status: TenderRunStatus::Idle,
+            last_commit_pushed: None,
+            last_summary: None,
+            staged_patch: None,
+            staged_commit_message: None,
+            pending_items: Vec::new(),
+            handled_items: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveTenderWorkerState {
+    pub pid: u32,
+    pub repo: String,
+    pub pr_number: u64,
+    pub title: String,
+    pub head_sha: String,
+    pub tender_account: String,
+    pub lead_runner: String,
+    pub alt_runner: String,
+    /// `starting`, `worktree`, `triaging`, `fixing_parallel`, `local_checks`, `verifying_diff`, `pushing`, `completed`, `error`.
+    pub phase: String,
+    pub packets_total: usize,
+    pub packets_done: usize,
+    pub started_at_utc: String,
+    pub updated_at_utc: String,
+    #[serde(default)]
+    pub workers: BTreeMap<String, BrainLiveState>,
+}
+
+impl ActiveTenderWorkerState {
+    pub fn file_path(state_dir: &Path, repo: &str, pr_number: u64) -> PathBuf {
+        state_dir.join("tender-workers").join(format!(
+            "{}__pr-{}.json",
+            repo_fs_slug(repo),
+            pr_number
+        ))
+    }
+
+    pub fn save(&mut self, state_dir: &Path) {
+        self.updated_at_utc = Utc::now().to_rfc3339();
+        let path = Self::file_path(state_dir, &self.repo, self.pr_number);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let seq = ATOMIC_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+        if let Ok(json) = serde_json::to_string_pretty(self)
+            && fs::write(&tmp, json).is_ok()
+        {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+
+    pub fn remove(state_dir: &Path, repo: &str, pr_number: u64) {
+        let _ = fs::remove_file(Self::file_path(state_dir, repo, pr_number));
+    }
+
+    pub fn is_pr_worker_running(state_dir: &Path, repo: &str, pr_number: u64) -> Option<Self> {
+        let path = Self::file_path(state_dir, repo, pr_number);
+        let raw = fs::read_to_string(&path).ok()?;
+        let w: Self = serde_json::from_str(&raw).ok()?;
+        if w.phase != "completed" && w.phase != "error" && is_process_alive(w.pid) {
+            Some(w)
+        } else {
+            let _ = fs::remove_file(&path);
+            None
+        }
+    }
+
+    pub fn list_active(state_dir: &Path) -> Vec<Self> {
+        let dir = state_dir.join("tender-workers");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut active = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = fs::read_to_string(&p)
+                && let Ok(w) = serde_json::from_str::<Self>(&raw)
+            {
+                if w.phase != "completed" && w.phase != "error" && is_process_alive(w.pid) {
+                    active.push(w);
+                } else {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+        active.sort_by_key(|w| w.pr_number);
+        active
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenderTriggerDecision {
+    SkipDraft,
+    SkipFork,
+    SkipUnownedAuthor,
+    SkipMaxCyclesReached,
+    UpToDate,
+    HandleFeedback {
+        head_sha: String,
+        items: Vec<TenderFeedbackItem>,
+        latest_feedback_at: String,
+    },
+}
+
+/// Evaluates with zero LLM calls whether an open PR has new actionable review feedback for Code Tender.
+pub fn evaluate_tender_trigger(
+    existing: Option<&TenderPrState>,
+    snapshot: &TenderPrSnapshot,
+    author_allowed: bool,
+    max_cycles: u32,
+    ignore_clean_pass_reviews: bool,
+) -> TenderTriggerDecision {
+    if snapshot.is_draft {
+        return TenderTriggerDecision::SkipDraft;
+    }
+    if snapshot.is_fork {
+        return TenderTriggerDecision::SkipFork;
+    }
+    if !author_allowed {
+        return TenderTriggerDecision::SkipUnownedAuthor;
+    }
+
+    let cursor = existing
+        .and_then(|t| t.last_tended_feedback_at.as_deref())
+        .unwrap_or("");
+    let last_pushed_sha = existing
+        .and_then(|t| t.last_commit_pushed.as_deref())
+        .unwrap_or("");
+
+    // Identify review threads whose latest reply is already authored by Code Tender, so we don't reply twice.
+    let mut thread_last_is_tender: BTreeMap<&str, bool> = BTreeMap::new();
+    for item in &snapshot.feedback_items {
+        if item.kind == TenderFeedbackKind::ReviewThreadComment
+            && let Some(tid) = item.thread_node_id.as_deref()
+        {
+            thread_last_is_tender.insert(tid, item.body.contains(BOT_TENDER_MARKER));
+        }
+    }
+
+    let actionable: Vec<TenderFeedbackItem> = snapshot
+        .feedback_items
+        .iter()
+        .filter(|item| !item.body.contains(BOT_TENDER_MARKER))
+        .filter(|item| !item.body.contains(STATUS_BANNER_MARKER))
+        .filter(|item| item.created_at.as_str() > cursor)
+        .filter(|item| match item.kind {
+            TenderFeedbackKind::ReviewThreadComment => {
+                if item.is_resolved {
+                    return false;
+                }
+                let already_answered = item
+                    .thread_node_id
+                    .as_deref()
+                    .and_then(|tid| thread_last_is_tender.get(tid).copied())
+                    .unwrap_or(false);
+                !already_answered
+            }
+            TenderFeedbackKind::ReviewSummary => {
+                if item.body.trim().is_empty() {
+                    return false;
+                }
+                if ignore_clean_pass_reviews
+                    && (item.review_state.as_deref() == Some("APPROVED")
+                        || (item.body.contains(BOT_COMMENT_MARKER)
+                            && item.body.contains("Internal CI Code Review — `PASS`")))
+                {
+                    return false;
+                }
+                true
+            }
+            TenderFeedbackKind::IssueComment => !item.body.trim().is_empty(),
+        })
+        .cloned()
+        .collect();
+
+    if actionable.is_empty() {
+        return TenderTriggerDecision::UpToDate;
+    }
+
+    // If Code Tender already pushed this exact head SHA and no human comments arrived after, nothing left to tend.
+    let latest_feedback_at = actionable
+        .iter()
+        .map(|i| i.created_at.as_str())
+        .max()
+        .unwrap_or("")
+        .to_string();
+
+    if snapshot.head_sha == last_pushed_sha && latest_feedback_at.as_str() <= cursor {
+        return TenderTriggerDecision::UpToDate;
+    }
+
+    if let Some(t) = existing
+        && t.runs_count >= max_cycles
+    {
+        return TenderTriggerDecision::SkipMaxCyclesReached;
+    }
+
+    TenderTriggerDecision::HandleFeedback {
+        head_sha: snapshot.head_sha.clone(),
+        items: actionable,
+        latest_feedback_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,5 +1698,109 @@ mod tests {
         assert_eq!(loaded.provider_dispatch_counter, 6);
         assert_eq!(loaded.pull_requests.len(), 6);
         let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn tender_trigger_filters_self_markers_resolved_threads_and_pass_reviews() {
+        let mut snap = TenderPrSnapshot {
+            pr_number: 42,
+            title: "feat: add feature".to_string(),
+            author: "alice-dev".to_string(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat/x".to_string(),
+            head_sha: "sha1111".to_string(),
+            feedback_items: vec![
+                TenderFeedbackItem {
+                    feedback_id: "c1".to_string(),
+                    thread_node_id: None,
+                    reply_comment_id: None,
+                    kind: TenderFeedbackKind::IssueComment,
+                    author: "bob-reviewer".to_string(),
+                    created_at: "2026-11-12T10:00:00Z".to_string(),
+                    path: None,
+                    line: None,
+                    review_state: None,
+                    is_resolved: false,
+                    body: format!("{BOT_COMMENT_MARKER}\n{STATUS_BANNER_MARKER}\nRunning"),
+                },
+                TenderFeedbackItem {
+                    feedback_id: "r1".to_string(),
+                    thread_node_id: None,
+                    reply_comment_id: None,
+                    kind: TenderFeedbackKind::ReviewSummary,
+                    author: "bob-reviewer".to_string(),
+                    created_at: "2026-11-12T10:02:00Z".to_string(),
+                    path: None,
+                    line: None,
+                    review_state: Some("APPROVED".to_string()),
+                    is_resolved: false,
+                    body: format!("{BOT_COMMENT_MARKER}\n## Internal CI Code Review — `PASS`"),
+                },
+                TenderFeedbackItem {
+                    feedback_id: "t1".to_string(),
+                    thread_node_id: Some("THREAD_1".to_string()),
+                    reply_comment_id: Some(100),
+                    kind: TenderFeedbackKind::ReviewThreadComment,
+                    author: "bob-reviewer".to_string(),
+                    created_at: "2026-11-12T10:03:00Z".to_string(),
+                    path: Some("src/lib.rs".to_string()),
+                    line: Some(12),
+                    review_state: None,
+                    is_resolved: true,
+                    body: "Already fixed earlier".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            evaluate_tender_trigger(None, &snap, true, 3, true),
+            TenderTriggerDecision::UpToDate
+        );
+
+        // Unowned author must be skipped safely
+        snap.feedback_items.push(TenderFeedbackItem {
+            feedback_id: "t2".to_string(),
+            thread_node_id: Some("THREAD_2".to_string()),
+            reply_comment_id: Some(200),
+            kind: TenderFeedbackKind::ReviewThreadComment,
+            author: "bob-reviewer".to_string(),
+            created_at: "2026-11-12T10:05:00Z".to_string(),
+            path: Some("src/lib.rs".to_string()),
+            line: Some(25),
+            review_state: None,
+            is_resolved: false,
+            body: "Null check missing before unwrap".to_string(),
+        });
+        assert_eq!(
+            evaluate_tender_trigger(None, &snap, false, 3, true),
+            TenderTriggerDecision::SkipUnownedAuthor
+        );
+
+        // Owned author triggers HandleFeedback cleanly
+        assert!(matches!(
+            evaluate_tender_trigger(None, &snap, true, 3, true),
+            TenderTriggerDecision::HandleFeedback { items, .. } if items.len() == 1 && items[0].feedback_id == "t2"
+        ));
+
+        // After Code Tender replies on THREAD_2, it won't retrigger on the same thread!
+        snap.feedback_items.push(TenderFeedbackItem {
+            feedback_id: "t2-reply".to_string(),
+            thread_node_id: Some("THREAD_2".to_string()),
+            reply_comment_id: Some(201),
+            kind: TenderFeedbackKind::ReviewThreadComment,
+            author: "alice-dev".to_string(),
+            created_at: "2026-11-12T10:06:00Z".to_string(),
+            path: Some("src/lib.rs".to_string()),
+            line: Some(25),
+            review_state: None,
+            is_resolved: false,
+            body: format!("{BOT_TENDER_MARKER}\nFixed in commit abcdef1"),
+        });
+        assert_eq!(
+            evaluate_tender_trigger(None, &snap, true, 3, true),
+            TenderTriggerDecision::UpToDate
+        );
     }
 }
