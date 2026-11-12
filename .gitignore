@@ -4,6 +4,13 @@
 crates/code-reviewer/config/repos.toml
 crates/code-reviewer/living-docs/*/
 crates/code-reviewer/reviews/
+.env
+.env.*
+!.env.example
 *.token
+*.pem
+*.key
+peer.json
+state-backup.json
 *.pdb
 *.DS_Store
