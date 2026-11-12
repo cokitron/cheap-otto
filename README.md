@@ -131,3 +131,21 @@ cargo run -- runs --execute
 ```bash
 cargo run -- restore --unload-schedules --remote --apply
 ```
+
+---
+
+## Autonomous Multi-Lens Internal CI Code Reviewer (`crates/code-reviewer`)
+
+Included in the workspace as the `code-reviewer` crate ([full docs](crates/code-reviewer/README.md))—turning your paired `otto-mac` M1 into an autonomous, stateful multi-lens Pull Request code reviewer for **Claude Code (`claude`)** and **Antigravity (`agy`)**:
+
+- **Pure GraphQL 2-Minute Polling (0 AI Tokens on Idle Ticks):** Polls watched GitHub repositories every 120s in compiled Rust with a 2-strike per-SHA retry circuit breaker and optional `Strict Poll-Only` switch.
+- **8 Isolated Review Brains + Per-Brain Knowledge Bases:** `01-intent-traceability` .. `07-docs-contracts` executed in a single parallel wave, followed by path-sharded parallel `08-adversarial-verifier` checking stripped `path:line` claims to eliminate false positives.
+- **50/50 `claude` (`sonnet`) ⇄ `agy` Load Intercalation & Async Parallel PR Batches:** Splits subscription usage evenly across concurrent detached PR sessions (`max_parallel_prs = 8`) with automatic failover.
+- **Hunk-Validated GitHub Reviews, Stateful Compliance Re-Reviews & Living Docs:** Posts live `⏳ Triggered & Running` -> `✅ Completed` timeline banners, inline GitHub diff `suggestion` blocks, optional private Google Drive handoff docs, post-merge Living Documentation, and a live SSH-tunneled Web Dashboard GUI (`http://127.0.0.1:7430`).
+
+```bash
+cp crates/code-reviewer/config/repos.example.toml crates/code-reviewer/config/repos.toml
+cargo run -p code-reviewer -- doctor
+cargo run -p code-reviewer -- m1 --host otto-mac sync --sync-tokens
+cargo run -p code-reviewer -- ui --host otto-mac
+```

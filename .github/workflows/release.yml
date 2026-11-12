@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-binaries:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            archive: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release workspace binaries
+        run: cargo build --release --workspace --locked --target ${{ matrix.target }}
+
+      - name: Package Unix tar.gz archive
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          STAGE="cheap-otto-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/cheap-otto" "$STAGE/"
+          cp "target/${{ matrix.target }}/release/code-reviewer" "$STAGE/"
+          cp README.md LICENSE "$STAGE/"
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+
+      - name: Package Windows zip archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $Stage = "cheap-otto-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/cheap-otto.exe" $Stage
+          Copy-Item "target/${{ matrix.target }}/release/code-reviewer.exe" $Stage
+          Copy-Item README.md, LICENSE $Stage
+          Compress-Archive -Path "$Stage/*" -DestinationPath "$Stage.zip" -Force
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  publish-release:
+    name: Attach Cross-Platform Binaries to GitHub Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS and upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" * --clobber
+          else
+            gh release create "${{ github.ref_name }}" * --generate-notes --title "cheap-otto ${{ github.ref_name }}"
+          fi

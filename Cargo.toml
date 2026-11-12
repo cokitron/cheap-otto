@@ -1,8 +1,13 @@
+[workspace]
+members = [".", "crates/code-reviewer"]
+default-members = [".", "crates/code-reviewer"]
+resolver = "2"
+
 [package]
 name = "cheap-otto"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Turn any spare MacBook or old laptop into a 24/7 headless AI agent, residential browser worker, local AI gateway, and CI runner."
+description = "Turn any spare MacBook or old laptop into a Cross-OS Dev Bridge, Parallel Agent Worktree Farm, and Autonomous Multi-Lens CI Code Reviewer."
 license = "MIT"
 repository = "https://github.com/cokitron/cheap-otto"
 

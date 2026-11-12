@@ -1,5 +1,9 @@
 /target/
 /.cheap-otto/
 /.otto-worktrees/
+crates/code-reviewer/config/repos.toml
+crates/code-reviewer/living-docs/*/
+crates/code-reviewer/reviews/
+*.token
 *.pdb
 *.DS_Store

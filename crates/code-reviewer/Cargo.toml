@@ -1,0 +1,19 @@
+[package]
+name = "code-reviewer"
+version = "0.2.0"
+edition = "2024"
+description = "Autonomous multi-lens internal CI code reviewer for Claude Code and Antigravity with zero-AI GraphQL polling, 50/50 provider load intercalation, GitHub inline comments, Google Drive agent handoff docs, per-brain KBs, and living documentation."
+license = "MIT"
+repository = "https://github.com/cokitron/cheap-otto"
+
+[[bin]]
+name = "code-reviewer"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+toml = "0.8"

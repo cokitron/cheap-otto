@@ -1,0 +1,37 @@
+# Copy this file to `config/repos.toml` (gitignored) or configure via the Web Dashboard GUI (`http://127.0.0.1:7430`).
+state_dir = "~/.code-reviewer"
+
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+intercalate_providers = true
+max_parallel_prs = 8
+max_parallel_brains_per_pr = 8
+claude_model = "sonnet"
+agy_model = ""
+reasoning_effort = "medium"
+poll_only_mode = false
+
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "~/.gemini/antigravity/bin/gdrive"
+gdocs_bin = "~/.gemini/antigravity/bin/gdocs"
+
+[[repos]]
+full_name = "acme-org/web-app"
+default_branch = "main"
+language = "en"
+# "swap" alternates `primary` <-> `secondary` so authors never review their own PRs;
+# "forced" locks reviews to `forced_account` (pair with `comment_only` for single-account org access).
+account_policy = "swap"
+review_event_policy = "formal_verdict"
+local_check_cmd = "npm run check"
+enabled = false
