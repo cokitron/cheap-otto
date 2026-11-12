@@ -3,8 +3,8 @@
 
 use crate::brains::{
     BrainError, RunnerPair, agy_binary, base64_basic::encode_basic_auth, claude_binary, git_binary,
-    load_living_docs_bundle, parse_json_from_llm, resolve_intercalated_runners, run_git,
-    truncate_chars,
+    load_living_docs_bundle, notify_pixel_hook, parse_json_from_llm, resolve_intercalated_runners,
+    run_git, truncate_chars,
 };
 use crate::config::{
     AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, repo_fs_slug,
@@ -1448,6 +1448,14 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
     prompt: &str,
     allow_write_tools: bool,
 ) -> Result<T, BrainError> {
+    let tool = if allow_write_tools { "Edit" } else { "Grep" };
+    let sess_pref = format!(
+        "ct-{}-{}-{}",
+        stage_name,
+        preferred.slug(),
+        std::process::id()
+    );
+    notify_pixel_hook(&sess_pref, "PreToolUse", Some(tool), workdir);
     let first = invoke_tender_cli(agents_cfg, preferred, workdir, prompt, allow_write_tools)
         .and_then(|raw| {
             parse_json_from_llm::<T>(&raw).map_err(|d| BrainError::InvalidBrainJson {
@@ -1455,6 +1463,7 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
                 details: d,
             })
         });
+    notify_pixel_hook(&sess_pref, "Stop", None, workdir);
     match first {
         Ok(v) => Ok(v),
         Err(err) if fallback != preferred => {
@@ -1465,7 +1474,17 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
                 err,
                 fallback.slug()
             );
-            let raw = invoke_tender_cli(agents_cfg, fallback, workdir, prompt, allow_write_tools)?;
+            let sess_alt = format!(
+                "ct-{}-{}-{}",
+                stage_name,
+                fallback.slug(),
+                std::process::id()
+            );
+            notify_pixel_hook(&sess_alt, "PreToolUse", Some(tool), workdir);
+            let raw_res =
+                invoke_tender_cli(agents_cfg, fallback, workdir, prompt, allow_write_tools);
+            notify_pixel_hook(&sess_alt, "Stop", None, workdir);
+            let raw = raw_res?;
             parse_json_from_llm::<T>(&raw).map_err(|d| BrainError::InvalidBrainJson {
                 brain: stage_name.to_string(),
                 details: d,

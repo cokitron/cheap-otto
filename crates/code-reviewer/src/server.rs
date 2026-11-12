@@ -2,6 +2,7 @@
 
 use crate::brains::{
     ADVERSARIAL_BRAIN, SPECIALIST_BRAINS, append_kb_entry, is_runner_authenticated,
+    read_pixel_server_auth,
 };
 use crate::config::{
     AccountPolicy, CliRunner, ReviewEventPolicy, TenderDeliveryMode, WatchedRepoConfig,
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_UI_BIND: &str = "127.0.0.1:7430";
 pub const DEFAULT_UI_PORT: u16 = 7430;
+pub const DEFAULT_PIXEL_PORT: u16 = 7421;
 
 struct CachedHostProbe {
     captured_at: Instant,
@@ -99,7 +101,10 @@ pub fn open_tunneled_ui(
         let _ = crate::m1::run_ssh_script(host, &ensure_remote);
 
         println!(
-            "[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host} (127.0.0.1:{port})..."
+            "[ui] Opening background SSH tunnel http://127.0.0.1:{port} + pixel-agents :{pixel} -> {host}...",
+            port = port,
+            pixel = DEFAULT_PIXEL_PORT,
+            host = host,
         );
         let _child = Command::new("ssh")
             .current_dir(workspace)
@@ -111,6 +116,8 @@ pub fn open_tunneled_ui(
                 "ServerAliveInterval=30",
                 "-L",
                 &format!("127.0.0.1:{0}:127.0.0.1:{0}", port),
+                "-L",
+                &format!("127.0.0.1:{0}:127.0.0.1:{0}", DEFAULT_PIXEL_PORT),
                 host,
             ])
             .stdin(Stdio::null())
@@ -212,7 +219,11 @@ fn handle_http_connection(
     };
 
     if method == "GET"
-        && (path == "/" || path == "/index.html" || path == "/reviewer" || path == "/tender")
+        && (path == "/"
+            || path == "/index.html"
+            || path == "/reviewer"
+            || path == "/tender"
+            || path == "/pixel")
     {
         return write_http_response(
             &mut stream,
@@ -268,6 +279,8 @@ fn dispatch_api(
 ) -> Result<Value, String> {
     match (method, path) {
         ("GET", "/api/health") => Ok(json!({ "ok": true })),
+        ("GET", "/api/pixel-office") => Ok(build_pixel_office_payload()),
+        ("POST", "/api/pixel-office/start") => start_pixel_agents_server(),
         ("GET", "/api/overview") => build_overview_payload(ctx),
         ("GET", "/api/brain") => {
             let brain_id = parse_query_param(query, "id")
@@ -1058,4 +1071,79 @@ fn percent_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+fn build_pixel_office_payload() -> Value {
+    if let Some((port, token)) = read_pixel_server_auth(DEFAULT_PIXEL_PORT) {
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        let reachable = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok();
+        json!({
+            "available": reachable,
+            "pixel_port": port,
+            "token": token,
+        })
+    } else {
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], DEFAULT_PIXEL_PORT).into();
+        let reachable = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok();
+        json!({
+            "available": reachable,
+            "pixel_port": DEFAULT_PIXEL_PORT,
+            "token": Value::Null,
+        })
+    }
+}
+
+fn start_pixel_agents_server() -> Result<Value, String> {
+    let existing = build_pixel_office_payload();
+    if existing["available"].as_bool() == Some(true) {
+        return Ok(json!({
+            "ok": true,
+            "message": format!("pixel-agents is already listening on 127.0.0.1:{}", existing["pixel_port"])
+        }));
+    }
+
+    let candidate_bins = ["/opt/homebrew/bin/pixel-agents", "pixel-agents"];
+    let bin = candidate_bins
+        .iter()
+        .find(|p| Path::new(p).exists() || *p == &"pixel-agents")
+        .copied()
+        .unwrap_or("pixel-agents");
+
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "--port",
+        &DEFAULT_PIXEL_PORT.to_string(),
+        "--host",
+        "127.0.0.1",
+        "--no-terminal",
+    ])
+    .env(
+        "PATH",
+        format!(
+            "/opt/homebrew/bin:/usr/local/bin:{}",
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+
+    cmd.spawn()
+        .map_err(|e| format!("failed to launch `{}`: {}", bin, e))?;
+
+    for _ in 0..15 {
+        thread::sleep(Duration::from_millis(200));
+        let p = build_pixel_office_payload();
+        if p["available"].as_bool() == Some(true) {
+            return Ok(json!({
+                "ok": true,
+                "message": format!("pixel-agents started on 127.0.0.1:{}", p["pixel_port"])
+            }));
+        }
+    }
+
+    Ok(json!({
+        "ok": true,
+        "message": "Launched pixel-agents background server; refreshing connection..."
+    }))
 }

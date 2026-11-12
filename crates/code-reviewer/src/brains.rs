@@ -2,7 +2,9 @@
 //! cross-model adversarial verifier (`claude` <-> `agy`), per-brain KB updater,
 //! and post-merge Living Documentation engine.
 
-use crate::config::{AgentsConfig, CliRunner, WorkspaceConfig, expand_tilde, repo_fs_slug};
+use crate::config::{
+    AgentsConfig, CliRunner, WorkspaceConfig, expand_tilde, home_dir, repo_fs_slug,
+};
 use crate::github::{DetailedOpenPr, MergedPrEvent};
 use crate::state::{
     ActiveWorkerState, BrainLiveState, ConfidenceTag, HumanReplyItem, ObservationRecord,
@@ -1394,7 +1396,77 @@ fn invoke_agent_json_resilient<T: serde::de::DeserializeOwned>(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct PixelServerInfo {
+    port: Option<u16>,
+    token: Option<String>,
+}
+
+/// Reads local `pixel-agents` v1.6.0 standalone server coordinates (`~/.pixel-agents/server.json`).
+pub(crate) fn read_pixel_server_auth(fallback_port: u16) -> Option<(u16, String)> {
+    let server_json = home_dir().join(".pixel-agents").join("server.json");
+    let raw = fs::read_to_string(server_json).ok()?;
+    let parsed: PixelServerInfo = serde_json::from_str(&raw).ok()?;
+    let token = parsed.token?;
+    let port = parsed.port.unwrap_or(fallback_port);
+    Some((port, token))
+}
+
+/// Emits a best-effort non-blocking lifecycle hook to `pixel-agents` so active Review Brains
+/// and Code Tender workers animate live in the Pixel Agents office without ever stalling CLI runs.
+pub(crate) fn notify_pixel_hook(
+    session_id: &str,
+    hook_event: &str,
+    tool_name: Option<&str>,
+    cwd: &Path,
+) {
+    let Some((port, token)) = read_pixel_server_auth(7421) else {
+        return;
+    };
+    let mut payload = serde_json::json!({
+        "session_id": session_id,
+        "hook_event_name": hook_event,
+        "cwd": cwd.to_string_lossy(),
+    });
+    if let Some(t) = tool_name {
+        payload["tool_name"] = serde_json::Value::String(t.to_string());
+    }
+    let body = serde_json::to_string(&payload).unwrap_or_default();
+    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200))
+    else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let req = format!(
+        "POST /api/hooks/claude HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n\
+         {body}",
+        body.len()
+    );
+    let _ = stream.write_all(req.as_bytes());
+}
+
 fn invoke_agent_json<T: serde::de::DeserializeOwned>(
+    agents_cfg: &AgentsConfig,
+    runner: CliRunner,
+    workdir: &Path,
+    brain_name: &str,
+    prompt: &str,
+) -> Result<T, BrainError> {
+    let session_id = format!("cr-{}-{}-{}", brain_name, runner.slug(), std::process::id());
+    notify_pixel_hook(&session_id, "PreToolUse", Some("Grep"), workdir);
+    let res = invoke_agent_json_inner(agents_cfg, runner, workdir, brain_name, prompt);
+    notify_pixel_hook(&session_id, "Stop", None, workdir);
+    res
+}
+
+fn invoke_agent_json_inner<T: serde::de::DeserializeOwned>(
     agents_cfg: &AgentsConfig,
     runner: CliRunner,
     workdir: &Path,

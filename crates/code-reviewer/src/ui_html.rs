@@ -114,6 +114,89 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       border-color: rgba(16, 185, 129, 0.55);
       color: #d1fae5;
     }
+    .app-switcher button.active-pixel {
+      background: rgba(168, 85, 247, 0.22);
+      border-color: rgba(168, 85, 247, 0.55);
+      color: #f3e8ff;
+    }
+    .brand-logo.pixel-mode {
+      background: linear-gradient(135deg, #a855f7, #06b6d4);
+    }
+    button.pixel-active {
+      background: rgba(168, 85, 247, 0.22);
+      border-color: rgba(168, 85, 247, 0.6);
+      color: #f3e8ff;
+    }
+    #workspace-shell {
+      display: block;
+      min-height: calc(100vh - 64px);
+    }
+    #workspace-shell.mode-split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(390px, 44%);
+      align-items: start;
+    }
+    #workspace-shell.mode-pixel {
+      display: block;
+    }
+    .workspace-left { min-width: 0; }
+    .pixel-pane {
+      background: #070a10;
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 64px);
+      position: sticky;
+      top: 64px;
+    }
+    #workspace-shell.mode-pixel .pixel-pane {
+      border-left: none;
+      position: static;
+      height: calc(100vh - 66px);
+    }
+    .pixel-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 14px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .pixel-frame {
+      flex: 1;
+      width: 100%;
+      border: none;
+      background: #070a10;
+      min-height: 460px;
+    }
+    .pixel-fallback {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      gap: 12px;
+      text-align: center;
+      background: radial-gradient(circle at top, #131b2e, #070a10);
+      overflow-y: auto;
+    }
+    #pixelFallbackCanvas {
+      border: 1px solid #2b3856;
+      border-radius: 10px;
+      background: #0b101b;
+      image-rendering: pixelated;
+      max-width: 100%;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    }
+    @media (max-width: 1100px) {
+      #workspace-shell.mode-split { grid-template-columns: 1fr; }
+      .pixel-pane { position: static; height: 580px; border-left: none; border-top: 1px solid var(--border); }
+    }
     .header-right {
       display: flex;
       align-items: center;
@@ -337,6 +420,9 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         <button id="nav-app-tender" onclick="switchApp('tender')">
           🛠️ Code Tender <span class="badge b-muted" id="nav-tender-badge">0</span>
         </button>
+        <button id="nav-app-pixel" onclick="switchApp('pixel')">
+          👾 Pixel Agents <span class="badge b-muted" id="nav-pixel-badge">...</span>
+        </button>
       </div>
     </div>
     <div class="header-right">
@@ -345,11 +431,14 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       <span class="pill" id="pill-agy"><span class="dot"></span>agy</span>
       <span class="pill" id="pill-intercalate">⇄ Intercalate</span>
       <span class="pill" id="pill-power">M1 Host</span>
+      <button class="secondary" id="btn-split-pixel" onclick="toggleSplitPixel()" title="Dock Pixel Agents Office side-by-side">👾 Split Office</button>
       <button id="primary-poll-btn" onclick="triggerPrimaryAction()">⚡ Poll &amp; Dispatch Reviews</button>
       <button class="secondary" onclick="refreshAll()">↻ Refresh</button>
     </div>
   </header>
 
+  <div id="workspace-shell">
+    <div class="workspace-left" id="workspace-left">
   <!-- ========================================================= -->
   <!-- APP 1: MULTI-LENS CODE REVIEWER                           -->
   <!-- ========================================================= -->
@@ -729,6 +818,40 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       </section>
     </main>
   </div>
+    </div>
+
+    <!-- ========================================================= -->
+    <!-- APP 3 / SPLIT DOCK: PIXEL AGENTS VISUAL OFFICE            -->
+    <!-- ========================================================= -->
+    <aside id="pixel-office-pane" class="pixel-pane hidden">
+      <div class="pixel-bar">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong>👾 Pixel Agents Office</strong>
+          <span class="badge b-muted" id="pixel-conn-badge">Checking :7421...</span>
+          <span id="pixel-workers-pill" style="font-size:11.5px;color:var(--muted);"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <button class="secondary" style="padding:4px 9px;font-size:11.5px;" onclick="startPixelAgentsServer()">▶ Start :7421</button>
+          <button class="secondary" style="padding:4px 9px;font-size:11.5px;" onclick="loadPixelOffice(true)">↻ Reload Office</button>
+          <a id="pixel-open-ext" class="btn secondary" style="padding:4px 9px;font-size:11.5px;" href="#" target="_blank" rel="noopener">↗ Open Tab</a>
+        </div>
+      </div>
+      <iframe id="pixelOfficeFrame" class="pixel-frame hidden" title="Pixel Agents Visual Office"></iframe>
+      <div id="pixelFallbackPane" class="pixel-fallback">
+        <canvas id="pixelFallbackCanvas" width="760" height="320"></canvas>
+        <div style="max-width:640px;">
+          <div style="font-weight:700;font-size:15px;margin-bottom:4px;" id="pixel-fallback-title">Live M1 Agent Floorplan Preview</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;" id="pixel-fallback-desc">
+            Connecting to standalone <code>pixel-agents v1.6.0</code> on port <code>7421</code>...
+          </div>
+          <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+            <button onclick="startPixelAgentsServer()">▶ Start Pixel Agents Server (:7421)</button>
+            <button class="secondary" onclick="loadPixelOffice(true)">↻ Retry Connection</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
 
   <div class="toast" id="toast"></div>
 
@@ -745,10 +868,17 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     let SELECTED_TENDER_AGENT = '01-tender-triage';
     let SETTINGS_INITIALIZED = false;
     let TENDER_SETTINGS_INITIALIZED = false;
+    let SPLIT_PIXEL = localStorage.getItem('cr_split_pixel') === '1';
+    let PIXEL_OFFICE_URL = null;
+    let PIXEL_ONLINE = false;
+    let PIXEL_LOADED_ONCE = false;
 
     function detectInitialApp() {
       const path = (window.location.pathname || '').toLowerCase();
       const params = new URLSearchParams(window.location.search || '');
+      if (path.startsWith('/pixel') || params.get('app') === 'pixel' || window.location.hash === '#pixel') {
+        return 'pixel';
+      }
       if (path.startsWith('/tender') || params.get('app') === 'tender' || window.location.hash === '#tender') {
         return 'tender';
       }
@@ -771,33 +901,73 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         .replace(/"/g, '&quot;');
     }
 
-    function switchApp(app, pushUrl = true) {
-      ACTIVE_APP = app === 'tender' ? 'tender' : 'reviewer';
+    function applyWorkspaceLayout() {
+      const isPixel = ACTIVE_APP === 'pixel';
       const isTender = ACTIVE_APP === 'tender';
+      const showPixelPane = isPixel || SPLIT_PIXEL;
 
-      document.getElementById('app-reviewer').classList.toggle('hidden', isTender);
-      document.getElementById('app-tender').classList.toggle('hidden', !isTender);
+      document.getElementById('app-reviewer').classList.toggle('hidden', isPixel || isTender);
+      document.getElementById('app-tender').classList.toggle('hidden', isPixel || !isTender);
+      document.getElementById('workspace-left').classList.toggle('hidden', isPixel);
 
-      document.getElementById('nav-app-reviewer').classList.toggle('active-reviewer', !isTender);
+      const shell = document.getElementById('workspace-shell');
+      shell.classList.toggle('mode-pixel', isPixel);
+      shell.classList.toggle('mode-split', !isPixel && SPLIT_PIXEL);
+
+      const pixelPane = document.getElementById('pixel-office-pane');
+      pixelPane.classList.toggle('hidden', !showPixelPane);
+
+      const splitBtn = document.getElementById('btn-split-pixel');
+      splitBtn.classList.toggle('pixel-active', !isPixel && SPLIT_PIXEL);
+      splitBtn.classList.toggle('hidden', isPixel);
+      splitBtn.textContent = SPLIT_PIXEL ? '✕ Hide Pixel Office' : '👾 Split Office';
+
+      if (showPixelPane && !PIXEL_LOADED_ONCE) {
+        loadPixelOffice(false);
+      }
+    }
+
+    function toggleSplitPixel() {
+      SPLIT_PIXEL = !SPLIT_PIXEL;
+      localStorage.setItem('cr_split_pixel', SPLIT_PIXEL ? '1' : '0');
+      applyWorkspaceLayout();
+    }
+
+    function switchApp(app, pushUrl = true) {
+      ACTIVE_APP = (app === 'tender' || app === 'pixel') ? app : 'reviewer';
+      const isTender = ACTIVE_APP === 'tender';
+      const isPixel = ACTIVE_APP === 'pixel';
+
+      document.getElementById('nav-app-reviewer').classList.toggle('active-reviewer', ACTIVE_APP === 'reviewer');
       document.getElementById('nav-app-tender').classList.toggle('active-tender', isTender);
+      document.getElementById('nav-app-pixel').classList.toggle('active-pixel', isPixel);
 
       const logo = document.getElementById('brand-logo');
-      logo.textContent = isTender ? 'CT' : 'CR';
+      logo.textContent = isPixel ? 'PX' : (isTender ? 'CT' : 'CR');
       logo.classList.toggle('tender-mode', isTender);
+      logo.classList.toggle('pixel-mode', isPixel);
 
-      document.getElementById('brand-title').textContent = isTender
-        ? 'Internal CI — Code Tender (Autonomous Review Handler)'
-        : 'Internal CI — Multi-Lens Code Reviewer';
-      document.getElementById('brand-sub').textContent = isTender
-        ? 'Parallel Review Fixing • Claude ⇄ Antigravity Intercalation • Check Verification & Thread Resolution'
-        : 'Parallel Async Sessions • Claude ⇄ Antigravity Load Intercalation • Living Docs';
+      document.getElementById('brand-title').textContent = isPixel
+        ? 'Internal CI — Pixel Agents Visual Office'
+        : (isTender
+          ? 'Internal CI — Code Tender (Autonomous Review Handler)'
+          : 'Internal CI — Multi-Lens Code Reviewer');
+      document.getElementById('brand-sub').textContent = isPixel
+        ? 'Real-Time Animated Desk Office for Multi-Lens Reviewer, Code Tender & M1 Claude/Agy Sessions'
+        : (isTender
+          ? 'Parallel Review Fixing • Claude ⇄ Antigravity Intercalation • Check Verification & Thread Resolution'
+          : 'Parallel Async Sessions • Claude ⇄ Antigravity Load Intercalation • Living Docs');
 
       const primaryBtn = document.getElementById('primary-poll-btn');
       primaryBtn.className = isTender ? 'tender-btn' : '';
-      primaryBtn.textContent = isTender ? '🛠️ Poll & Tend Reviews' : '⚡ Poll & Dispatch Reviews';
+      primaryBtn.textContent = isPixel
+        ? '🔄 Reload Pixel Office'
+        : (isTender ? '🛠️ Poll & Tend Reviews' : '⚡ Poll & Dispatch Reviews');
+
+      applyWorkspaceLayout();
 
       if (pushUrl && window.location.protocol.startsWith('http')) {
-        const targetPath = isTender ? '/tender' : '/reviewer';
+        const targetPath = isPixel ? '/pixel' : (isTender ? '/tender' : '/reviewer');
         if (window.location.pathname !== targetPath) {
           window.history.pushState({ app: ACTIVE_APP }, '', targetPath);
         }
@@ -935,6 +1105,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
       const pPill = document.getElementById('pill-power');
       pPill.innerHTML = `<span class="dot ${STATE.host.ac_power ? 'ok' : 'warn'}"></span>${esc(STATE.host.summary)}`;
+      updatePixelWorkersSummary();
     }
 
     function renderHeaderAndLive() {
@@ -1164,7 +1335,9 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     function setObsFilter(f) { OBS_FILTER = f; renderPrList(); }
 
     function triggerPrimaryAction() {
-      if (ACTIVE_APP === 'tender') {
+      if (ACTIVE_APP === 'pixel') {
+        loadPixelOffice(true);
+      } else if (ACTIVE_APP === 'tender') {
         triggerTenderPollNow();
       } else {
         triggerPollNow();
@@ -1618,9 +1791,197 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       refreshAll();
     }
 
+    // =========================================================
+    // PIXEL AGENTS VISUAL OFFICE & LIVE FALLBACK CANVAS
+    // =========================================================
+
+    async function loadPixelOffice(forceReload) {
+      PIXEL_LOADED_ONCE = true;
+      const badge = document.getElementById('pixel-conn-badge');
+      const navBadge = document.getElementById('nav-pixel-badge');
+      const frame = document.getElementById('pixelOfficeFrame');
+      const fallback = document.getElementById('pixelFallbackPane');
+      const ext = document.getElementById('pixel-open-ext');
+
+      try {
+        const info = await api('/api/pixel-office');
+        const port = info.pixel_port || 7421;
+        const host = window.location.hostname || '127.0.0.1';
+        const tok = info.token ? ('?token=' + encodeURIComponent(info.token)) : '';
+        const url = `http://${host}:${port}/${tok}`;
+        ext.href = url;
+
+        let browserReachable = false;
+        if (info.available) {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 1400);
+          try {
+            await fetch(`http://${host}:${port}/`, { mode: 'no-cors', signal: ctrl.signal });
+            browserReachable = true;
+          } catch (_) {
+            browserReachable = false;
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+
+        if (info.available && browserReachable) {
+          PIXEL_ONLINE = true;
+          badge.textContent = `LIVE :${port}`;
+          badge.className = 'badge b-pass';
+          navBadge.textContent = 'LIVE';
+          navBadge.className = 'badge b-pass';
+          if (forceReload || PIXEL_OFFICE_URL !== url || frame.classList.contains('hidden')) {
+            PIXEL_OFFICE_URL = url;
+            frame.src = url;
+          }
+          frame.classList.remove('hidden');
+          fallback.classList.add('hidden');
+          return;
+        }
+
+        PIXEL_ONLINE = false;
+        frame.classList.add('hidden');
+        fallback.classList.remove('hidden');
+        if (info.available && !browserReachable) {
+          badge.textContent = `Remote :${port} (Needs Tunnel)`;
+          badge.className = 'badge b-running';
+          navBadge.textContent = '7421';
+          navBadge.className = 'badge b-running';
+          document.getElementById('pixel-fallback-title').textContent = 'Pixel Agents Running on M1 — Forward Port 7421 to View Full Office';
+          document.getElementById('pixel-fallback-desc').innerHTML =
+            `<code>pixel-agents v1.6.0</code> is live on M1 at <code>127.0.0.1:${port}</code>. Run <code>code-reviewer ui</code> or forward <code>-L 127.0.0.1:${port}:127.0.0.1:${port}</code> on your SSH tunnel, then click Retry. Showing live M1 floorplan preview meanwhile:`;
+        } else {
+          badge.textContent = 'Offline';
+          badge.className = 'badge b-muted';
+          navBadge.textContent = 'OFF';
+          navBadge.className = 'badge b-muted';
+          document.getElementById('pixel-fallback-title').textContent = 'Pixel Agents Standalone Server Not Running';
+          document.getElementById('pixel-fallback-desc').textContent =
+            'Click "Start Pixel Agents Server (:7421)" to launch the live pixel-agents office on your M1 host.';
+        }
+      } catch (e) {
+        PIXEL_ONLINE = false;
+        badge.textContent = 'Offline';
+        badge.className = 'badge b-muted';
+      }
+    }
+
+    async function startPixelAgentsServer() {
+      try {
+        const res = await api('/api/pixel-office/start', { method: 'POST', body: '{}' });
+        showToast(res.message || 'Started pixel-agents server!');
+        setTimeout(() => loadPixelOffice(true), 800);
+      } catch (e) {
+        showToast('Could not start pixel-agents: ' + e.message);
+      }
+    }
+
+    function updatePixelWorkersSummary() {
+      if (!STATE) return;
+      const rev = (STATE.active_workers || []).length;
+      const tend = (STATE.tender_active_workers || []).length;
+      const el = document.getElementById('pixel-workers-pill');
+      if (el) {
+        el.textContent = `${rev} Reviewer • ${tend} Code Tender active`;
+      }
+      if (!PIXEL_ONLINE) {
+        const navBadge = document.getElementById('nav-pixel-badge');
+        if (navBadge && navBadge.textContent === '...') {
+          navBadge.textContent = 'v1.6';
+        }
+      }
+    }
+
+    // Crisp retro pixel-art floorplan fallback renderer synced to live Reviewer & Tender workers
+    let PIXEL_TICK = 0;
+    function drawFallbackPixelOffice() {
+      const canvas = document.getElementById('pixelFallbackCanvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      PIXEL_TICK++;
+
+      const W = canvas.width, H = canvas.height;
+      ctx.fillStyle = '#0c1220';
+      ctx.fillRect(0, 0, W, H);
+
+      // Floor tiles
+      for (let x = 0; x < W; x += 24) {
+        for (let y = 52; y < H; y += 24) {
+          ctx.fillStyle = ((x / 24 + y / 24) % 2 === 0) ? '#10182a' : '#0d1424';
+          ctx.fillRect(x, y, 24, 24);
+        }
+      }
+
+      // Top office wall & M1 server rack
+      ctx.fillStyle = '#182238';
+      ctx.fillRect(0, 0, W, 52);
+      ctx.fillStyle = '#263554';
+      ctx.fillRect(0, 50, W, 3);
+      ctx.fillStyle = '#93c5fd';
+      ctx.font = 'bold 12px monospace';
+      ctx.fillText('M1 INTERNAL CI OFFICE  •  CLAUDE ⇄ AGY CLUSTER', 16, 30);
+
+      const stations = [];
+      (STATE?.active_workers || []).forEach(w => {
+        stations.push({ label: `CR #${w.pr_number}`, runner: w.lead_runner, active: true, kind: 'reviewer' });
+      });
+      (STATE?.tender_active_workers || []).forEach(w => {
+        stations.push({ label: `CT #${w.pr_number}`, runner: w.lead_runner, active: true, kind: 'tender' });
+      });
+      while (stations.length < 6) {
+        const idx = stations.length + 1;
+        stations.push({
+          label: idx <= 3 ? `Brain-0${idx}` : `Tender-0${idx - 3}`,
+          runner: idx % 2 === 0 ? 'agy' : 'claude',
+          active: false,
+          kind: idx <= 3 ? 'reviewer' : 'tender'
+        });
+      }
+
+      stations.slice(0, 6).forEach((st, i) => {
+        const col = i % 3, row = Math.floor(i / 3);
+        const dx = 65 + col * 235;
+        const dy = 96 + row * 112;
+
+        // Desk
+        ctx.fillStyle = '#3b2b20';
+        ctx.fillRect(dx, dy, 148, 28);
+        ctx.fillStyle = '#523c2d';
+        ctx.fillRect(dx + 2, dy + 2, 144, 6);
+
+        // Monitor glow
+        const screenColor = st.active
+          ? (PIXEL_TICK % 6 < 3 ? '#22d3ee' : '#34d399')
+          : '#1e293b';
+        ctx.fillStyle = '#090d16';
+        ctx.fillRect(dx + 52, dy - 22, 44, 24);
+        ctx.fillStyle = screenColor;
+        ctx.fillRect(dx + 56, dy - 18, 36, 16);
+
+        // Pixel developer sprite
+        const bob = st.active ? (PIXEL_TICK % 4 < 2 ? -2 : 0) : 0;
+        const shirt = st.runner === 'claude' ? '#f97316' : '#06b6d4';
+        ctx.fillStyle = '#fde68a'; // head
+        ctx.fillRect(dx + 64, dy + 26 + bob, 20, 16);
+        ctx.fillStyle = '#1e293b'; // hair
+        ctx.fillRect(dx + 64, dy + 24 + bob, 20, 6);
+        ctx.fillStyle = shirt; // torso
+        ctx.fillRect(dx + 60, dy + 42 + bob, 28, 18);
+
+        // Label badge
+        ctx.fillStyle = st.active ? '#10b981' : '#64748b';
+        ctx.font = 'bold 11px monospace';
+        ctx.fillText(`${st.label} [${st.runner}]`, dx + 8, dy + 76);
+      });
+    }
+
     switchApp(detectInitialApp(), false);
+    loadPixelOffice(false);
     refreshAll();
     setInterval(refreshAll, 2500);
+    setInterval(drawFallbackPixelOffice, 350);
   </script>
 </body>
 </html>
