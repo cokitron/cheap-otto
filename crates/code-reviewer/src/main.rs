@@ -30,14 +30,14 @@ use crate::m1::{
 };
 use crate::server::{DEFAULT_UI_BIND, DEFAULT_UI_PORT, open_tunneled_ui, run_ui_server};
 use crate::state::{
-    ActiveTenderWorkerState, ActiveWorkerState, BOT_TENDER_MARKER, CompletedBannerOutcome,
-    LedgerStore, STATUS_BANNER_MARKER, StatusBannerContext, TenderPrSnapshot, TenderPrState,
-    TenderTriggerDecision, TrackedPrState, TriggerDecision, build_github_review_artifacts,
-    evaluate_pr_trigger, evaluate_tender_trigger, format_completed_status_banner,
-    format_interrupted_status_banner, format_queued_status_banner, format_running_status_banner,
-    format_superseded_status_banner, is_process_alive_str,
+    ActiveTenderWorkerState, ActiveWorkerState, CompletedBannerOutcome, LedgerStore,
+    StatusBannerContext, TenderPrSnapshot, TenderPrState, TenderTriggerDecision, TrackedPrState,
+    TriggerDecision, build_github_review_artifacts, evaluate_pr_trigger, evaluate_tender_trigger,
+    format_completed_status_banner, format_interrupted_status_banner, format_queued_status_banner,
+    format_running_status_banner, format_superseded_status_banner, is_non_actionable_tender_item,
+    is_process_alive_str,
 };
-use crate::tender::{execute_tender_pr_cycle, sync_watched_prs_from_snapshots};
+use crate::tender::{execute_tender_pr_cycle, sync_watched_prs_from_snapshots_with_gh};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -1782,7 +1782,13 @@ fn run_tender_poll(
             .unwrap_or(cfg.accounts.primary.as_str());
         let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
         if !dry_run {
-            let _ = sync_watched_prs_from_snapshots(&cfg, repo_cfg, &state_dir, &snapshots);
+            let _ = sync_watched_prs_from_snapshots_with_gh(
+                &cfg,
+                repo_cfg,
+                &state_dir,
+                Some(&gh),
+                &snapshots,
+            );
         }
         let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
 
@@ -2074,6 +2080,15 @@ fn run_single_pr_tend(
         .as_deref()
         .unwrap_or(cfg.accounts.primary.as_str());
     let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+    if !dry_run {
+        let _ = sync_watched_prs_from_snapshots_with_gh(
+            &cfg,
+            repo_cfg,
+            &state_dir,
+            Some(&gh),
+            &snapshots,
+        );
+    }
     let snap = snapshots
         .iter()
         .find(|p| p.pr_number == pr_number)
@@ -2092,12 +2107,17 @@ fn run_single_pr_tend(
     ) {
         TenderTriggerDecision::HandleFeedback { items, .. } => items,
         _ => {
-            // Manual UI trigger: collect unresolved threads or latest non-tender review feedback
+            // Manual UI trigger: collect unresolved actionable threads that have NOT been answered by us
             snap.feedback_items
                 .iter()
-                .filter(|f| !f.body.contains(BOT_TENDER_MARKER))
-                .filter(|f| !f.body.contains(STATUS_BANNER_MARKER))
-                .filter(|f| !f.is_resolved && !f.body.trim().is_empty())
+                .filter(|f| {
+                    !is_non_actionable_tender_item(
+                        f,
+                        &snap.author,
+                        cfg.tender.ignore_clean_pass_reviews,
+                    )
+                })
+                .filter(|f| !f.is_resolved && !f.answered_by_pr_author && !f.answered_by_tender)
                 .cloned()
                 .collect()
         }

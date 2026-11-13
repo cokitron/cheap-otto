@@ -13,8 +13,9 @@ use crate::config::{
 use crate::github::GitHubClient;
 use crate::state::{
     ActiveTenderWorkerState, BOT_TENDER_MARKER, BrainLiveState, LearnedRuleRecord, LedgerStore,
-    TenderActionStatus, TenderFeedbackItem, TenderHandledItem, TenderPrSnapshot, TenderPrState,
-    TenderRunStatus, TenderTriggerDecision, acquire_file_spinlock, evaluate_tender_trigger,
+    TenderActionStatus, TenderFeedbackItem, TenderFeedbackKind, TenderHandledItem,
+    TenderPrSnapshot, TenderPrState, TenderRunStatus, TenderTriggerDecision, acquire_file_spinlock,
+    evaluate_tender_trigger,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -417,6 +418,7 @@ pub fn browse_m1_directories(raw_path: Option<&str>) -> Result<serde_json::Value
 /// Links heavy gitignored local dependencies (`node_modules`, `.venv`, etc.) from the user's local checkout
 /// into the isolated PR worktree so tests, typechecks, and linters run locally without reinstalling or dirtying git status.
 fn link_local_dependencies_into_worktree(local_checkout: &Path, workdir: &Path) -> Vec<String> {
+    #[allow(unused_mut)]
     let mut linked = Vec::new();
     let mut candidate_rel_paths: Vec<PathBuf> = vec![
         PathBuf::from("node_modules"),
@@ -637,6 +639,7 @@ fn link_missing_workdir_workspaces(workdir: &Path, dst_nm: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn exclude_linked_path_in_worktree(workdir: &Path, rel_norm: &str) {
     let Ok(out) = Command::new(git_binary())
         .args([
@@ -971,12 +974,66 @@ pub fn save_tender_kb_file(
 /// - Auto-registers open, non-draft, allowed-author PRs on `tender_enabled` repos as `watched = true` (`Idle` / Watching).
 /// - Refreshes title, refs, `head_sha`, `is_open`, and live `open_feedback_count` on existing watched PRs.
 /// - Marks previously open PRs missing from GitHub's open list as `is_open = false`.
+#[cfg(test)]
 pub fn sync_watched_prs_from_snapshots(
     cfg: &WorkspaceConfig,
     repo_cfg: &WatchedRepoConfig,
     state_dir: &Path,
     snapshots: &[TenderPrSnapshot],
 ) -> Result<(), String> {
+    sync_watched_prs_from_snapshots_with_gh(cfg, repo_cfg, state_dir, None, snapshots)
+}
+
+/// Synchronizes open PR snapshots AND auto-resolves any unresolved GitHub review threads where
+/// we (the PR author or Code Tender) already left a reply addressing the concern or linking an issue,
+/// ensuring addressed/issue-tracked threads never remain stuck as `Needs Input` (`NeedsHuman`).
+pub fn sync_watched_prs_from_snapshots_with_gh(
+    cfg: &WorkspaceConfig,
+    repo_cfg: &WatchedRepoConfig,
+    state_dir: &Path,
+    gh: Option<&GitHubClient>,
+    snapshots: &[TenderPrSnapshot],
+) -> Result<(), String> {
+    // 1. Outside the file spinlock, resolve any unresolved GitHub review threads on watched PRs
+    //    whose latest reply was authored by us (PR author or Code Tender).
+    let mut newly_resolved_threads: BTreeSet<(u64, String)> = BTreeSet::new();
+    if let Some(gh_client) = gh
+        && cfg.tender.resolve_threads_on_fix
+    {
+        let pre_ledger = LedgerStore::load_or_default(state_dir).unwrap_or_default();
+        for snap in snapshots {
+            let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
+            let watched = pre_ledger
+                .tender_pull_requests
+                .get(&key)
+                .map(|t| t.watched)
+                .unwrap_or_else(|| {
+                    repo_cfg.tender_enabled
+                        && !snap.is_draft
+                        && !snap.is_fork
+                        && cfg.is_tender_author_allowed(repo_cfg, &snap.author)
+                });
+            if !watched {
+                continue;
+            }
+            let tender_account = cfg.select_tender_account(repo_cfg, &snap.author);
+            for item in &snap.feedback_items {
+                if item.kind == TenderFeedbackKind::ReviewThreadComment
+                    && !item.is_resolved
+                    && (item.answered_by_pr_author || item.answered_by_tender)
+                    && let Some(tid) = item.thread_node_id.as_deref()
+                    && gh_client.resolve_review_thread(tender_account, tid).is_ok()
+                {
+                    eprintln!(
+                        "[tender-reconcile] Auto-resolved addressed thread `{}` on {}#{}",
+                        tid, repo_cfg.full_name, snap.pr_number
+                    );
+                    newly_resolved_threads.insert((snap.pr_number, tid.to_string()));
+                }
+            }
+        }
+    }
+
     let open_nums: BTreeSet<u64> = snapshots.iter().map(|s| s.pr_number).collect();
     let complete_open_window = snapshots.len() < 25;
     LedgerStore::with_exclusive_lock(state_dir, |store| {
@@ -1004,14 +1061,8 @@ pub fn sync_watched_prs_from_snapshots(
                 _ => 0,
             };
 
-            if let Some(existing) = store.tender_pull_requests.get_mut(&key) {
-                existing.is_open = true;
-                existing.title = snap.title.clone();
-                existing.head_ref = snap.head_ref.clone();
-                existing.base_ref = snap.base_ref.clone();
-                existing.head_sha = Some(snap.head_sha.clone());
-                existing.open_feedback_count = actionable_count;
-            } else if repo_cfg.tender_enabled
+            if !store.tender_pull_requests.contains_key(&key)
+                && repo_cfg.tender_enabled
                 && !snap.is_draft
                 && !snap.is_fork
                 && cfg.is_tender_author_allowed(repo_cfg, &snap.author)
@@ -1028,11 +1079,169 @@ pub fn sync_watched_prs_from_snapshots(
                 fresh.is_open = true;
                 fresh.head_sha = Some(snap.head_sha.clone());
                 fresh.open_feedback_count = actionable_count;
-                store.tender_pull_requests.insert(key, fresh);
+                store.tender_pull_requests.insert(key.clone(), fresh);
+            }
+
+            if let Some(existing) = store.tender_pull_requests.get_mut(&key) {
+                existing.is_open = true;
+                existing.title = snap.title.clone();
+                existing.head_ref = snap.head_ref.clone();
+                existing.base_ref = snap.base_ref.clone();
+                existing.head_sha = Some(snap.head_sha.clone());
+                existing.open_feedback_count = actionable_count;
+                reconcile_pr_handled_items_and_status(existing, snap, &newly_resolved_threads);
             }
         }
     })
     .map_err(|e| e.to_string())
+}
+
+/// Cleans duplicate/wrapper entries and upgrades any `NeedsHuman` items whose review threads were
+/// answered by us (PR author or Code Tender) or resolved on GitHub so addressed threads never stay `Needs Input`.
+fn reconcile_pr_handled_items_and_status(
+    tpr: &mut TenderPrState,
+    snap: &TenderPrSnapshot,
+    newly_resolved_threads: &BTreeSet<(u64, String)>,
+) {
+    let has_inline_threads = snap
+        .feedback_items
+        .iter()
+        .any(|f| f.kind == TenderFeedbackKind::ReviewThreadComment);
+
+    // Drop self-authored comment entries and non-actionable bot status-wrapper entries from earlier runs.
+    tpr.handled_items.retain(|h| {
+        if h.source_author.eq_ignore_ascii_case(&snap.author) {
+            return false;
+        }
+        if h.path.is_none() {
+            let author_lc = h.source_author.to_ascii_lowercase();
+            let sum_trim = h.summary.trim();
+            if sum_trim == "</details>" || author_lc.contains("codex") {
+                return false;
+            }
+            if author_lc.contains("cubic")
+                && (has_inline_threads
+                    || h.summary.contains("No issues found")
+                    || h.summary.contains("All reported issues were addressed"))
+            {
+                return false;
+            }
+        }
+        true
+    });
+
+    // Deduplicate existing handled_items in-place (latest wins).
+    let prev = std::mem::take(&mut tpr.handled_items);
+    upsert_handled_items(&mut tpr.handled_items, prev);
+
+    // Reconcile against live GitHub thread states.
+    for fb in &snap.feedback_items {
+        if fb.kind != TenderFeedbackKind::ReviewThreadComment {
+            continue;
+        }
+        let now_resolved = fb.is_resolved
+            || fb.thread_node_id.as_deref().is_some_and(|tid| {
+                newly_resolved_threads.contains(&(snap.pr_number, tid.to_string()))
+            });
+        let addressed = now_resolved || fb.answered_by_pr_author || fb.answered_by_tender;
+        if !addressed {
+            continue;
+        }
+
+        let mut matched_any = false;
+        for h in &mut tpr.handled_items {
+            let same_thread = match (&h.thread_node_id, &fb.thread_node_id) {
+                (Some(a), Some(b)) => a == b,
+                _ => {
+                    h.feedback_id == fb.feedback_id
+                        || (h.path.is_some() && h.path == fb.path && h.line == fb.line)
+                }
+            };
+            if same_thread {
+                matched_any = true;
+                if now_resolved {
+                    h.resolved_thread = true;
+                }
+                if h.action == TenderActionStatus::NeedsHuman {
+                    h.action = TenderActionStatus::ExplainedRationale;
+                    if let Some(ref author_reply) = fb.latest_author_reply {
+                        let cleaned = concise_ui_snippet(author_reply, 280);
+                        if !cleaned.is_empty() {
+                            h.reply_text = cleaned;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !matched_any && fb.answered_by_pr_author {
+            let reply = fb
+                .latest_author_reply
+                .as_deref()
+                .map(|r| concise_ui_snippet(r, 280))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Addressed in PR review thread.".to_string());
+            tpr.handled_items.push(TenderHandledItem {
+                feedback_id: fb.feedback_id.clone(),
+                source_author: fb.author.clone(),
+                path: fb.path.clone(),
+                line: fb.line,
+                thread_node_id: fb.thread_node_id.clone(),
+                reply_comment_id: fb.reply_comment_id,
+                summary: concise_ui_snippet(&fb.body, 160),
+                action: TenderActionStatus::ExplainedRationale,
+                reply_text: reply,
+                commit_sha: None,
+                issue_number: None,
+                issue_url: None,
+                draft_issue_title: None,
+                draft_issue_body: None,
+                resolved_thread: now_resolved,
+                reply_posted: true,
+            });
+        }
+    }
+
+    if tpr.last_status == TenderRunStatus::NeedsHuman
+        && !tpr
+            .handled_items
+            .iter()
+            .any(|h| h.action == TenderActionStatus::NeedsHuman)
+    {
+        tpr.last_status = if tpr.last_commit_pushed.is_some() {
+            TenderRunStatus::FixedAndPushed
+        } else if !tpr.handled_items.is_empty() {
+            TenderRunStatus::RepliedOnly
+        } else {
+            TenderRunStatus::Idle
+        };
+        if tpr.last_summary.as_deref().is_some_and(|s| {
+            s.to_ascii_lowercase().contains("human") || s.to_ascii_lowercase().contains("codex")
+        }) {
+            tpr.last_summary = Some(if tpr.handled_items.is_empty() {
+                String::new()
+            } else {
+                "Review concerns addressed on PR threads and resolved.".to_string()
+            });
+        }
+        tpr.updated_at = Utc::now();
+    }
+}
+
+pub fn upsert_handled_items(target: &mut Vec<TenderHandledItem>, incoming: Vec<TenderHandledItem>) {
+    for item in incoming {
+        let existing_pos = target.iter().position(|t| {
+            if let (Some(ta), Some(tb)) = (&t.thread_node_id, &item.thread_node_id) {
+                return ta == tb;
+            }
+            t.feedback_id == item.feedback_id
+        });
+        if let Some(idx) = existing_pos {
+            target[idx] = item;
+        } else {
+            target.push(item);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1054,6 +1263,10 @@ struct TriageDecisionItem {
     disposition: String,
     #[serde(default)]
     rationale_reply: String,
+    #[serde(default)]
+    issue_title: Option<String>,
+    #[serde(default)]
+    issue_body: Option<String>,
     #[serde(default)]
     target_files: Vec<String>,
     #[serde(default)]
@@ -1126,7 +1339,12 @@ struct VerifiedItemOutcome {
     action: String,
     #[serde(default)]
     reply_text: String,
+    #[serde(default)]
+    issue_title: Option<String>,
+    #[serde(default)]
+    issue_body: Option<String>,
     #[serde(default = "default_true_bool")]
+    #[allow(dead_code)]
     resolve_thread: bool,
 }
 
@@ -1244,12 +1462,30 @@ pub fn find_forbidden_modified_files(status_porcelain: &str) -> Vec<String> {
     forbidden
 }
 
+#[cfg(test)]
 pub fn format_tender_reply_body(reply_text: &str, commit_sha: Option<&str>) -> String {
+    format_tender_reply_body_with_issue(reply_text, commit_sha, None)
+}
+
+pub fn format_tender_reply_body_with_issue(
+    reply_text: &str,
+    commit_sha: Option<&str>,
+    created_issue: Option<(u64, &str)>,
+) -> String {
     let mut out = String::new();
     out.push_str(BOT_TENDER_MARKER);
     out.push('\n');
     out.push_str("🛠️ **Code Tender:** ");
     out.push_str(reply_text.trim());
+    if let Some((num, url)) = created_issue
+        && num > 0
+    {
+        if url.is_empty() {
+            out.push_str(&format!("\n\n- **Tracked in Issue:** #{num}"));
+        } else {
+            out.push_str(&format!("\n\n- **Tracked in Issue:** [#{num}]({url})"));
+        }
+    }
     if let Some(sha) = commit_sha
         && !sha.is_empty()
     {
@@ -1260,7 +1496,7 @@ pub fn format_tender_reply_body(reply_text: &str, commit_sha: Option<&str>) -> S
 }
 
 /// Strips hidden bot metadata comments (`<!-- ... -->`), `<picture>`/`<img>` badges, and
-/// `<details>` blocks (when surrounding visible text is already present) so UI summaries and
+/// nested `<details>` blocks (when surrounding visible text is already present) so UI summaries and
 /// LLM prompt budgets see concise human-readable review text instead of raw HTML state blobs.
 pub fn strip_review_html_noise(raw: &str) -> String {
     fn strip_span_ci(input: &str, open_pat: &str, close_pat: &str) -> String {
@@ -1286,12 +1522,41 @@ pub fn strip_review_html_noise(raw: &str) -> String {
         out
     }
 
+    fn strip_nested_details(input: &str) -> String {
+        let mut cur = input.to_string();
+        for _ in 0..8 {
+            let lower = cur.to_ascii_lowercase();
+            let Some(close_idx) = lower.find("</details>") else {
+                break;
+            };
+            if let Some(open_idx) = lower[..close_idx].rfind("<details") {
+                let mut next = String::with_capacity(cur.len());
+                next.push_str(&cur[..open_idx]);
+                next.push_str(&cur[close_idx + "</details>".len()..]);
+                cur = next;
+            } else {
+                let mut next = String::with_capacity(cur.len());
+                next.push_str(&cur[..close_idx]);
+                next.push_str(&cur[close_idx + "</details>".len()..]);
+                cur = next;
+            }
+        }
+        // Strip any unclosed trailing `<details...`
+        let lower = cur.to_ascii_lowercase();
+        if let Some(open_idx) = lower.find("<details") {
+            cur.truncate(open_idx);
+        }
+        cur
+    }
+
     let without_comments = strip_span_ci(raw, "<!--", "-->");
     let without_pics = strip_span_ci(&without_comments, "<picture", "</picture>");
     let without_imgs = strip_span_ci(&without_pics, "<img", ">");
-    let without_details = strip_span_ci(&without_imgs, "<details", "</details>");
+    let without_details = strip_nested_details(&without_imgs);
     let candidate = if without_details.trim().is_empty() {
         without_imgs
+            .replace("</details>", "")
+            .replace("</summary>", "")
     } else {
         without_details
     };
@@ -1303,7 +1568,7 @@ pub fn strip_review_html_noise(raw: &str) -> String {
         .trim()
         .to_string();
     if cleaned.is_empty() {
-        raw.trim().to_string()
+        String::new()
     } else {
         cleaned
     }
@@ -1728,13 +1993,6 @@ pub fn execute_tender_pr_cycle(
             None
         };
 
-        let do_not_resolve: BTreeSet<String> = verified
-            .item_outcomes
-            .iter()
-            .filter(|o| !o.resolve_thread)
-            .map(|o| o.feedback_id.clone())
-            .collect();
-
         post_replies_and_resolve_threads(
             gh,
             tender_account,
@@ -1743,14 +2001,13 @@ pub fn execute_tender_pr_cycle(
             &mut handled_now,
             pushed_sha.as_deref(),
             cfg.tender.resolve_threads_on_fix,
-            &do_not_resolve,
             tender_state.last_summary.as_deref().unwrap_or(""),
         );
 
         tender_state.staged_patch = None;
         tender_state.staged_commit_message = None;
         tender_state.pending_items.clear();
-        tender_state.handled_items.extend(handled_now);
+        upsert_handled_items(&mut tender_state.handled_items, handled_now);
         tender_state.last_status = if pushed_sha.is_some() {
             TenderRunStatus::FixedAndPushed
         } else if tender_state
@@ -1837,7 +2094,6 @@ pub fn approve_and_push_staged_patch(
     )?;
 
     let mut pending = std::mem::take(&mut tender_state.pending_items);
-    let empty_skip = BTreeSet::new();
     post_replies_and_resolve_threads(
         gh,
         tender_account,
@@ -1846,13 +2102,12 @@ pub fn approve_and_push_staged_patch(
         &mut pending,
         Some(&pushed_sha),
         cfg.tender.resolve_threads_on_fix,
-        &empty_skip,
         tender_state.last_summary.as_deref().unwrap_or(""),
     );
 
     tender_state.last_commit_pushed = Some(pushed_sha.clone());
     tender_state.last_status = TenderRunStatus::FixedAndPushed;
-    tender_state.handled_items.extend(pending);
+    upsert_handled_items(&mut tender_state.handled_items, pending);
     tender_state.updated_at = Utc::now();
 
     LedgerStore::with_exclusive_lock(state_dir, |store| {
@@ -1860,6 +2115,162 @@ pub fn approve_and_push_staged_patch(
     })?;
 
     Ok(pushed_sha)
+}
+
+/// Posts a reply (and optionally creates & links a follow-up GitHub issue) directly on a PR review
+/// thread, resolves the thread on GitHub, and clears `NeedsHuman` (`Needs Input`) on that item.
+#[allow(clippy::too_many_arguments)]
+pub fn respond_and_resolve_tender_item(
+    cfg: &WorkspaceConfig,
+    repo_cfg: &WatchedRepoConfig,
+    state_dir: &Path,
+    gh: &GitHubClient,
+    pr_number: u64,
+    feedback_id: &str,
+    reply_text: &str,
+    create_issue: bool,
+    issue_title_override: Option<&str>,
+) -> Result<(Option<u64>, Option<String>), Box<dyn std::error::Error>> {
+    let key = LedgerStore::pr_key(&repo_cfg.full_name, pr_number);
+    let ledger = LedgerStore::load_or_default(state_dir)?;
+    let mut tender_state = ledger
+        .tender_pull_requests
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| format!("no tracked tender state for {}", key))?;
+
+    let item_idx = tender_state
+        .handled_items
+        .iter()
+        .position(|h| h.feedback_id == feedback_id)
+        .ok_or_else(|| format!("feedback item `{}` not found on {}", feedback_id, key))?;
+
+    let tender_account = cfg.select_tender_account(repo_cfg, &tender_state.author);
+    let trimmed_reply = reply_text.trim();
+    if trimmed_reply.is_empty() && !create_issue {
+        return Err("provide a reply or choose Create Issue & Resolve".into());
+    }
+
+    let mut created_issue_meta: Option<(u64, String)> = None;
+    if create_issue {
+        let existing_summary = tender_state.handled_items[item_idx].summary.clone();
+        let loc_label = match (
+            &tender_state.handled_items[item_idx].path,
+            tender_state.handled_items[item_idx].line,
+        ) {
+            (Some(p), Some(l)) => format!("`{}:{}`", p, l),
+            (Some(p), None) => format!("`{}`", p),
+            _ => "PR review thread".to_string(),
+        };
+        let title = issue_title_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "Follow-up (PR #{}): {}",
+                    pr_number,
+                    truncate_chars(&existing_summary, 72)
+                )
+            });
+        let issue_body = format!(
+            "Created from PR #{} ({})\n\n### Review Context\n> {}\n\n### Resolution / Notes\n{}",
+            pr_number,
+            loc_label,
+            existing_summary.replace('\n', "\n> "),
+            if trimmed_reply.is_empty() {
+                "Tracked for follow-up outside this PR."
+            } else {
+                trimmed_reply
+            }
+        );
+        let created =
+            gh.create_github_issue(tender_account, &repo_cfg.full_name, &title, &issue_body)?;
+        created_issue_meta = Some((created.number, created.html_url));
+    }
+
+    let effective_reply = if trimmed_reply.is_empty() {
+        if let Some((num, _)) = &created_issue_meta {
+            format!(
+                "Tracked in follow-up issue #{} and resolving this thread.",
+                num
+            )
+        } else {
+            "Addressed and resolving thread.".to_string()
+        }
+    } else {
+        trimmed_reply.to_string()
+    };
+
+    let formatted_body = format_tender_reply_body_with_issue(
+        &effective_reply,
+        None,
+        created_issue_meta
+            .as_ref()
+            .map(|(num, url)| (*num, url.as_str())),
+    );
+
+    let reply_comment_id = tender_state.handled_items[item_idx].reply_comment_id;
+    let thread_node_id = tender_state.handled_items[item_idx].thread_node_id.clone();
+
+    if let Some(cid) = reply_comment_id {
+        gh.reply_to_pull_request_review_comment(
+            tender_account,
+            &repo_cfg.full_name,
+            pr_number,
+            cid,
+            &formatted_body,
+        )?;
+        tender_state.handled_items[item_idx].reply_posted = true;
+    } else {
+        gh.create_issue_comment(
+            tender_account,
+            &repo_cfg.full_name,
+            pr_number,
+            &formatted_body,
+        )?;
+        tender_state.handled_items[item_idx].reply_posted = true;
+    }
+
+    if let Some(ref tid) = thread_node_id
+        && gh.resolve_review_thread(tender_account, tid).is_ok()
+    {
+        tender_state.handled_items[item_idx].resolved_thread = true;
+    }
+
+    {
+        let item = &mut tender_state.handled_items[item_idx];
+        item.reply_text = effective_reply;
+        if let Some((num, ref url)) = created_issue_meta {
+            item.action = TenderActionStatus::CreatedIssue;
+            item.issue_number = Some(num);
+            item.issue_url = Some(url.clone());
+        } else {
+            item.action = TenderActionStatus::ExplainedRationale;
+        }
+    }
+
+    if !tender_state
+        .handled_items
+        .iter()
+        .any(|h| h.action == TenderActionStatus::NeedsHuman)
+    {
+        tender_state.last_status = if tender_state.last_commit_pushed.is_some() {
+            TenderRunStatus::FixedAndPushed
+        } else {
+            TenderRunStatus::RepliedOnly
+        };
+    }
+    tender_state.updated_at = Utc::now();
+
+    LedgerStore::with_exclusive_lock(state_dir, |store| {
+        store.tender_pull_requests.insert(key, tender_state);
+    })?;
+
+    Ok(match created_issue_meta {
+        Some((n, u)) => (Some(n), Some(u)),
+        None => (None, None),
+    })
 }
 
 fn apply_learned_kb_updates(
@@ -2008,8 +2419,10 @@ fn run_triage_agent(
              {{\n\
                \"temp_id\": \"FB-001\",\n\
                \"feedback_id\": \"exact feedback_id from above\",\n\
-               \"disposition\": \"code_fix\" | \"already_addressed\" | \"explain_only\" | \"needs_human\",\n\
-               \"rationale_reply\": \"Evidence-backed explanation or fix summary\",\n\
+               \"disposition\": \"code_fix\" | \"already_addressed\" | \"explain_only\" | \"create_issue\" | \"needs_human\",\n\
+               \"rationale_reply\": \"Evidence-backed explanation, fix summary, or deferral note to post on the thread\",\n\
+               \"issue_title\": \"Concise GitHub issue title ONLY when disposition == create_issue (else null)\",\n\
+               \"issue_body\": \"Markdown GitHub issue body ONLY when disposition == create_issue (else null)\",\n\
                \"target_files\": [\"path/to/file.rs\"],\n\
                \"fix_plan\": \"Concrete edit steps if code_fix\"\n\
              }}\n\
@@ -2022,7 +2435,8 @@ fn run_triage_agent(
                \"instructions\": \"Detailed code change instructions for owned_files\"\n\
              }}\n\
            ]\n\
-         }}",
+         }}\n\n\
+         IMPORTANT: If a review comment is valid follow-up work outside this PR's scope, use `\"create_issue\"` (so Code Tender creates the GitHub issue, posts its `#number` link in the thread, and resolves the thread) — NEVER classify a deferred or explained concern as `\"needs_human\"`.",
         prior_obs = truncate_chars(prior_obs_json, 8_000),
         num = pr_snap.pr_number,
         title = pr_snap.title,
@@ -2255,8 +2669,10 @@ fn run_verifier_agent(
            \"item_outcomes\": [\n\
              {{\n\
                \"feedback_id\": \"exact feedback_id\",\n\
-               \"action\": \"fixed\" | \"already_addressed\" | \"explained_rationale\" | \"needs_human\",\n\
-               \"reply_text\": \"Concise technical response citing exact files/lines or check evidence\",\n\
+               \"action\": \"fixed\" | \"already_addressed\" | \"explained_rationale\" | \"created_issue\" | \"needs_human\",\n\
+               \"reply_text\": \"Concise technical response citing exact files/lines, check evidence, or deferral rationale\",\n\
+               \"issue_title\": \"Concise GitHub issue title ONLY when action == created_issue (else null)\",\n\
+               \"issue_body\": \"Markdown GitHub issue body ONLY when action == created_issue (else null)\",\n\
                \"resolve_thread\": true\n\
              }}\n\
            ],\n\
@@ -2276,7 +2692,8 @@ fn run_verifier_agent(
                \"rationale\": \"Why adjusting this reviewer rule reduces false positives or catches a real gap\"\n\
              }}\n\
            ]\n\
-         }}",
+         }}\n\n\
+         IMPORTANT: Whenever an item is `fixed`, `already_addressed`, `explained_rationale` (including referencing an existing issue), or `created_issue` (Code Tender creates a follow-up GitHub issue and links it in the thread), set `resolve_thread: true` and DO NOT classify it as `needs_human`.",
         num = pr_snap.pr_number,
         title = pr_snap.title,
         check_tail = truncate_chars(check_log, 4_000),
@@ -2329,6 +2746,10 @@ fn build_handled_items(
                 TenderActionStatus::Fixed
             } else if raw_action.eq_ignore_ascii_case("already_addressed") {
                 TenderActionStatus::AlreadyAddressed
+            } else if raw_action.eq_ignore_ascii_case("created_issue")
+                || raw_action.eq_ignore_ascii_case("create_issue")
+            {
+                TenderActionStatus::CreatedIssue
             } else if raw_action.eq_ignore_ascii_case("explained_rationale")
                 || raw_action.eq_ignore_ascii_case("explain_only")
             {
@@ -2347,6 +2768,27 @@ fn build_handled_items(
                 .unwrap_or("Addressed in PR branch.")
                 .to_string();
 
+            let draft_issue_title = v
+                .and_then(|o| o.issue_title.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    t.and_then(|x| x.issue_title.as_deref())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .map(ToString::to_string);
+            let draft_issue_body = v
+                .and_then(|o| o.issue_body.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    t.and_then(|x| x.issue_body.as_deref())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                })
+                .map(ToString::to_string);
+
             TenderHandledItem {
                 feedback_id: fb.feedback_id.clone(),
                 source_author: fb.author.clone(),
@@ -2358,6 +2800,10 @@ fn build_handled_items(
                 action,
                 reply_text: reply,
                 commit_sha: None,
+                issue_number: None,
+                issue_url: None,
+                draft_issue_title,
+                draft_issue_body,
                 resolved_thread: false,
                 reply_posted: false,
             }
@@ -2407,25 +2853,70 @@ fn post_replies_and_resolve_threads(
     items: &mut [TenderHandledItem],
     pushed_sha: Option<&str>,
     resolve_threads_on_fix: bool,
-    do_not_resolve: &BTreeSet<String>,
     summary_text: &str,
 ) {
     let mut resolved_threads: BTreeSet<String> = BTreeSet::new();
     let mut fixed_count = 0usize;
     let mut explained_count = 0usize;
+    let mut created_issues_count = 0usize;
 
     for item in items.iter_mut() {
         item.commit_sha = pushed_sha.map(ToString::to_string);
+
+        if item.action == TenderActionStatus::CreatedIssue && item.issue_number.is_none() {
+            let loc_label = match (&item.path, item.line) {
+                (Some(p), Some(l)) => format!("`{}:{}`", p, l),
+                (Some(p), None) => format!("`{}`", p),
+                _ => "PR review thread".to_string(),
+            };
+            let title = item
+                .draft_issue_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "Follow-up (PR #{}): {}",
+                        pr_number,
+                        truncate_chars(&item.summary, 72)
+                    )
+                });
+            let body_notes = item
+                .draft_issue_body
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&item.reply_text);
+            let issue_body = format!(
+                "Created from PR #{} ({})\n\n### Review Comment\n> {}\n\n### Follow-up Plan\n{}",
+                pr_number,
+                loc_label,
+                item.summary.replace('\n', "\n> "),
+                body_notes
+            );
+            if let Ok(created) =
+                gh.create_github_issue(tender_account, &repo_cfg.full_name, &title, &issue_body)
+            {
+                item.issue_number = Some(created.number);
+                item.issue_url = Some(created.html_url);
+            }
+        }
+
         match item.action {
             TenderActionStatus::Fixed | TenderActionStatus::AlreadyAddressed => fixed_count += 1,
             TenderActionStatus::ExplainedRationale => explained_count += 1,
+            TenderActionStatus::CreatedIssue => created_issues_count += 1,
             TenderActionStatus::NeedsHuman => {}
         }
+
+        let issue_link = item.issue_number.zip(item.issue_url.as_deref());
 
         if let Some(comment_id) = item.reply_comment_id
             && item.thread_node_id.is_some()
         {
-            let body = format_tender_reply_body(&item.reply_text, pushed_sha);
+            let body =
+                format_tender_reply_body_with_issue(&item.reply_text, pushed_sha, issue_link);
             if gh
                 .reply_to_pull_request_review_comment(
                     tender_account,
@@ -2441,7 +2932,6 @@ fn post_replies_and_resolve_threads(
 
             if resolve_threads_on_fix
                 && item.action != TenderActionStatus::NeedsHuman
-                && !do_not_resolve.contains(&item.feedback_id)
                 && let Some(tid) = &item.thread_node_id
                 && !resolved_threads.contains(tid)
                 && gh.resolve_review_thread(tender_account, tid).is_ok()
@@ -2459,15 +2949,16 @@ fn post_replies_and_resolve_threads(
     summary_body.push_str("### 🛠️ Code Tender — Review Feedback Handled\n\n");
     if let Some(sha) = pushed_sha {
         summary_body.push_str(&format!(
-            "- **Pushed Fix Commit:** `{}` | **Addressed:** `{}` | **Explained:** `{}`\n",
+            "- **Pushed Fix Commit:** `{}` | **Addressed:** `{}` | **Explained:** `{}` | **Issues Created:** `{}`\n",
             &sha[..sha.len().min(7)],
             fixed_count,
-            explained_count
+            explained_count,
+            created_issues_count
         ));
     } else {
         summary_body.push_str(&format!(
-            "- **Mode:** Reply & Triage (`0` code edits needed) | **Explained:** `{}`\n",
-            explained_count
+            "- **Mode:** Reply & Triage (`0` code edits needed) | **Explained:** `{}` | **Issues Created:** `{}`\n",
+            explained_count, created_issues_count
         ));
     }
     if !summary_text.trim().is_empty() {
@@ -2479,12 +2970,17 @@ fn post_replies_and_resolve_threads(
             (Some(p), None) => format!("`{}`", p),
             _ => "PR-level".to_string(),
         };
+        let issue_suffix = match (item.issue_number, item.issue_url.as_deref()) {
+            (Some(n), Some(u)) => format!(" (tracked in [#{n}]({u}))"),
+            _ => String::new(),
+        };
         summary_body.push_str(&format!(
-            "- **[{}]** ({}, from `{}`): {}\n",
+            "- **[{}]** ({}, from `{}`): {}{}\n",
             item.action.badge(),
             loc,
             item.source_author,
-            item.reply_text.replace('\n', " ")
+            item.reply_text.replace('\n', " "),
+            issue_suffix
         ));
     }
 
@@ -3159,5 +3655,93 @@ gdocs_bin = "gdocs"
         let noisy = "<!-- cubic:review-state:v1 {\"blob\":123} -->\n<picture><img src=\"x\" /></picture> **P1:** Validate tenant code format.\n<details><summary>Prompt for AI agents</summary>long duplicate prompt</details>";
         let cleaned = strip_review_html_noise(noisy);
         assert_eq!(cleaned, "**P1:** Validate tenant code format.");
+
+        let nested_codex = "To use Codex here, create a Codex account.\n<details><summary>About Codex</summary>outer <details><summary>inner</summary>deep</details> tail</details>";
+        assert_eq!(
+            strip_review_html_noise(nested_codex),
+            "To use Codex here, create a Codex account."
+        );
+    }
+
+    #[test]
+    fn reconciles_author_answered_threads_out_of_needs_human() {
+        let mut tpr = TenderPrState::new("acme/web", 218, "Fix auth", "alice-dev", "main", "feat");
+        tpr.last_status = TenderRunStatus::NeedsHuman;
+        tpr.handled_items.push(TenderHandledItem {
+            feedback_id: "thread:PRRT_1:100".to_string(),
+            source_author: "cubic-dev-ai".to_string(),
+            path: Some("src/auth.ts".to_string()),
+            line: Some(42),
+            thread_node_id: Some("PRRT_1".to_string()),
+            reply_comment_id: Some(100),
+            summary: "P2: extract shared helper".to_string(),
+            action: TenderActionStatus::NeedsHuman,
+            reply_text: "Deferred to #164".to_string(),
+            commit_sha: None,
+            issue_number: None,
+            issue_url: None,
+            draft_issue_title: None,
+            draft_issue_body: None,
+            resolved_thread: false,
+            reply_posted: false,
+        });
+        tpr.handled_items.push(TenderHandledItem {
+            feedback_id: "issue_comment:IC_99".to_string(),
+            source_author: "chatgpt-codex-connector".to_string(),
+            path: None,
+            line: None,
+            thread_node_id: None,
+            reply_comment_id: None,
+            summary: "</details>".to_string(),
+            action: TenderActionStatus::NeedsHuman,
+            reply_text: "Needs human".to_string(),
+            commit_sha: None,
+            issue_number: None,
+            issue_url: None,
+            draft_issue_title: None,
+            draft_issue_body: None,
+            resolved_thread: false,
+            reply_posted: false,
+        });
+
+        let snap = TenderPrSnapshot {
+            pr_number: 218,
+            title: "Fix auth".to_string(),
+            author: "alice-dev".to_string(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat".to_string(),
+            head_sha: "abc1234".to_string(),
+            feedback_items: vec![TenderFeedbackItem {
+                feedback_id: "thread:PRRT_1".to_string(),
+                kind: TenderFeedbackKind::ReviewThreadComment,
+                author: "cubic-dev-ai".to_string(),
+                body: "P2: extract shared helper".to_string(),
+                path: Some("src/auth.ts".to_string()),
+                line: Some(42),
+                thread_node_id: Some("PRRT_1".to_string()),
+                reply_comment_id: Some(100),
+                is_resolved: false,
+                review_state: None,
+                inline_comment_count: 2,
+                answered_by_tender: false,
+                answered_by_pr_author: true,
+                latest_author_reply: Some("Tracked in #164 — intentional for this PR.".to_string()),
+                created_at: "2026-04-17T01:00:00Z".to_string(),
+            }],
+        };
+
+        let mut newly_resolved = BTreeSet::new();
+        newly_resolved.insert((218, "PRRT_1".to_string()));
+        reconcile_pr_handled_items_and_status(&mut tpr, &snap, &newly_resolved);
+
+        assert_eq!(tpr.handled_items.len(), 1);
+        assert_eq!(
+            tpr.handled_items[0].action,
+            TenderActionStatus::ExplainedRationale
+        );
+        assert!(tpr.handled_items[0].resolved_thread);
+        assert_eq!(tpr.last_status, TenderRunStatus::RepliedOnly);
     }
 }

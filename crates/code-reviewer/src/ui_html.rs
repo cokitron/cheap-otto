@@ -1151,11 +1151,25 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         .replace(/"/g, '&quot;');
     }
 
+    const TENDER_REPLY_DRAFTS = {};
+
+    function escJsAttr(s) {
+      return String(s ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
+    }
+
     function cleanReviewBody(raw) {
       let s = String(raw ?? '');
       s = s.replace(/\.\.\.\[truncated for prompt budget[^\]]*\]\.\.\./gi, '…');
       s = s.replace(/<!--[\s\S]*?(-->|$)/g, '');
-      s = s.replace(/<details[\s\S]*?(<\/details>|$)/gi, '');
+      let guard = 0;
+      while (/<details\b/i.test(s) && guard++ < 8) {
+        s = s.replace(/<details\b(?:(?!<details\b)[\s\S])*?(<\/details>|$)/gi, '');
+      }
+      s = s.replace(/<\/details>/gi, '');
       s = s.replace(/<picture[\s\S]*?(<\/picture>|$)/gi, '');
       s = s.replace(/<img[^>]*>/gi, '');
       s = s.replace(/<br\s*\/?>/gi, '\n');
@@ -2194,6 +2208,10 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
       const selectedEntry = decorated.find(d => d.p.key === SELECTED_TENDER_PR_KEY);
       const box = document.getElementById('tender-pr-detail-box');
+      if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('tender-inline-reply') && box.dataset.prKey === SELECTED_TENDER_PR_KEY) {
+        return;
+      }
+      box.dataset.prKey = SELECTED_TENDER_PR_KEY || '';
       if (!selectedEntry) {
         box.innerHTML = `<div style="color:var(--muted);padding:16px 0;">Select a Pull Request on the left, or click <b>Pick Open PR</b> above to watch an open pull request.</div>`;
         return;
@@ -2307,7 +2325,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <div class="status-banner staged">
             <strong style="color:#fcd34d;">👤 Comment Needs Your Decision</strong>
             <div style="font-size:12.5px;margin-top:4px;">${esc(p.last_summary || 'One or more review comments require a product or architecture decision before editing code.')}</div>
-            <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Still watching this PR every 2 minutes for new review comments.</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Reply or create a follow-up issue directly inside the comment card below — Code Tender will post it on the GitHub thread, resolve it, and clear Needs Input.</div>
           </div>`;
       } else if (!isWatched) {
         statusBannerHtml = `
@@ -2347,7 +2365,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
       const handledFiltered = handledAll.filter(h => {
         if (TENDER_ITEM_FILTER === 'fixed') return h.action === 'fixed' || h.action === 'already_addressed';
-        if (TENDER_ITEM_FILTER === 'explained') return h.action === 'explained_rationale';
+        if (TENDER_ITEM_FILTER === 'explained') return h.action === 'explained_rationale' || h.action === 'created_issue';
         if (TENDER_ITEM_FILTER === 'human') return h.action === 'needs_human';
         return true;
       });
@@ -2359,18 +2377,44 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             <div style="display:flex;gap:5px;flex-wrap:wrap;">
               <button class="${TENDER_ITEM_FILTER === 'all' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('all')">All (${handledAll.length})</button>
               <button class="${TENDER_ITEM_FILTER === 'fixed' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('fixed')">Fixed (${handledAll.filter(h => h.action === 'fixed' || h.action === 'already_addressed').length})</button>
-              <button class="${TENDER_ITEM_FILTER === 'explained' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('explained')">Explained (${handledAll.filter(h => h.action === 'explained_rationale').length})</button>
+              <button class="${TENDER_ITEM_FILTER === 'explained' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('explained')">Addressed / Issue (${handledAll.filter(h => h.action === 'explained_rationale' || h.action === 'created_issue').length})</button>
               <button class="${TENDER_ITEM_FILTER === 'human' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('human')">Needs Input (${handledAll.filter(h => h.action === 'needs_human').length})</button>
             </div>` : ''}
         </div>
-        ${handledFiltered.map(h => {
-          const aClass = (h.action === 'fixed' || h.action === 'already_addressed') ? 'b-fixed' : (h.action === 'explained_rationale' ? 'b-explained' : 'b-changes');
-          const aLabel = h.action === 'fixed' ? 'Fixed' : (h.action === 'already_addressed' ? 'Already Addressed' : (h.action === 'explained_rationale' ? 'Explained' : 'Needs Input'));
+        ${handledFiltered.map((h, idx) => {
+          const isFixed = h.action === 'fixed' || h.action === 'already_addressed';
+          const isIssue = h.action === 'created_issue';
+          const isExplained = h.action === 'explained_rationale' || isIssue;
+          const aClass = isFixed ? 'b-fixed' : (isExplained ? 'b-explained' : 'b-changes');
+          const aLabel = h.action === 'fixed'
+            ? 'Fixed'
+            : (h.action === 'already_addressed'
+              ? 'Already Addressed'
+              : (isIssue
+                ? (h.issue_number ? `📌 Issue #${h.issue_number}` : '📌 Issue Created')
+                : (h.action === 'explained_rationale' ? 'Explained' : 'Needs Input')));
           const loc = h.path ? (h.line ? `${h.path}:${h.line}` : h.path) : 'PR thread';
+          const draftKey = `${p.key}::${h.feedback_id}`;
+          const draftVal = TENDER_REPLY_DRAFTS[draftKey] ?? '';
+          const inputId = `tender-reply-${idx}`;
+          const issuePill = (h.issue_number && h.issue_url)
+            ? `<a href="${esc(h.issue_url)}" target="_blank" rel="noopener" class="badge b-explained" style="text-decoration:none;">↗ #${h.issue_number}</a>`
+            : '';
+          const respondBar = h.action === 'needs_human' ? `
+            <div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+              <input id="${inputId}" class="tender-inline-reply" data-draft-key="${esc(draftKey)}" value="${esc(draftVal)}"
+                oninput="TENDER_REPLY_DRAFTS[this.dataset.draftKey] = this.value"
+                onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();respondTenderItem('${escJsAttr(p.repo)}', ${p.pr_number}, '${escJsAttr(h.feedback_id)}', '${inputId}', false);}"
+                placeholder="Write reply addressing concern (or note for follow-up issue)..."
+                style="flex:1;min-width:220px;padding:7px 10px;font-size:12.5px;" />
+              <button class="tender-btn" style="padding:6px 11px;font-size:12px;" onclick="respondTenderItem('${escJsAttr(p.repo)}', ${p.pr_number}, '${escJsAttr(h.feedback_id)}', '${inputId}', false)">💬 Reply &amp; Resolve</button>
+              <button class="secondary" style="padding:6px 11px;font-size:12px;" onclick="respondTenderItem('${escJsAttr(p.repo)}', ${p.pr_number}, '${escJsAttr(h.feedback_id)}', '${inputId}', true)">📌 Create Issue &amp; Resolve</button>
+            </div>` : '';
           return `<div class="obs-card">
             <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                 <span class="badge ${aClass}">${aLabel}</span>
+                ${issuePill}
                 <strong>@${esc(h.source_author)}</strong>
                 <code style="font-size:11.5px;color:#93c5fd;">${esc(loc)}</code>
                 ${h.resolved_thread ? '<span class="badge b-pass">✓ Resolved</span>' : ''}
@@ -2379,6 +2423,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             </div>
             ${(() => { const cs = cleanReviewBody(h.summary); return cs ? `<div style="margin-top:6px;font-size:13px;">${esc(cs)}</div>` : ''; })()}
             ${(() => { const cr = cleanReviewBody(h.reply_text); return cr ? `<div style="margin-top:6px;font-size:12.5px;color:#a7f3d0;">↳ ${esc(cr)}</div>` : ''; })()}
+            ${respondBar}
           </div>`;
         }).join('')}` : '';
 
@@ -2584,6 +2629,34 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       });
       showToast(res.message || `Discarded draft patch for ${repo}#${pr}`);
       refreshAll();
+    }
+
+    async function respondTenderItem(repo, pr, feedbackId, inputId, createIssue) {
+      const inputEl = document.getElementById(inputId);
+      const reply_text = (inputEl?.value || '').trim();
+      if (!reply_text && !createIssue) {
+        showToast('Write a reply first, or click Create Issue & Resolve');
+        inputEl?.focus();
+        return;
+      }
+      if (inputEl) inputEl.blur();
+      try {
+        const res = await api('/api/tender/respond-item', {
+          method: 'POST',
+          body: JSON.stringify({
+            repo,
+            pr,
+            feedback_id: feedbackId,
+            reply_text,
+            create_issue: Boolean(createIssue)
+          })
+        });
+        delete TENDER_REPLY_DRAFTS[`${repo}#${pr}::${feedbackId}`];
+        showToast(res.message || 'Posted reply & resolved thread!');
+        await refreshAll();
+      } catch (e) {
+        showToast('Could not respond on thread: ' + e.message);
+      }
     }
 
     async function saveTenderSettings() {

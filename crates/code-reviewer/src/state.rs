@@ -1161,6 +1161,14 @@ pub struct TenderFeedbackItem {
     pub review_state: Option<String>,
     #[serde(default)]
     pub is_resolved: bool,
+    #[serde(default)]
+    pub inline_comment_count: u32,
+    #[serde(default)]
+    pub answered_by_tender: bool,
+    #[serde(default)]
+    pub answered_by_pr_author: bool,
+    #[serde(default)]
+    pub latest_author_reply: Option<String>,
     pub body: String,
 }
 
@@ -1183,6 +1191,7 @@ pub enum TenderActionStatus {
     Fixed,
     AlreadyAddressed,
     ExplainedRationale,
+    CreatedIssue,
     NeedsHuman,
 }
 
@@ -1192,6 +1201,7 @@ impl TenderActionStatus {
             Self::Fixed => "FIXED",
             Self::AlreadyAddressed => "ALREADY_FIXED",
             Self::ExplainedRationale => "EXPLAINED",
+            Self::CreatedIssue => "ISSUE_CREATED",
             Self::NeedsHuman => "NEEDS_HUMAN",
         }
     }
@@ -1239,6 +1249,14 @@ pub struct TenderHandledItem {
     pub reply_text: String,
     #[serde(default)]
     pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub issue_number: Option<u64>,
+    #[serde(default)]
+    pub issue_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_issue_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_issue_body: Option<String>,
     #[serde(default)]
     pub resolved_thread: bool,
     #[serde(default)]
@@ -1448,6 +1466,68 @@ pub enum TenderTriggerDecision {
     },
 }
 
+/// Returns `true` if a feedback item is an automated wrapper, status table, clean-pass banner,
+/// or PR author self-note rather than an actionable incoming code review comment.
+pub fn is_non_actionable_tender_item(
+    item: &TenderFeedbackItem,
+    pr_author: &str,
+    ignore_clean_pass_reviews: bool,
+) -> bool {
+    let body = item.body.trim();
+    if body.is_empty()
+        || body == "</details>"
+        || body.contains(BOT_TENDER_MARKER)
+        || body.contains(STATUS_BANNER_MARKER)
+    {
+        return true;
+    }
+
+    let author_lc = item.author.to_ascii_lowercase();
+    let is_pr_author_non_bot =
+        item.author.eq_ignore_ascii_case(pr_author) && !body.contains(BOT_COMMENT_MARKER);
+
+    // Top-level PR comments/reviews written by the PR author themselves (e.g. CI status notes) are not incoming review complaints.
+    if item.kind != TenderFeedbackKind::ReviewThreadComment && is_pr_author_non_bot {
+        return true;
+    }
+
+    // Codex status tables and review receipts carry no standalone findings (real suggestions live on inline reviewThreads).
+    if body.contains("<!-- codex-pull-request-review-summary -->")
+        || body.contains("<!-- codex-review-state:")
+        || body.contains("<!-- codex-review-receipt:")
+        || (author_lc.contains("codex")
+            && (body.contains("Here are some automated review suggestions for this pull request")
+                || body.contains("Didn't find any major issues")))
+    {
+        return true;
+    }
+
+    // Cubic clean-pass summaries and thread-backed summary wrappers (whose findings are already inline reviewThreads).
+    if body.contains("**No issues found**")
+        || body.contains("**All reported issues were addressed**")
+    {
+        return true;
+    }
+    if item.kind == TenderFeedbackKind::ReviewSummary
+        && (author_lc.contains("cubic") || body.contains("cubic:review-summary"))
+        && item.inline_comment_count > 0
+    {
+        return true;
+    }
+
+    if item.kind == TenderFeedbackKind::ReviewSummary
+        && ignore_clean_pass_reviews
+        && item.inline_comment_count == 0
+        && (item.review_state.as_deref() == Some("APPROVED")
+            || (body.contains(BOT_COMMENT_MARKER)
+                && body.contains("Internal CI Code Review — `PASS`")))
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Evaluates with zero LLM calls whether an open PR has new actionable review feedback for Code Tender.
 pub fn evaluate_tender_trigger(
     existing: Option<&TenderPrState>,
@@ -1473,48 +1553,47 @@ pub fn evaluate_tender_trigger(
         .and_then(|t| t.last_commit_pushed.as_deref())
         .unwrap_or("");
 
-    // Identify review threads whose latest reply is already authored by Code Tender, so we don't reply twice.
-    let mut thread_last_is_tender: BTreeMap<&str, bool> = BTreeMap::new();
+    // Identify review threads whose latest reply is already authored by us (Code Tender or PR author),
+    // so we never re-trigger or flag Needs Input on concerns we already addressed.
+    let mut thread_last_is_ours: BTreeMap<&str, bool> = BTreeMap::new();
     for item in &snapshot.feedback_items {
         if item.kind == TenderFeedbackKind::ReviewThreadComment
             && let Some(tid) = item.thread_node_id.as_deref()
         {
-            thread_last_is_tender.insert(tid, item.body.contains(BOT_TENDER_MARKER));
+            let is_ours = item.answered_by_tender
+                || item.answered_by_pr_author
+                || item.body.contains(BOT_TENDER_MARKER)
+                || (item.author.eq_ignore_ascii_case(&snapshot.author)
+                    && !item.body.contains(BOT_COMMENT_MARKER));
+            thread_last_is_ours.insert(tid, is_ours);
         }
     }
 
     let actionable: Vec<TenderFeedbackItem> = snapshot
         .feedback_items
         .iter()
-        .filter(|item| !item.body.contains(BOT_TENDER_MARKER))
-        .filter(|item| !item.body.contains(STATUS_BANNER_MARKER))
+        .filter(|item| {
+            !is_non_actionable_tender_item(item, &snapshot.author, ignore_clean_pass_reviews)
+        })
         .filter(|item| item.created_at.as_str() > cursor)
         .filter(|item| match item.kind {
             TenderFeedbackKind::ReviewThreadComment => {
-                if item.is_resolved {
+                if item.is_resolved || item.answered_by_tender || item.answered_by_pr_author {
+                    return false;
+                }
+                if item.author.eq_ignore_ascii_case(&snapshot.author)
+                    && !item.body.contains(BOT_COMMENT_MARKER)
+                {
                     return false;
                 }
                 let already_answered = item
                     .thread_node_id
                     .as_deref()
-                    .and_then(|tid| thread_last_is_tender.get(tid).copied())
+                    .and_then(|tid| thread_last_is_ours.get(tid).copied())
                     .unwrap_or(false);
                 !already_answered
             }
-            TenderFeedbackKind::ReviewSummary => {
-                if item.body.trim().is_empty() {
-                    return false;
-                }
-                if ignore_clean_pass_reviews
-                    && (item.review_state.as_deref() == Some("APPROVED")
-                        || (item.body.contains(BOT_COMMENT_MARKER)
-                            && item.body.contains("Internal CI Code Review — `PASS`")))
-                {
-                    return false;
-                }
-                true
-            }
-            TenderFeedbackKind::IssueComment => !item.body.trim().is_empty(),
+            TenderFeedbackKind::ReviewSummary | TenderFeedbackKind::IssueComment => true,
         })
         .cloned()
         .collect();
@@ -1758,6 +1837,10 @@ mod tests {
                     line: None,
                     review_state: None,
                     is_resolved: false,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
                     body: format!("{BOT_COMMENT_MARKER}\n{STATUS_BANNER_MARKER}\nRunning"),
                 },
                 TenderFeedbackItem {
@@ -1771,6 +1854,10 @@ mod tests {
                     line: None,
                     review_state: Some("APPROVED".to_string()),
                     is_resolved: false,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
                     body: format!("{BOT_COMMENT_MARKER}\n## Internal CI Code Review — `PASS`"),
                 },
                 TenderFeedbackItem {
@@ -1784,6 +1871,10 @@ mod tests {
                     line: Some(12),
                     review_state: None,
                     is_resolved: true,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
                     body: "Already fixed earlier".to_string(),
                 },
             ],
@@ -1806,6 +1897,10 @@ mod tests {
             line: Some(25),
             review_state: None,
             is_resolved: false,
+            inline_comment_count: 0,
+            answered_by_tender: false,
+            answered_by_pr_author: false,
+            latest_author_reply: None,
             body: "Null check missing before unwrap".to_string(),
         });
         assert_eq!(
@@ -1831,8 +1926,105 @@ mod tests {
             line: Some(25),
             review_state: None,
             is_resolved: false,
+            inline_comment_count: 0,
+            answered_by_tender: true,
+            answered_by_pr_author: false,
+            latest_author_reply: None,
             body: format!("{BOT_TENDER_MARKER}\nFixed in commit abcdef1"),
         });
+        assert_eq!(
+            evaluate_tender_trigger(None, &snap, true, 3, true),
+            TenderTriggerDecision::UpToDate
+        );
+    }
+
+    #[test]
+    fn tender_skips_threads_addressed_by_pr_author_and_bot_wrappers() {
+        let snap = TenderPrSnapshot {
+            pr_number: 218,
+            title: "feat: tenant format".to_string(),
+            author: "alice-dev".to_string(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat/tenant".to_string(),
+            head_sha: "sha2222".to_string(),
+            feedback_items: vec![
+                // Codex status table wrapper -> skipped
+                TenderFeedbackItem {
+                    feedback_id: "c-codex".to_string(),
+                    thread_node_id: None,
+                    reply_comment_id: Some(10),
+                    kind: TenderFeedbackKind::IssueComment,
+                    author: "chatgpt-codex-connector".to_string(),
+                    created_at: "2026-11-13T10:00:00Z".to_string(),
+                    path: None,
+                    line: None,
+                    review_state: None,
+                    is_resolved: false,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
+                    body: "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {} -->".to_string(),
+                },
+                // Cubic summary wrapper backed by inline thread -> skipped
+                TenderFeedbackItem {
+                    feedback_id: "r-cubic".to_string(),
+                    thread_node_id: None,
+                    reply_comment_id: None,
+                    kind: TenderFeedbackKind::ReviewSummary,
+                    author: "cubic-dev-ai".to_string(),
+                    created_at: "2026-11-13T10:01:00Z".to_string(),
+                    path: None,
+                    line: None,
+                    review_state: Some("COMMENTED".to_string()),
+                    is_resolved: false,
+                    inline_comment_count: 1,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
+                    body: "**1 issue found** across 18 files".to_string(),
+                },
+                // Author's own PR status note -> skipped
+                TenderFeedbackItem {
+                    feedback_id: "c-author".to_string(),
+                    thread_node_id: None,
+                    reply_comment_id: Some(11),
+                    kind: TenderFeedbackKind::IssueComment,
+                    author: "alice-dev".to_string(),
+                    created_at: "2026-11-13T10:02:00Z".to_string(),
+                    path: None,
+                    line: None,
+                    review_state: None,
+                    is_resolved: false,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: false,
+                    latest_author_reply: None,
+                    body: "CI paused pending billing limit increase.".to_string(),
+                },
+                // Thread where PR author already left a reply referencing #164 -> skipped (not NeedsHuman!)
+                TenderFeedbackItem {
+                    feedback_id: "thread:T_218".to_string(),
+                    thread_node_id: Some("T_218".to_string()),
+                    reply_comment_id: Some(99),
+                    kind: TenderFeedbackKind::ReviewThreadComment,
+                    author: "cubic-dev-ai".to_string(),
+                    created_at: "2026-11-13T10:01:00Z".to_string(),
+                    path: Some("packages/tenant/src/formats.ts".to_string()),
+                    line: Some(17),
+                    review_state: None,
+                    is_resolved: false,
+                    inline_comment_count: 0,
+                    answered_by_tender: false,
+                    answered_by_pr_author: true,
+                    latest_author_reply: Some("Tracked in #164.".to_string()),
+                    body: "P2: ACME_MX produces underscore tenantId.".to_string(),
+                },
+            ],
+        };
+
         assert_eq!(
             evaluate_tender_trigger(None, &snap, true, 3, true),
             TenderTriggerDecision::UpToDate

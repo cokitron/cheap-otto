@@ -18,8 +18,8 @@ use crate::state::{
 use crate::tender::{
     TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch, browse_m1_directories,
     detect_local_repo_checkout, infer_local_check_cmd, inspect_local_git_repo,
-    load_tender_kb_payload, save_tender_agent_notes, save_tender_kb_file,
-    sync_watched_prs_from_snapshots,
+    load_tender_kb_payload, respond_and_resolve_tender_item, save_tender_agent_notes,
+    save_tender_kb_file, sync_watched_prs_from_snapshots_with_gh,
 };
 use crate::ui_html::DASHBOARD_HTML;
 use serde::Deserialize;
@@ -561,7 +561,13 @@ fn dispatch_api(
                     .unwrap_or(&cfg.accounts.primary);
                 match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
                     Ok(snaps) => {
-                        let _ = sync_watched_prs_from_snapshots(&cfg, repo_cfg, &state_dir, &snaps);
+                        let _ = sync_watched_prs_from_snapshots_with_gh(
+                            &cfg,
+                            repo_cfg,
+                            &state_dir,
+                            Some(&gh),
+                            &snaps,
+                        );
                         let ledger = LedgerStore::load_or_default(&state_dir).unwrap_or_default();
                         for snap in snaps {
                             let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
@@ -703,7 +709,13 @@ fn dispatch_api(
                 .unwrap_or(&cfg.accounts.primary);
             let matched_snap = match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
                 Ok(snaps) => {
-                    let _ = sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &snaps);
+                    let _ = sync_watched_prs_from_snapshots_with_gh(
+                        &cfg,
+                        &repo_cfg,
+                        &state_dir,
+                        Some(&gh),
+                        &snaps,
+                    );
                     snaps.into_iter().find(|s| s.pr_number == pr_num)
                 }
                 Err(_) => None,
@@ -844,6 +856,54 @@ fn dispatch_api(
                 format!("Removed {} from list", key)
             };
             Ok(json!({ "ok": true, "paused": paused_instead, "message": msg }))
+        }
+        ("POST", "/api/tender/respond-item") => {
+            #[derive(Deserialize)]
+            struct Req {
+                repo: String,
+                pr: u64,
+                feedback_id: String,
+                #[serde(default)]
+                reply_text: String,
+                #[serde(default)]
+                create_issue: bool,
+                #[serde(default)]
+                issue_title: Option<String>,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let repo_cfg = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&req.repo))
+                .ok_or_else(|| format!("repo `{}` not configured", req.repo))?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let gh = GitHubClient::new(&cfg);
+            let (issue_number, issue_url) = respond_and_resolve_tender_item(
+                &cfg,
+                repo_cfg,
+                &state_dir,
+                &gh,
+                req.pr,
+                &req.feedback_id,
+                &req.reply_text,
+                req.create_issue,
+                req.issue_title.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+            let msg = match issue_number {
+                Some(num) => format!(
+                    "Created issue #{}, linked it on the PR thread, and resolved the thread!",
+                    num
+                ),
+                None => "Posted reply on PR thread and resolved the thread!".to_string(),
+            };
+            Ok(json!({
+                "ok": true,
+                "issue_number": issue_number,
+                "issue_url": issue_url,
+                "message": msg,
+            }))
         }
         ("POST", "/api/actions/sync-docs") => {
             #[derive(Deserialize)]
