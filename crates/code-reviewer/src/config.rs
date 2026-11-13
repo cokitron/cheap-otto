@@ -495,6 +495,51 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Parses a GitHub Pull Request URL (`https://github.com/owner/repo/pull/123`) or
+/// shorthand (`owner/repo#123`) into `(normalized_repo_slug, pr_number)`.
+pub fn parse_pr_reference_input(raw: &str) -> Result<(String, u64), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "enter a GitHub PR URL (`https://github.com/owner/repo/pull/123`) or `owner/repo#123`"
+                .to_string(),
+        );
+    }
+
+    for marker in ["/pull/", "/pulls/"] {
+        if let Some((left, right)) = trimmed.split_once(marker) {
+            let repo = normalize_repo_input(left).map_err(|e| e.to_string())?;
+            let digits: String = right.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let pr = digits
+                .parse::<u64>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or_else(|| format!("invalid pull request number in `{trimmed}`"))?;
+            return Ok((repo, pr));
+        }
+    }
+
+    if let Some((left, right)) = trimmed.rsplit_once('#') {
+        let repo = normalize_repo_input(left.trim()).map_err(|e| e.to_string())?;
+        let digits: String = right
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let pr = digits
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or_else(|| format!("invalid pull request number in `{trimmed}`"))?;
+        return Ok((repo, pr));
+    }
+
+    Err(
+        "expected a GitHub PR URL (`https://github.com/owner/repo/pull/123`) or `owner/repo#123`"
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,5 +689,14 @@ mod tests {
             "acme-org/web-app"
         );
         assert!(normalize_repo_input("not-a-repo").is_err());
+        assert_eq!(
+            parse_pr_reference_input("https://github.com/acme-org/web-app/pull/210/files").unwrap(),
+            ("acme-org/web-app".to_string(), 210)
+        );
+        assert_eq!(
+            parse_pr_reference_input("acme-org/web-app#42").unwrap(),
+            ("acme-org/web-app".to_string(), 42)
+        );
+        assert!(parse_pr_reference_input("acme-org/web-app").is_err());
     }
 }

@@ -6,17 +6,20 @@ use crate::brains::{
 };
 use crate::config::{
     AccountPolicy, CliRunner, ReviewEventPolicy, TenderDeliveryMode, WatchedRepoConfig,
-    WorkspaceConfig, expand_tilde, home_dir, normalize_repo_input, repo_fs_slug,
+    WorkspaceConfig, expand_tilde, home_dir, normalize_repo_input, parse_pr_reference_input,
+    repo_fs_slug,
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
 use crate::state::{
-    ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderRunStatus, TrackedPrState,
+    ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
+    TenderTriggerDecision, TrackedPrState, evaluate_tender_trigger,
 };
 use crate::tender::{
     TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch, browse_m1_directories,
     detect_local_repo_checkout, infer_local_check_cmd, inspect_local_git_repo,
     load_tender_kb_payload, save_tender_agent_notes, save_tender_kb_file,
+    sync_watched_prs_from_snapshots,
 };
 use crate::ui_html::DASHBOARD_HTML;
 use serde::Deserialize;
@@ -536,6 +539,312 @@ fn dispatch_api(
             .map_err(|e| e.to_string())?;
             Ok(json!({ "ok": true, "message": format!("Discarded staged patch for {}", key) }))
         }
+        ("GET", "/api/tender/open-prs") => {
+            let repo_filter = parse_query_param(query, "repo")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let gh = GitHubClient::new(&cfg);
+            let mut open_prs = Vec::new();
+            let mut errors = Vec::new();
+
+            for repo_cfg in &cfg.repos {
+                if let Some(ref rf) = repo_filter
+                    && !repo_cfg.full_name.eq_ignore_ascii_case(rf)
+                {
+                    continue;
+                }
+                let poll_account = repo_cfg
+                    .forced_account
+                    .as_deref()
+                    .unwrap_or(&cfg.accounts.primary);
+                match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
+                    Ok(snaps) => {
+                        let _ = sync_watched_prs_from_snapshots(&cfg, repo_cfg, &state_dir, &snaps);
+                        let ledger = LedgerStore::load_or_default(&state_dir).unwrap_or_default();
+                        for snap in snaps {
+                            let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
+                            let existing = ledger.tender_pull_requests.get(&key);
+                            let watched = existing.map(|e| e.watched).unwrap_or(false);
+                            let feedback_count =
+                                existing.map(|e| e.open_feedback_count).unwrap_or(0);
+                            open_prs.push(json!({
+                                "key": key,
+                                "repo": repo_cfg.full_name,
+                                "pr_number": snap.pr_number,
+                                "title": snap.title,
+                                "author": snap.author,
+                                "base_ref": snap.base_ref,
+                                "head_ref": snap.head_ref,
+                                "head_sha": snap.head_sha,
+                                "is_draft": snap.is_draft,
+                                "is_fork": snap.is_fork,
+                                "watched": watched,
+                                "open_feedback_count": feedback_count,
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: {}", repo_cfg.full_name, e));
+                    }
+                }
+            }
+            open_prs.sort_by(|a, b| {
+                let b_num = b["pr_number"].as_u64().unwrap_or(0);
+                let a_num = a["pr_number"].as_u64().unwrap_or(0);
+                b_num.cmp(&a_num)
+            });
+            Ok(json!({
+                "ok": true,
+                "prs": open_prs,
+                "errors": errors,
+            }))
+        }
+        ("POST", "/api/tender/watch-pr") => {
+            #[derive(Deserialize)]
+            struct Req {
+                #[serde(default)]
+                input: Option<String>,
+                #[serde(default)]
+                repo: Option<String>,
+                #[serde(default)]
+                pr: Option<u64>,
+                #[serde(default)]
+                watched: Option<bool>,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let (raw_repo, pr_num) = if let Some(raw_in) = req
+                .input
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                parse_pr_reference_input(raw_in)?
+            } else {
+                let r = req.repo.as_deref().ok_or_else(|| {
+                    "provide a PR URL (`owner/repo#123`) or `repo` + `pr`".to_string()
+                })?;
+                let norm = normalize_repo_input(r).map_err(|e| e.to_string())?;
+                let p = req
+                    .pr
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| "PR number must be greater than zero".to_string())?;
+                (norm, p)
+            };
+
+            let watch_flag = req.watched.unwrap_or(true);
+            let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+
+            let canonical_repo = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&raw_repo))
+                .map(|r| r.full_name.clone())
+                .unwrap_or_else(|| raw_repo.clone());
+            let key = LedgerStore::pr_key(&canonical_repo, pr_num);
+
+            if !watch_flag {
+                LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                    if let Some(tpr) = store.tender_pull_requests.get_mut(&key) {
+                        tpr.watched = false;
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+                return Ok(json!({
+                    "ok": true,
+                    "watched": false,
+                    "key": key,
+                    "message": format!("Paused watching {}#{}", canonical_repo, pr_num),
+                }));
+            }
+
+            if !cfg
+                .repos
+                .iter()
+                .any(|r| r.full_name.eq_ignore_ascii_case(&canonical_repo))
+            {
+                let detected = detect_local_repo_checkout(&canonical_repo);
+                let inferred_check_cmd = detected.as_deref().and_then(infer_local_check_cmd);
+                let default_branch = detected
+                    .as_deref()
+                    .and_then(|p| inspect_local_git_repo(&p.display().to_string()).ok())
+                    .and_then(|v| v["default_branch"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| "main".to_string());
+                cfg.upsert_repo(WatchedRepoConfig {
+                    full_name: canonical_repo.clone(),
+                    default_branch,
+                    language: "en".to_string(),
+                    account_policy: AccountPolicy::Swap,
+                    forced_account: None,
+                    review_event_policy: ReviewEventPolicy::FormalVerdict,
+                    gdrive_folder_id: None,
+                    local_repo_path: detected.map(|p| p.display().to_string()),
+                    local_check_cmd: inferred_check_cmd,
+                    enabled: false,
+                    tender_enabled: false,
+                })
+                .map_err(|e| e.to_string())?;
+                cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
+            }
+
+            let repo_cfg = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&canonical_repo))
+                .cloned()
+                .ok_or_else(|| format!("repo `{}` not found", canonical_repo))?;
+
+            let gh = GitHubClient::new(&cfg);
+            let poll_account = repo_cfg
+                .forced_account
+                .as_deref()
+                .unwrap_or(&cfg.accounts.primary);
+            let matched_snap = match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
+                Ok(snaps) => {
+                    let _ = sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &snaps);
+                    snaps.into_iter().find(|s| s.pr_number == pr_num)
+                }
+                Err(_) => None,
+            };
+
+            let mut ready_feedback_count = 0usize;
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                if let Some(ref snap) = matched_snap {
+                    ready_feedback_count = match evaluate_tender_trigger(
+                        store.tender_pull_requests.get(&key),
+                        snap,
+                        true,
+                        u32::MAX,
+                        cfg.tender.ignore_clean_pass_reviews,
+                    ) {
+                        TenderTriggerDecision::HandleFeedback { items, .. } => items.len(),
+                        _ => 0,
+                    };
+                }
+
+                if let Some(existing) = store.tender_pull_requests.get_mut(&key) {
+                    existing.watched = true;
+                    existing.is_open = true;
+                    if let Some(ref snap) = matched_snap {
+                        existing.title = snap.title.clone();
+                        existing.author = snap.author.clone();
+                        existing.base_ref = snap.base_ref.clone();
+                        existing.head_ref = snap.head_ref.clone();
+                        existing.head_sha = Some(snap.head_sha.clone());
+                        existing.open_feedback_count = ready_feedback_count;
+                    }
+                } else {
+                    let (title, author, base_ref, head_ref, head_sha) =
+                        if let Some(ref snap) = matched_snap {
+                            (
+                                snap.title.clone(),
+                                snap.author.clone(),
+                                snap.base_ref.clone(),
+                                snap.head_ref.clone(),
+                                Some(snap.head_sha.clone()),
+                            )
+                        } else {
+                            (
+                                format!("Pull Request #{}", pr_num),
+                                String::new(),
+                                repo_cfg.default_branch.clone(),
+                                String::new(),
+                                None,
+                            )
+                        };
+                    let mut fresh = TenderPrState::new(
+                        &repo_cfg.full_name,
+                        pr_num,
+                        &title,
+                        &author,
+                        &base_ref,
+                        &head_ref,
+                    );
+                    fresh.watched = true;
+                    fresh.is_open = true;
+                    fresh.head_sha = head_sha;
+                    fresh.open_feedback_count = ready_feedback_count;
+                    store.tender_pull_requests.insert(key.clone(), fresh);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+
+            let already_running = ActiveTenderWorkerState::list_active(&state_dir)
+                .iter()
+                .any(|w| w.repo.eq_ignore_ascii_case(&repo_cfg.full_name) && w.pr_number == pr_num);
+            let mut dispatched = false;
+            if ready_feedback_count > 0
+                && cfg.tender.enabled
+                && !cfg.tender.poll_only_mode
+                && !already_running
+            {
+                let pr_str = pr_num.to_string();
+                let _ = spawn_detached_self(
+                    &ctx.workspace,
+                    "sched-code-tender.log",
+                    &["tend", "--repo", &repo_cfg.full_name, "--pr", &pr_str],
+                );
+                dispatched = true;
+            }
+
+            let msg = if dispatched {
+                format!(
+                    "Watching {}#{} — found {} review comment(s) and started tending immediately!",
+                    repo_cfg.full_name, pr_num, ready_feedback_count
+                )
+            } else {
+                format!(
+                    "Watching {}#{} for review comments (checked every 2m)",
+                    repo_cfg.full_name, pr_num
+                )
+            };
+            Ok(json!({
+                "ok": true,
+                "watched": true,
+                "key": key,
+                "dispatched": dispatched,
+                "open_feedback_count": ready_feedback_count,
+                "message": msg,
+            }))
+        }
+        ("POST", "/api/tender/remove-pr") => {
+            #[derive(Deserialize)]
+            struct Req {
+                repo: String,
+                pr: u64,
+            }
+            let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            let state_dir = expand_tilde(&cfg.state_dir);
+            let repo_auto_watches = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&req.repo))
+                .map(|r| r.tender_enabled)
+                .unwrap_or(false);
+            let key = LedgerStore::pr_key(&req.repo, req.pr);
+            let mut paused_instead = false;
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                if let Some(existing) = store.tender_pull_requests.get_mut(&key)
+                    && repo_auto_watches
+                    && existing.is_open
+                {
+                    existing.watched = false;
+                    paused_instead = true;
+                    return;
+                }
+                store.tender_pull_requests.remove(&key);
+            })
+            .map_err(|e| e.to_string())?;
+            let msg = if paused_instead {
+                format!("Paused {} (repo auto-watch is enabled)", key)
+            } else {
+                format!("Removed {} from list", key)
+            };
+            Ok(json!({ "ok": true, "paused": paused_instead, "message": msg }))
+        }
         ("POST", "/api/actions/sync-docs") => {
             #[derive(Deserialize)]
             struct Req {
@@ -839,9 +1148,22 @@ fn build_overview_payload(ctx: &ServerContext) -> Result<Value, String> {
         })
         .collect();
     tender_prs_json.sort_by(|a, b| {
-        let b_num = b["pr_number"].as_u64().unwrap_or(0);
-        let a_num = a["pr_number"].as_u64().unwrap_or(0);
-        b_num.cmp(&a_num)
+        let rank = |v: &Value| -> u8 {
+            let is_open = v["is_open"].as_bool().unwrap_or(true);
+            let watched = v["watched"].as_bool().unwrap_or(true);
+            match (is_open, watched) {
+                (true, true) => 0,
+                (true, false) => 1,
+                (false, _) => 2,
+            }
+        };
+        let ra = rank(a);
+        let rb = rank(b);
+        ra.cmp(&rb).then_with(|| {
+            let b_num = b["pr_number"].as_u64().unwrap_or(0);
+            let a_num = a["pr_number"].as_u64().unwrap_or(0);
+            b_num.cmp(&a_num)
+        })
     });
 
     let tender_next_lead = if cfg.tender.intercalate_providers {
@@ -938,16 +1260,16 @@ fn probe_host_power() -> (bool, String) {
             .args(["-n", "kern.thermalstate"])
             .stdin(Stdio::null())
             .output()
+            .ok()
+            .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "0".to_string());
-        (
-            on_ac,
-            format!(
-                "otto-mac • {} • thermal={}",
-                if on_ac { "AC Power" } else { "Battery" },
-                therm
-            ),
-        )
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+        let power_label = if on_ac { "AC Power" } else { "Battery" };
+        let summary = match therm {
+            Some(t) => format!("M1 Host • {} • thermal={}", power_label, t),
+            None => format!("M1 Host • {}", power_label),
+        };
+        (on_ac, summary)
     }
     #[cfg(not(target_os = "macos"))]
     {

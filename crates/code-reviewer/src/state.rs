@@ -1255,6 +1255,10 @@ pub struct LearnedRuleRecord {
     pub learned_at_utc: String,
 }
 
+fn default_watched_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenderPrState {
     pub repo: String,
@@ -1263,6 +1267,14 @@ pub struct TenderPrState {
     pub author: String,
     pub base_ref: String,
     pub head_ref: String,
+    #[serde(default = "default_watched_true")]
+    pub watched: bool,
+    #[serde(default = "default_watched_true")]
+    pub is_open: bool,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    #[serde(default)]
+    pub open_feedback_count: usize,
     #[serde(default)]
     pub runs_count: u32,
     #[serde(default)]
@@ -1312,6 +1324,10 @@ impl TenderPrState {
             author: author.to_string(),
             base_ref: base_ref.to_string(),
             head_ref: head_ref.to_string(),
+            watched: true,
+            is_open: true,
+            head_sha: None,
+            open_feedback_count: 0,
             runs_count: 0,
             last_tended_sha: None,
             last_tended_feedback_at: None,

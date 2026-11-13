@@ -39,32 +39,32 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       position: sticky;
       top: 0;
       z-index: 30;
-      background: rgba(9, 11, 16, 0.94);
+      background: rgba(9, 11, 16, 0.95);
       backdrop-filter: blur(10px);
       border-bottom: 1px solid var(--border);
-      padding: 12px 22px;
+      padding: 9px 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: 10px;
       flex-wrap: wrap;
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
     }
     .brand-logo {
-      width: 36px;
-      height: 36px;
-      border-radius: 9px;
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
       background: linear-gradient(135deg, #6366f1, #06b6d4);
       display: grid;
       place-items: center;
       font-weight: 800;
       color: #fff;
-      font-size: 15px;
+      font-size: 13.5px;
       flex-shrink: 0;
     }
     .brand-logo.tender-mode {
@@ -72,13 +72,12 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
     .brand h1 {
       margin: 0;
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 700;
       letter-spacing: -0.01em;
     }
     .brand .sub {
-      font-size: 12px;
-      color: var(--muted);
+      display: none;
     }
     .app-switcher {
       display: inline-flex;
@@ -283,6 +282,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       border: 1px solid var(--border);
       border-radius: 11px;
       padding: 16px;
+      min-width: 0;
     }
     .card.highlight-tender {
       border-color: rgba(16, 185, 129, 0.45);
@@ -291,8 +291,8 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     .kpi-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
     .kpi-val { font-size: 26px; font-weight: 800; margin-top: 4px; }
     .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-    .grid-2 { display: grid; grid-template-columns: 1.35fr 1fr; gap: 16px; }
-    .split-pr { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+    .grid-2 { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; }
+    .split-pr { display: grid; grid-template-columns: 350px minmax(0, 1fr); gap: 16px; align-items: start; }
     @media (max-width: 980px) { .grid-2, .split-pr { grid-template-columns: 1fr; } }
     h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     h3 { font-size: 14px; margin: 0 0 8px; }
@@ -305,18 +305,20 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       letter-spacing: 0.02em;
     }
     .b-pass, .b-done, .b-low, .b-fixed { background: rgba(16,185,129,0.16); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.35); }
+    .b-watching { background: rgba(6,182,212,0.14); color: #67e8f9; border: 1px solid rgba(6,182,212,0.35); }
     .b-changes, .b-critical, .b-high, .b-failed { background: rgba(239,68,68,0.16); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); }
     .b-medium, .b-running, .b-staged { background: rgba(245,158,11,0.16); color: #fcd34d; border: 1px solid rgba(245,158,11,0.4); }
     .b-claude { background: rgba(249,115,22,0.16); color: #fdba74; border: 1px solid rgba(249,115,22,0.4); }
     .b-agy { background: rgba(6,182,212,0.16); color: #67e8f9; border: 1px solid rgba(6,182,212,0.4); }
     .b-explained { background: rgba(168,85,247,0.16); color: #d8b4fe; border: 1px solid rgba(168,85,247,0.4); }
     .b-muted { background: #1a2130; color: var(--muted); border: 1px solid var(--border); }
-    .worker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(390px, 1fr)); gap: 12px; }
+    .worker-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
     .worker-card {
       background: var(--panel-2);
       border: 1px solid #2e3a56;
       border-radius: 10px;
       padding: 14px;
+      min-width: 0;
     }
     .brain-chips {
       display: grid;
@@ -338,7 +340,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     .brain-chip.running { border-color: var(--cyan); box-shadow: inset 0 0 0 1px rgba(6,182,212,0.35); }
     .brain-chip.done { border-color: rgba(16,185,129,0.45); }
     .pr-item {
-      padding: 12px;
+      padding: 11px 12px;
       border-radius: 9px;
       border: 1px solid var(--border);
       background: var(--panel-2);
@@ -346,13 +348,14 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       cursor: pointer;
     }
     .pr-item:hover, .pr-item.selected { border-color: var(--accent); background: #1a2236; }
-    .pr-item.selected-tender { border-color: var(--tender); background: #132524; }
+    .pr-item.selected-tender { border-color: var(--tender); background: #122624; }
     .obs-card {
       background: var(--panel-2);
       border: 1px solid var(--border);
       border-radius: 9px;
-      padding: 14px;
+      padding: 13px 14px;
       margin-bottom: 10px;
+      min-width: 0;
     }
     pre {
       background: #07090e;
@@ -360,6 +363,8 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       border-radius: 8px;
       padding: 12px;
       overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
       color: #dbeafe;
@@ -403,6 +408,82 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
     .hidden { display: none !important; }
     .filter-bar { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 12px; }
+    .watch-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 12px 14px;
+      border-radius: 11px;
+      background: linear-gradient(180deg, rgba(16,185,129,0.09), var(--panel));
+      border: 1px solid rgba(16,185,129,0.38);
+      margin-bottom: 14px;
+    }
+    .stepper {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0;
+    }
+    @media (max-width: 720px) { .stepper { grid-template-columns: 1fr; } }
+    .step-node {
+      padding: 9px 11px;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .step-node .step-title { font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 6px; }
+    .step-node .step-sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+    .step-node.done { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.07); }
+    .step-node.active { border-color: rgba(6,182,212,0.55); background: rgba(6,182,212,0.09); }
+    .step-node.warn { border-color: rgba(239,68,68,0.5); background: rgba(239,68,68,0.08); }
+    .status-banner {
+      padding: 13px 15px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      margin: 12px 0;
+    }
+    .status-banner.watching { border-color: rgba(6,182,212,0.38); background: rgba(6,182,212,0.06); }
+    .status-banner.pushed { border-color: rgba(16,185,129,0.45); background: rgba(16,185,129,0.08); }
+    .status-banner.staged { border-color: rgba(245,158,11,0.48); background: rgba(245,158,11,0.08); }
+    .status-banner.failed { border-color: rgba(239,68,68,0.48); background: rgba(239,68,68,0.08); }
+    details.clean-acc {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      margin-top: 12px;
+    }
+    details.clean-acc > summary {
+      cursor: pointer;
+      padding: 11px 15px;
+      font-weight: 700;
+      font-size: 13.5px;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      user-select: none;
+    }
+    details.clean-acc > summary::-webkit-details-marker { display: none; }
+    details.clean-acc > summary::after { content: '▾'; color: var(--muted); font-size: 12px; }
+    details.clean-acc[open] > summary { border-bottom: 1px solid var(--border); }
+    details.clean-acc[open] > summary::after { content: '▴'; }
+    details.clean-acc .acc-body { padding: 14px 15px; }
+    .repo-card {
+      padding: 12px 14px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      margin-bottom: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
   </style>
 </head>
 <body>
@@ -410,30 +491,27 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     <div class="brand">
       <div class="brand-logo" id="brand-logo">CR</div>
       <div>
-        <h1 id="brand-title">Internal CI — Multi-Lens Code Reviewer</h1>
-        <div class="sub" id="brand-sub">Parallel Async Sessions • Claude ⇄ Antigravity Load Intercalation • Living Docs</div>
+        <h1 id="brand-title">Code Reviewer</h1>
+        <div class="sub" id="brand-sub"></div>
       </div>
       <div class="app-switcher" role="navigation" aria-label="Subsystem Switcher">
         <button id="nav-app-reviewer" class="active-reviewer" onclick="switchApp('reviewer')">
-          🔍 Multi-Lens Code Reviewer <span class="badge b-muted" id="nav-reviewer-badge">0</span>
+          🔍 Reviewer <span class="badge b-muted" id="nav-reviewer-badge">0</span>
         </button>
         <button id="nav-app-tender" onclick="switchApp('tender')">
           🛠️ Code Tender <span class="badge b-muted" id="nav-tender-badge">0</span>
         </button>
         <button id="nav-app-pixel" onclick="switchApp('pixel')">
-          👾 Pixel Agents <span class="badge b-muted" id="nav-pixel-badge">...</span>
+          👾 Pixel Office <span class="badge b-muted" id="nav-pixel-badge">...</span>
         </button>
       </div>
     </div>
     <div class="header-right">
-      <span class="pill" id="pill-poll-mode"><span class="dot ok"></span>Poller: Pure GraphQL (0 AI)</span>
-      <span class="pill" id="pill-claude"><span class="dot"></span>claude</span>
-      <span class="pill" id="pill-agy"><span class="dot"></span>agy</span>
-      <span class="pill" id="pill-intercalate">⇄ Intercalate</span>
-      <span class="pill" id="pill-power">M1 Host</span>
+      <span class="pill" id="pill-poll-mode"><span class="dot ok"></span>2m Auto-Sync</span>
+      <span class="pill" id="pill-system" title="AI Runners &amp; Host Power"><span class="dot ok"></span>claude · agy · M1</span>
       <button class="secondary" id="btn-split-pixel" onclick="toggleSplitPixel()" title="Dock Pixel Agents Office side-by-side">👾 Split Office</button>
-      <button id="primary-poll-btn" onclick="triggerPrimaryAction()">⚡ Poll &amp; Dispatch Reviews</button>
-      <button class="secondary" onclick="refreshAll()">↻ Refresh</button>
+      <button id="primary-poll-btn" onclick="triggerPrimaryAction()">⚡ Sync &amp; Review</button>
+      <button class="secondary" onclick="refreshAll()" title="Refresh Dashboard">↻</button>
     </div>
   </header>
 
@@ -655,111 +733,198 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
   </div>
 
   <!-- ========================================================= -->
-  <!-- APP 2: CODE TENDER (AUTONOMOUS REVIEW HANDLER)            -->
+  <!-- APP 2: CODE TENDER (WATCH PULLS -> TEND REVIEW COMMENTS)  -->
   <!-- ========================================================= -->
   <div id="app-tender" class="hidden">
     <nav class="tabs tender-tabs" id="tender-tabs">
-      <button class="active" data-tab="tender-live" onclick="switchTenderTab('tender-live')">1. Tender Queue &amp; Live AI Controls</button>
-      <button data-tab="tender-prs" onclick="switchTenderTab('tender-prs')">2. Handled PRs, Staged Patches &amp; Replies</button>
-      <button data-tab="tender-repos" onclick="switchTenderTab('tender-repos')">3. Tender Repos &amp; Agent Prompts</button>
+      <button class="active" data-tab="tender-prs" onclick="switchTenderTab('tender-prs')">Watched Pulls</button>
+      <button data-tab="tender-repos" onclick="switchTenderTab('tender-repos')">Repos &amp; Settings</button>
     </nav>
 
     <main>
-      <!-- TENDER TAB 1: LIVE & EASY AI CONTROLS -->
-      <section id="tab-tender-live">
-        <div class="kpis" id="tender-kpi-strip"></div>
+      <!-- TENDER TAB 1 (DEFAULT): WATCHED PULLS -->
+      <section id="tab-tender-prs">
+        <div id="tender-live-banner" class="hidden" style="margin-bottom:14px;"></div>
 
-        <div class="card highlight-tender" style="margin-bottom:16px;">
-          <h2>
-            <span>Quick Launch — Tend Specific Pull Request</span>
-            <span class="sub" style="font-size:12px;color:var(--muted);">Triage review comments ➔ Fix disjoint file packets in parallel ➔ Verify checks ➔ Push or Stage Patch</span>
-          </h2>
+        <div class="watch-bar">
+          <div style="font-weight:700;font-size:13px;white-space:nowrap;">👀 Watch a Pull:</div>
+          <input
+            id="watch-pr-input"
+            style="flex:1;min-width:240px;"
+            placeholder="Paste GitHub PR URL or owner/repo#123..."
+            onkeydown="if(event.key==='Enter') watchPrFromInput()"
+          />
+          <button class="tender-btn" onclick="watchPrFromInput()">+ Watch PR</button>
+          <button class="secondary" id="btn-open-pr-picker" onclick="toggleOpenPrPicker()">📋 Pick Open PR</button>
+          <span
+            id="tender-mode-summary"
+            class="pill"
+            style="cursor:pointer;margin-left:auto;"
+            onclick="switchTenderTab('tender-repos')"
+            title="Click to adjust Code Tender settings"
+          >Auto-Tend: ON</span>
+        </div>
+
+        <div id="open-pr-picker-box" class="card hidden" style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+            <div>
+              <strong>Open Pull Requests on GitHub</strong>
+              <span style="font-size:12px;color:var(--muted);margin-left:8px;">Click Watch to track any open PR for review comments.</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button class="secondary" style="padding:5px 10px;font-size:12px;" onclick="loadOpenPrPicker()">↻ Refresh Open PRs</button>
+              <button class="secondary" style="padding:5px 10px;font-size:12px;" onclick="toggleOpenPrPicker(false)">✕ Close</button>
+            </div>
+          </div>
+          <div id="open-pr-picker-list" style="max-height:280px;overflow-y:auto;"></div>
+        </div>
+
+        <div class="filter-bar" id="tender-pr-filters" style="margin-top:0;"></div>
+
+        <div class="split-pr">
+          <div class="card">
+            <h2>
+              <span>Watched Pulls</span>
+              <span id="tender-pr-count-badge" class="badge b-muted">0</span>
+            </h2>
+            <div id="tender-pr-list-box"></div>
+          </div>
+          <div class="card" id="tender-pr-detail-box">
+            <div style="color:var(--muted);padding:12px 0;">
+              Pick an open PR above or paste a PR URL to start watching it for review comments.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TENDER TAB 2: REPOS & SETTINGS -->
+      <section id="tab-tender-repos" class="hidden">
+        <div class="grid-2" style="margin-bottom:16px;">
+          <div class="card">
+            <h2>
+              <span>Watched Repositories</span>
+              <span style="font-size:12px;color:var(--muted);font-weight:500;">Open PRs on Auto-Watch repos are watched automatically</span>
+            </h2>
+            <div id="tender-repos-list"></div>
+          </div>
+
+          <div class="card">
+            <h2 id="tr-form-heading">Add / Update Repository</h2>
+            <div class="form-row">
+              <div>
+                <label>Owner / Repo (or GitHub URL)</label>
+                <input id="tr-name" placeholder="acme-org/web-app" onblur="normalizeRepoInputAndDetect('tr')" />
+              </div>
+              <div>
+                <label>Default Branch</label>
+                <input id="tr-branch" value="main" />
+              </div>
+            </div>
+            <div class="form-row" style="margin-bottom:12px;">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="tr-tender-enabled" checked style="width:auto;" />
+                <span>Auto-Watch &amp; Tend Open PRs</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
+                <input type="checkbox" id="tr-enabled" style="width:auto;" />
+                <span>Also Run Multi-Lens Reviewer</span>
+              </label>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label>Local App Checkout on M1 (for full repo context &amp; local checks)</label>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <input id="tr-local-path" style="flex:1;min-width:190px;" placeholder="~/apps/web-app" />
+                <button type="button" class="secondary" onclick="openM1Browser('tr')">📂 Browse M1</button>
+                <button type="button" class="secondary" onclick="loadGitInfoFromPath('tr')">📥 Load Git</button>
+                <button type="button" class="secondary" onclick="detectLocalRepo('tr')">🔎 Detect</button>
+              </div>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label>Local Check Command (runs before push; auto-inferred if blank)</label>
+              <input id="tr-check" placeholder="pnpm --filter @app/web typecheck" />
+            </div>
+            <details class="clean-acc" style="margin:10px 0 12px;background:var(--panel-2);">
+              <summary style="padding:8px 12px;font-size:12.5px;">Advanced Repository Options (Account &amp; Drive)</summary>
+              <div class="acc-body" style="padding:10px 12px;">
+                <div class="form-row" style="margin-bottom:8px;">
+                  <div>
+                    <label>Account Policy</label>
+                    <select id="tr-acct-pol">
+                      <option value="swap">swap (primary ⇄ secondary)</option>
+                      <option value="forced">forced (single account)</option>
+                    </select>
+                  </div>
+                  <div><label>Forced Account</label><input id="tr-forced" placeholder="optional" /></div>
+                </div>
+                <div class="form-row" style="margin-bottom:0;">
+                  <div>
+                    <label>Reviewer Event Policy</label>
+                    <select id="tr-ev-pol">
+                      <option value="formal_verdict">formal_verdict</option>
+                      <option value="comment_only">comment_only</option>
+                    </select>
+                  </div>
+                  <div><label>Google Drive Folder ID</label><input id="tr-drive" placeholder="optional" /></div>
+                </div>
+              </div>
+            </details>
+            <button class="tender-btn" onclick="submitWatchedRepoForm('tr')">Save Repository</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px;">
+          <h2><span>Core Tender Behavior</span></h2>
           <div class="form-row">
             <div>
-              <label>Watched Repository</label>
-              <select id="qt-repo-select" onchange="syncQuickTendRepoInput()"></select>
-            </div>
-            <div>
-              <label>Or Custom Owner / Repo</label>
-              <input id="qt-repo-custom" placeholder="owner/repo" />
-            </div>
-            <div>
-              <label>Pull Request #</label>
-              <input type="number" id="qt-pr" min="1" placeholder="42" />
-            </div>
-            <div>
-              <label>Delivery Mode</label>
-              <select id="qt-stage-only">
-                <option value="default">Follow Default Policy</option>
-                <option value="false">Auto-Commit &amp; Push Verified Fix</option>
-                <option value="true">Stage Patch Only (Dry-Run / Approve)</option>
+              <label>When Review Comments Land on a Watched PR</label>
+              <select id="tcfg-enabled">
+                <option value="true">Automatically Tend Comments (Every 2m)</option>
+                <option value="false">Manual Only (Click "Tend Now" on PR)</option>
               </select>
             </div>
             <div>
-              <label>Lead AI Provider</label>
-              <select id="qt-lead-runner">
-                <option value="auto">Auto (50/50 Claude ⇄ Agy Intercalate)</option>
-                <option value="claude">claude</option>
-                <option value="agy">agy</option>
+              <label>When Local Checks Pass</label>
+              <select id="tcfg-delivery">
+                <option value="auto_push">Commit &amp; Push Verified Fix Automatically</option>
+                <option value="stage_patch_only">Stage Patch Only (Wait for My Approval)</option>
+              </select>
+            </div>
+            <div>
+              <label>After Pushing a Verified Fix</label>
+              <select id="tcfg-resolve">
+                <option value="true">Reply &amp; Resolve Review Threads</option>
+                <option value="false">Reply Only (Leave Threads Open)</option>
               </select>
             </div>
             <div style="display:flex;align-items:flex-end;">
-              <button class="tender-btn" style="width:100%;justify-content:center;" onclick="triggerQuickTend()">🛠️ Tend PR Now</button>
+              <button class="tender-btn" style="width:100%;justify-content:center;" onclick="saveTenderSettings()">Save Settings</button>
             </div>
           </div>
         </div>
 
-        <div class="card" style="margin-bottom:16px;">
-          <h2>
-            <span>Active Parallel Code Tender Workers</span>
-            <span class="sub" id="tender-parallel-label" style="font-size:12px;color:var(--muted);"></span>
-          </h2>
-          <div id="tender-active-workers-box"></div>
-        </div>
-
-        <div class="grid-2">
-          <div class="card">
-            <h2><span>Live Code Tender Poller &amp; Fix Stream</span><span class="badge b-muted">auto-updating 2.5s</span></h2>
-            <pre id="tender-logs-box">Loading tender logs...</pre>
-
-            <h3 style="margin-top:16px;">Recent 2m Tender GraphQL Polls <span class="badge b-pass">0 AI Tokens / Poll</span></h3>
-            <div style="max-height:200px;overflow-y:auto;">
-              <table>
-                <thead><tr><th>Tick</th><th>Engine</th><th>Duration</th><th>Started (UTC)</th></tr></thead>
-                <tbody id="tender-history-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <div class="card">
-            <h2><span>Easy-to-Use Code Tender AI Controls</span></h2>
+        <details class="clean-acc">
+          <summary><span>⚙️ Advanced AI Concurrency &amp; Safety Limits</span></summary>
+          <div class="acc-body">
             <div class="form-row">
               <div>
-                <label>Autonomous Tender Master Switch</label>
-                <select id="tcfg-enabled">
-                  <option value="true">Enabled (Auto-handle new review feedback)</option>
-                  <option value="false">Paused (Manual triggers only)</option>
-                </select>
-              </div>
-              <div>
-                <label>Default Fix Delivery Mode</label>
-                <select id="tcfg-delivery">
-                  <option value="auto_push">Auto-Commit &amp; Push Verified Fixes</option>
-                  <option value="stage_patch_only">Stage Patch Only (Human Approves Push)</option>
-                </select>
-              </div>
-              <div>
-                <label>2m Tender Poller Token Guard</label>
+                <label>2m Poller Mode</label>
                 <select id="tcfg-poll-only">
                   <option value="false">Event-Only AI (0 AI on idle polls)</option>
                   <option value="true">Strict Poll-Only (Pause Auto-AI)</option>
                 </select>
               </div>
               <div>
-                <label>Intercalate Providers (`claude` ⇄ `agy`)</label>
+                <label>Provider Load-Splitting (`claude` ⇄ `agy`)</label>
                 <select id="tcfg-intercalate">
-                  <option value="true">Enabled (50/50 + failover)</option>
+                  <option value="true">Enabled (50/50 + Failover)</option>
                   <option value="false">Fixed Primary / Verifier</option>
+                </select>
+              </div>
+              <div>
+                <label>Ignore Clean PASS / APPROVED Reviews</label>
+                <select id="tcfg-ignore-pass">
+                  <option value="true">Yes (Skip non-actionable approvals)</option>
+                  <option value="false">No (Inspect all reviews)</option>
                 </select>
               </div>
               <div>
@@ -774,181 +939,102 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
                 <label>Max Autonomous Cycles / PR</label>
                 <input type="number" id="tcfg-max-cycles" min="1" max="20" value="3" />
               </div>
-              <div>
-                <label>Auto-Resolve Fixed Review Threads</label>
-                <select id="tcfg-resolve">
-                  <option value="true">Yes (Resolve GraphQL threads after fix)</option>
-                  <option value="false">No (Reply only; leave threads open)</option>
-                </select>
-              </div>
-              <div>
-                <label>Ignore Clean PASS / APPROVED Reviews</label>
-                <select id="tcfg-ignore-pass">
-                  <option value="true">Yes (Prevent unnecessary churn)</option>
-                  <option value="false">No (Inspect all review summaries)</option>
-                </select>
-              </div>
             </div>
             <div style="margin-bottom:12px;">
-              <label>Allowed PR Authors (comma-separated — safety boundary; leave default for your own PRs)</label>
+              <label>Allowed PR Authors (comma-separated safety boundary for auto-watch)</label>
               <input id="tcfg-allowed-authors" placeholder="primary_account, secondary_account" />
             </div>
-            <button class="tender-btn" onclick="saveTenderSettings()">Save Code Tender AI Settings</button>
+            <button class="tender-btn" onclick="saveTenderSettings()">Save Advanced Settings</button>
           </div>
-        </div>
-      </section>
+        </details>
 
-      <!-- TENDER TAB 2: HANDLED PRS, STAGED PATCHES & REPLIES -->
-      <section id="tab-tender-prs" class="hidden">
-        <div class="split-pr">
-          <div class="card">
-            <h2><span>Tended Pull Requests</span><span id="tender-pr-count-badge" class="badge b-muted">0</span></h2>
-            <div id="tender-pr-list-box"></div>
-          </div>
-          <div class="card" id="tender-pr-detail-box">
-            <div style="color:var(--muted);">Select a Pull Request on the left to inspect staged patches, review replies, resolved threads, or trigger an autonomous fix cycle.</div>
-          </div>
-        </div>
-      </section>
-
-      <!-- TENDER TAB 3: REPOS, TENDER KB & AGENT PROMPTS -->
-      <section id="tab-tender-repos" class="hidden">
-        <div class="grid-2" style="margin-bottom:16px;">
-          <div class="card">
-            <h2><span>Watched Repositories (`config/repos.toml`)</span></h2>
-            <table>
-              <thead><tr><th>Repository</th><th>Branch</th><th>Local App Checkout</th><th>Check Gate Command</th><th>Reviewer</th><th>Code Tender</th><th>Actions</th></tr></thead>
-              <tbody id="tender-repos-tbody"></tbody>
-            </table>
-          </div>
-          <div class="card">
-            <h2>Add / Update Watched Repository</h2>
-            <div class="form-row">
-              <div><label>Owner / Repo (or GitHub URL)</label><input id="tr-name" placeholder="acme-org/web-app or https://github.com/acme-org/web-app" onblur="normalizeRepoInputAndDetect('tr')" /></div>
-              <div><label>Default Branch</label><input id="tr-branch" value="main" /></div>
-            </div>
-            <div class="form-row">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
-                <input type="checkbox" id="tr-enabled" checked style="width:auto;" />
-                <span>Run Multi-Lens Code Reviewer</span>
-              </label>
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);">
-                <input type="checkbox" id="tr-tender-enabled" checked style="width:auto;" />
-                <span>Run Code Tender (Auto-Fix PR Reviews)</span>
-              </label>
-            </div>
-            <div class="form-row">
-              <div style="grid-column: span 2;">
-                <label>Local App Checkout Path on M1 (links node_modules/.venv + injects README/CLAUDE.md context)</label>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                  <input id="tr-local-path" style="flex:1;min-width:200px;" placeholder="~/apps/web-app" />
-                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="openM1Browser('tr')">📂 Browse M1 Folders</button>
-                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="loadGitInfoFromPath('tr')">📥 Load Git Info</button>
-                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('tr')">🔎 Auto-Detect</button>
+        <details class="clean-acc" ontoggle="if(this.open){loadTenderKb();loadTenderAgentDetail(SELECTED_TENDER_AGENT);}">
+          <summary><span>🧠 Continuous-Learning Knowledge Base &amp; Agent Prompts (01..03)</span></summary>
+          <div class="acc-body">
+            <div class="card" style="background:var(--panel-2);margin-bottom:14px;">
+              <h3>+ Append Learned Rule</h3>
+              <div class="form-row">
+                <div>
+                  <label>Target KB File</label>
+                  <select id="tkb-target">
+                    <option value="patterns-fixed">Patterns Fixed (`patterns-fixed.md`)</option>
+                    <option value="check-recipes">Local Check Recipes (`check-recipes.md`)</option>
+                    <option value="do-not-repeat">Do Not Repeat Guardrails (`do-not-repeat.md`)</option>
+                    <option value="agent-lesson">Specific Agent Lessons (`kb/lessons.md`)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Target Agent (if Agent Lessons)</label>
+                  <select id="tkb-agent">
+                    <option value="01-tender-triage">01-tender-triage</option>
+                    <option value="02-tender-fixer">02-tender-fixer</option>
+                    <option value="03-tender-verifier">03-tender-verifier</option>
+                  </select>
+                </div>
+                <div style="grid-column: span 2;">
+                  <label>Imperative Rule (include `[Owner/repo]` or `[*]`)</label>
+                  <input id="tkb-rule" placeholder="[acme-org/web-app] Always run typecheck before marking fixes done." />
                 </div>
               </div>
+              <button class="tender-btn" onclick="submitTenderKbRule()">+ Append Rule</button>
             </div>
-            <div class="form-row">
-              <div style="grid-column: span 2;">
-                <label>Local Verification Check Command (runs locally before push; auto-inferred if blank)</label>
-                <input id="tr-check" placeholder="npm run typecheck && npm test" />
-              </div>
-            </div>
-            <div class="form-row">
-              <div>
-                <label>Account Policy</label>
-                <select id="tr-acct-pol">
-                  <option value="swap">swap (primary ⇄ secondary)</option>
-                  <option value="forced">forced (single account)</option>
-                </select>
-              </div>
-              <div><label>Forced Account (if forced)</label><input id="tr-forced" placeholder="alice-dev" /></div>
-            </div>
-            <div class="form-row">
-              <div>
-                <label>GitHub Event Policy</label>
-                <select id="tr-ev-pol">
-                  <option value="formal_verdict">formal_verdict</option>
-                  <option value="comment_only">comment_only</option>
-                </select>
-              </div>
-              <div><label>Google Drive Folder ID (optional)</label><input id="tr-drive" placeholder="1AbCdEfGhIj..." /></div>
-            </div>
-            <button class="tender-btn" onclick="submitWatchedRepoForm('tr')">Save Watched Repository</button>
-          </div>
-        </div>
 
-        <div class="card" style="margin-bottom:16px;">
-          <h2><span>🧠 Code Tender Continuous-Learning Knowledge Base (`tender-agents/kb/`)</span></h2>
-          <div class="card" style="background:var(--panel-2);margin-bottom:14px;">
-            <h3>+ Append Learned Rule</h3>
-            <div class="form-row">
+            <div class="grid-2">
               <div>
-                <label>Target KB File</label>
-                <select id="tkb-target">
-                  <option value="patterns-fixed">Patterns Fixed (`patterns-fixed.md`)</option>
-                  <option value="check-recipes">Local Check Recipes (`check-recipes.md`)</option>
-                  <option value="do-not-repeat">Do Not Repeat Guardrails (`do-not-repeat.md`)</option>
-                  <option value="agent-lesson">Specific Agent Lessons (`kb/lessons.md`)</option>
-                </select>
+                <label>Patterns Fixed (`tender-agents/kb/patterns-fixed.md`)</label>
+                <textarea id="tkb-patterns" class="code-editor" style="min-height:150px;"></textarea>
+                <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('patterns-fixed', 'tkb-patterns')">💾 Save `patterns-fixed.md`</button>
               </div>
               <div>
-                <label>Target Agent (if Agent Lessons)</label>
-                <select id="tkb-agent">
-                  <option value="01-tender-triage">01-tender-triage</option>
-                  <option value="02-tender-fixer">02-tender-fixer</option>
-                  <option value="03-tender-verifier">03-tender-verifier</option>
-                </select>
-              </div>
-              <div style="grid-column: span 2;">
-                <label>Imperative Rule (include `[Owner/repo]` or `[*]`)</label>
-                <input id="tkb-rule" placeholder="[acme-org/web-app] Always run Vitest before marking UI fixes done." />
+                <label>Local Check Recipes (`tender-agents/kb/check-recipes.md`)</label>
+                <textarea id="tkb-recipes" class="code-editor" style="min-height:150px;"></textarea>
+                <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('check-recipes', 'tkb-recipes')">💾 Save `check-recipes.md`</button>
               </div>
             </div>
-            <button class="tender-btn" onclick="submitTenderKbRule()">+ Append to Code Tender KB</button>
-          </div>
+            <div style="margin:12px 0 18px;">
+              <label>Do Not Repeat Guardrails (`tender-agents/kb/do-not-repeat.md`)</label>
+              <textarea id="tkb-dnr" class="code-editor" style="min-height:130px;"></textarea>
+              <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('do-not-repeat', 'tkb-dnr')">💾 Save `do-not-repeat.md`</button>
+            </div>
 
-          <div class="grid-2">
-            <div>
-              <label>Patterns Fixed (`tender-agents/kb/patterns-fixed.md`)</label>
-              <textarea id="tkb-patterns" class="code-editor" style="min-height:170px;"></textarea>
-              <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('patterns-fixed', 'tkb-patterns')">💾 Save `patterns-fixed.md`</button>
-            </div>
-            <div>
-              <label>Local Check Recipes (`tender-agents/kb/check-recipes.md`)</label>
-              <textarea id="tkb-recipes" class="code-editor" style="min-height:170px;"></textarea>
-              <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('check-recipes', 'tkb-recipes')">💾 Save `check-recipes.md`</button>
+            <div class="split-pr">
+              <div class="card" style="background:var(--panel-2);">
+                <h3>Tender Agents (01..03)</h3>
+                <div id="tender-agents-list-box"></div>
+              </div>
+              <div class="card" style="background:var(--panel-2);">
+                <h3 id="tender-agent-detail-title">Tender Agent Prompt &amp; Guardrails</h3>
+                <div style="margin-bottom:10px;">
+                  <label>System Instructions (`PROMPT.md`)</label>
+                  <textarea id="ta-prompt" class="code-editor"></textarea>
+                </div>
+                <div style="margin-bottom:10px;">
+                  <label>Operator Notes (`notes.md`)</label>
+                  <textarea id="ta-notes" class="code-editor" style="min-height:100px;"></textarea>
+                </div>
+                <div style="margin-bottom:10px;">
+                  <label>Learned Agent Lessons (`kb/lessons.md`)</label>
+                  <textarea id="ta-lessons" class="code-editor" style="min-height:110px;"></textarea>
+                </div>
+                <button class="tender-btn" onclick="saveTenderAgentPrompt()">💾 Save Agent Prompt &amp; Notes</button>
+              </div>
             </div>
           </div>
-          <div style="margin-top:12px;">
-            <label>Do Not Repeat Guardrails (`tender-agents/kb/do-not-repeat.md`)</label>
-            <textarea id="tkb-dnr" class="code-editor" style="min-height:150px;"></textarea>
-            <button class="secondary" style="margin-top:6px;" onclick="saveTenderKbFile('do-not-repeat', 'tkb-dnr')">💾 Save `do-not-repeat.md`</button>
-          </div>
-        </div>
+        </details>
 
-        <div class="split-pr">
-          <div class="card">
-            <h2>Code Tender Agents (01..03)</h2>
-            <div id="tender-agents-list-box"></div>
+        <details class="clean-acc">
+          <summary><span>📜 Live Poller Logs &amp; Recent 2m Poll History</span></summary>
+          <div class="acc-body">
+            <pre id="tender-logs-box">Loading tender logs...</pre>
+            <h3 style="margin-top:14px;">Recent 2m GraphQL Poll Ticks <span class="badge b-pass">0 AI Tokens / Poll</span></h3>
+            <div style="max-height:200px;overflow-y:auto;">
+              <table>
+                <thead><tr><th>Tick</th><th>Engine</th><th>Duration</th><th>Started (UTC)</th></tr></thead>
+                <tbody id="tender-history-tbody"></tbody>
+              </table>
+            </div>
           </div>
-          <div class="card">
-            <h2 id="tender-agent-detail-title">Tender Agent Prompt, Guardrails &amp; Lessons</h2>
-            <div style="margin-bottom:12px;">
-              <label>System Instructions (`PROMPT.md`)</label>
-              <textarea id="ta-prompt" class="code-editor"></textarea>
-            </div>
-            <div style="margin-bottom:12px;">
-              <label>Operator Notes / Guardrails (`notes.md`)</label>
-              <textarea id="ta-notes" class="code-editor" style="min-height:120px;"></textarea>
-            </div>
-            <div style="margin-bottom:12px;">
-              <label>Learned Agent Lessons (`kb/lessons.md` — auto-updated by `03-tender-verifier`)</label>
-              <textarea id="ta-lessons" class="code-editor" style="min-height:130px;"></textarea>
-            </div>
-            <button class="tender-btn" onclick="saveTenderAgentPrompt()">💾 Save Prompt, Notes &amp; Lessons</button>
-          </div>
-        </div>
+        </details>
       </section>
     </main>
   </div>
@@ -990,7 +1076,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
   <div id="m1-browser-modal" class="hidden" style="position:fixed;inset:0;background:rgba(2,6,23,0.78);z-index:100;display:none;align-items:center;justify-content:center;padding:20px;">
     <div class="card" style="width:min(860px,100%);max-height:86vh;display:flex;flex-direction:column;gap:12px;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-        <h2 style="margin:0;">📂 Select Repository Folder on M1 (`otto-mac`)</h2>
+        <h2 style="margin:0;">📂 Select Repository Folder on M1</h2>
         <button class="secondary" style="padding:5px 10px;" onclick="closeM1Browser()">✕ Close</button>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -1019,11 +1105,15 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     let STATE = null;
     let ACTIVE_APP = 'reviewer';
     let ACTIVE_REVIEWER_TAB = 'live';
-    let ACTIVE_TENDER_TAB = 'tender-live';
+    let ACTIVE_TENDER_TAB = 'tender-prs';
     let SELECTED_PR_KEY = null;
     let SELECTED_TENDER_PR_KEY = null;
     let OBS_FILTER = 'all';
+    let TENDER_PR_FILTER = 'all';
     let TENDER_ITEM_FILTER = 'all';
+    let OPEN_PR_PICKER_VISIBLE = false;
+    let OPEN_PR_PICKER_ITEMS = [];
+    let OPEN_PR_PICKER_LOADING = false;
     let SELECTED_BRAIN = '01-intent-traceability';
     let SELECTED_TENDER_AGENT = '01-tender-triage';
     let SETTINGS_INITIALIZED = false;
@@ -1061,6 +1151,19 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         .replace(/"/g, '&quot;');
     }
 
+    function cleanReviewBody(raw) {
+      let s = String(raw ?? '');
+      s = s.replace(/\.\.\.\[truncated for prompt budget[^\]]*\]\.\.\./gi, '…');
+      s = s.replace(/<!--[\s\S]*?(-->|$)/g, '');
+      s = s.replace(/<details[\s\S]*?(<\/details>|$)/gi, '');
+      s = s.replace(/<picture[\s\S]*?(<\/picture>|$)/gi, '');
+      s = s.replace(/<img[^>]*>/gi, '');
+      s = s.replace(/<br\s*\/?>/gi, '\n');
+      s = s.replace(/\n{3,}/g, '\n\n').trim();
+      if (s === '…') s = '';
+      return s;
+    }
+
     function applyWorkspaceLayout() {
       const isPixel = ACTIVE_APP === 'pixel';
       const isTender = ACTIVE_APP === 'tender';
@@ -1080,7 +1183,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       const splitBtn = document.getElementById('btn-split-pixel');
       splitBtn.classList.toggle('pixel-active', !isPixel && SPLIT_PIXEL);
       splitBtn.classList.toggle('hidden', isPixel);
-      splitBtn.textContent = SPLIT_PIXEL ? '✕ Hide Pixel Office' : '👾 Split Office';
+      splitBtn.textContent = SPLIT_PIXEL ? '✕ Hide Office' : '👾 Split Office';
 
       if (showPixelPane && !PIXEL_LOADED_ONCE) {
         loadPixelOffice(false);
@@ -1108,21 +1211,14 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       logo.classList.toggle('pixel-mode', isPixel);
 
       document.getElementById('brand-title').textContent = isPixel
-        ? 'Internal CI — Pixel Agents Visual Office'
-        : (isTender
-          ? 'Internal CI — Code Tender (Autonomous Review Handler)'
-          : 'Internal CI — Multi-Lens Code Reviewer');
-      document.getElementById('brand-sub').textContent = isPixel
-        ? 'Real-Time Animated Desk Office for Multi-Lens Reviewer, Code Tender & M1 Claude/Agy Sessions'
-        : (isTender
-          ? 'Parallel Review Fixing • Claude ⇄ Antigravity Intercalation • Check Verification & Thread Resolution'
-          : 'Parallel Async Sessions • Claude ⇄ Antigravity Load Intercalation • Living Docs');
+        ? 'Pixel Agents Office'
+        : (isTender ? 'Code Tender' : 'Multi-Lens Reviewer');
 
       const primaryBtn = document.getElementById('primary-poll-btn');
       primaryBtn.className = isTender ? 'tender-btn' : '';
       primaryBtn.textContent = isPixel
-        ? '🔄 Reload Pixel Office'
-        : (isTender ? '🛠️ Poll & Tend Reviews' : '⚡ Poll & Dispatch Reviews');
+        ? '↻ Reload Office'
+        : (isTender ? '↻ Sync Pulls' : '⚡ Sync & Review');
 
       applyWorkspaceLayout();
 
@@ -1134,10 +1230,6 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       }
 
       renderTopStatusBar();
-      if (isTender && ACTIVE_TENDER_TAB === 'tender-repos') {
-        loadTenderAgentDetail(SELECTED_TENDER_AGENT);
-        loadTenderKb();
-      }
     }
 
     window.addEventListener('popstate', () => {
@@ -1157,35 +1249,27 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function switchTenderTab(tab) {
-      ACTIVE_TENDER_TAB = tab;
+      const normalized = (tab === 'tender-repos') ? 'tender-repos' : 'tender-prs';
+      ACTIVE_TENDER_TAB = normalized;
       document.querySelectorAll('#tender-tabs button').forEach(b => {
-        b.classList.toggle('active', b.dataset.tab === tab);
+        b.classList.toggle('active', b.dataset.tab === normalized);
       });
-      ['tender-live', 'tender-prs', 'tender-repos'].forEach(t => {
-        document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+      ['tender-prs', 'tender-repos'].forEach(t => {
+        const el = document.getElementById('tab-' + t);
+        if (el) el.classList.toggle('hidden', t !== normalized);
       });
-      if (tab === 'tender-repos') {
-        loadTenderAgentDetail(SELECTED_TENDER_AGENT);
-        loadTenderKb();
-      }
     }
 
-    function openPrInTender(repo, prNumber) {
+    async function openPrInTender(repo, prNumber) {
       switchApp('tender');
+      switchTenderTab('tender-prs');
       const key = `${repo}#${prNumber}`;
       const exists = (STATE?.tender_pull_requests || []).some(p => p.key === key);
-      const repoSel = document.getElementById('qt-repo-select');
-      if (repoSel && Array.from(repoSel.options).some(o => o.value === repo)) {
-        repoSel.value = repo;
-      }
-      document.getElementById('qt-repo-custom').value = repo;
-      document.getElementById('qt-pr').value = prNumber;
       if (exists) {
         SELECTED_TENDER_PR_KEY = key;
         renderTenderPrList();
-        switchTenderTab('tender-prs');
       } else {
-        switchTenderTab('tender-live');
+        await setPrWatched(repo, prNumber, true);
       }
     }
 
@@ -1233,42 +1317,35 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       if (!STATE) return;
       const revActive = (STATE.active_workers || []).length;
       const tendActive = (STATE.tender_active_workers || []).length;
+      const watchedOpenCount = (STATE.tender_pull_requests || []).filter(p => p.is_open !== false && p.watched !== false).length;
       const revBadge = document.getElementById('nav-reviewer-badge');
       const tendBadge = document.getElementById('nav-tender-badge');
       revBadge.textContent = revActive ? `${revActive} live` : String((STATE.pull_requests || []).length);
       revBadge.className = `badge ${revActive ? 'b-running' : 'b-muted'}`;
-      tendBadge.textContent = tendActive ? `${tendActive} live` : String((STATE.tender_pull_requests || []).length);
+      tendBadge.textContent = tendActive ? `${tendActive} live` : String(watchedOpenCount);
       tendBadge.className = `badge ${tendActive ? 'b-running' : 'b-muted'}`;
 
       const pmPill = document.getElementById('pill-poll-mode');
       const isTender = ACTIVE_APP === 'tender';
       const pollPaused = isTender ? Boolean(STATE.tender?.poll_only_mode) : Boolean(STATE.agents?.poll_only_mode);
       if (pollPaused) {
-        pmPill.innerHTML = `<span class="dot warn"></span>Poll-Only (Auto-AI Paused • 0 Tokens)`;
+        pmPill.innerHTML = `<span class="dot warn"></span>Auto-AI Paused`;
       } else if (isTender && STATE.tender && !STATE.tender.enabled) {
-        pmPill.innerHTML = `<span class="dot warn"></span>Code Tender Paused`;
+        pmPill.innerHTML = `<span class="dot warn"></span>Manual Mode`;
       } else {
-        pmPill.innerHTML = `<span class="dot ok"></span>2m Poll: Pure GraphQL (0 AI Tokens)`;
+        pmPill.innerHTML = `<span class="dot ok"></span>2m Auto-Watch`;
       }
 
-      const cPill = document.getElementById('pill-claude');
-      cPill.innerHTML = `<span class="dot ${STATE.runners.claude_ready ? 'ok' : 'warn'}"></span>claude (${esc(STATE.agents.claude_model || 'sonnet')}): ${STATE.runners.claude_ready ? 'ready' : 'sign-in'}`;
-      const aPill = document.getElementById('pill-agy');
-      aPill.innerHTML = `<span class="dot ${STATE.runners.agy_ready ? 'ok' : 'warn'}"></span>agy (${esc(STATE.agents.reasoning_effort || 'medium')}): ${STATE.runners.agy_ready ? 'ready' : 'sign-in'}`;
-
-      const iPill = document.getElementById('pill-intercalate');
-      if (isTender && STATE.tender) {
-        iPill.textContent = STATE.tender.intercalate_providers
-          ? `⇄ Fix Batch (${STATE.tender.max_parallel_prs} PRs × ${STATE.tender.max_parallel_fixers_per_pr} Fixers)`
-          : `Fixed Primary (${STATE.agents.primary_runner})`;
-      } else {
-        iPill.textContent = STATE.agents.intercalate_providers
-          ? `⇄ All-Parallel (${STATE.agents.max_parallel_prs} PRs × ${STATE.agents.max_parallel_brains_per_pr} Brains)`
-          : `Single Primary (${STATE.agents.primary_runner})`;
+      const sysPill = document.getElementById('pill-system');
+      if (sysPill) {
+        const cOk = Boolean(STATE.runners?.claude_ready);
+        const aOk = Boolean(STATE.runners?.agy_ready);
+        const pOk = Boolean(STATE.host?.ac_power);
+        const allOk = cOk && aOk && pOk;
+        const pwrShort = pOk ? 'AC' : 'Battery';
+        sysPill.innerHTML = `<span class="dot ${allOk ? 'ok' : 'warn'}"></span>claude ${cOk ? '✓' : '!'} · agy ${aOk ? '✓' : '!'} · ${pwrShort}`;
+        sysPill.title = `${STATE.host?.summary || 'M1 Host'} | claude: ${cOk ? 'ready' : 'sign-in'} | agy: ${aOk ? 'ready' : 'sign-in'}`;
       }
-
-      const pPill = document.getElementById('pill-power');
-      pPill.innerHTML = `<span class="dot ${STATE.host.ac_power ? 'ok' : 'warn'}"></span>${esc(STATE.host.summary)}`;
       updatePixelWorkersSummary();
     }
 
@@ -1819,32 +1896,66 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
 
     // =========================================================
-    // CODE TENDER RENDERERS & ACTIONS
+    // CODE TENDER RENDERERS & ACTIONS (SIMPLIFIED WATCH -> TEND)
     // =========================================================
 
-    function syncQuickTendRepoInput() {
-      const sel = document.getElementById('qt-repo-select');
-      const custom = document.getElementById('qt-repo-custom');
-      if (sel && sel.value) custom.value = sel.value;
+    function isPrActivelyTending(repo, prNumber) {
+      return (STATE?.tender_active_workers || []).some(
+        w => String(w.repo || '').toLowerCase() === String(repo || '').toLowerCase() && w.pr_number === prNumber
+      );
+    }
+
+    function classifyTenderPr(p) {
+      const running = isPrActivelyTending(p.repo, p.pr_number);
+      const isOpen = p.is_open !== false;
+      const isWatched = p.watched !== false;
+      const openFb = Math.max(Number(p.open_feedback_count || 0), (p.pending_items || []).length);
+
+      if (running) {
+        return { category: 'tending', badgeCls: 'b-running', badgeText: '⚡ Tending', sub: 'Fixing & running local checks...' };
+      }
+      if (!isOpen) {
+        return { category: 'inactive', badgeCls: 'b-muted', badgeText: 'Closed', sub: 'PR closed or merged' };
+      }
+      if (!isWatched) {
+        return { category: 'inactive', badgeCls: 'b-muted', badgeText: '⏸ Paused', sub: 'Watching paused for this PR' };
+      }
+      if (openFb > 0) {
+        return {
+          category: 'tending',
+          badgeCls: 'b-running',
+          badgeText: `💬 ${openFb} new`,
+          sub: `${openFb} review comment${openFb === 1 ? '' : 's'} ready to tend`
+        };
+      }
+      if (p.status_badge === 'CHECK_FAILED') {
+        return { category: 'attention', badgeCls: 'b-failed', badgeText: '⚠️ Check Failed', sub: 'Local check failed — push blocked' };
+      }
+      if (p.status_badge === 'NEEDS_HUMAN') {
+        return { category: 'attention', badgeCls: 'b-changes', badgeText: '👤 Needs Input', sub: 'Comment needs human decision' };
+      }
+      if (p.status_badge === 'STAGED_PATCH' || p.staged_patch) {
+        return { category: 'attention', badgeCls: 'b-staged', badgeText: '📦 Ready to Push', sub: 'Verified fix waiting for approval' };
+      }
+      if (p.status_badge === 'FIXED_PUSHED') {
+        const sha = p.last_commit_pushed ? p.last_commit_pushed.slice(0, 7) : '';
+        return {
+          category: 'handled',
+          badgeCls: 'b-pass',
+          badgeText: '✅ Fixed & Pushed',
+          sub: sha ? `Pushed ${sha} · Watching for new reviews` : 'Fix pushed · Watching for new reviews'
+        };
+      }
+      if (p.status_badge === 'REPLIED_ONLY') {
+        return { category: 'handled', badgeCls: 'b-explained', badgeText: '💬 Replied', sub: 'Replied · Watching for new reviews' };
+      }
+      return { category: 'watching', badgeCls: 'b-watching', badgeText: '👀 Watching', sub: 'Listening for review comments' };
     }
 
     function renderTenderLive() {
       if (!STATE || !STATE.tender) return;
       const tc = STATE.tender;
-      const tprs = STATE.tender_pull_requests || [];
       const active = STATE.tender_active_workers || [];
-      const stagedCount = tprs.filter(p => Boolean(p.staged_patch)).length;
-      const tenderEnabledRepos = (STATE.repos || []).filter(r => r.tender_enabled).length;
-
-      // Keep quick-tend repo selector populated
-      const qSel = document.getElementById('qt-repo-select');
-      const prevSel = qSel.value;
-      qSel.innerHTML = (STATE.repos || []).map(r => `<option value="${esc(r.full_name)}">${esc(r.full_name)}${r.tender_enabled ? '' : ' (paused)'}</option>`).join('');
-      if (prevSel && Array.from(qSel.options).some(o => o.value === prevSel)) {
-        qSel.value = prevSel;
-      } else if (qSel.options.length && !document.getElementById('qt-repo-custom').value) {
-        document.getElementById('qt-repo-custom').value = qSel.value;
-      }
 
       if (!TENDER_SETTINGS_INITIALIZED) {
         document.getElementById('tcfg-enabled').value = String(Boolean(tc.enabled));
@@ -1862,91 +1973,378 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         TENDER_SETTINGS_INITIALIZED = true;
       }
 
-      document.getElementById('tender-kpi-strip').innerHTML = `
-        <div class="card"><div class="kpi-label">Active Tender Sessions</div><div class="kpi-val" style="color:var(--tender);">${active.length} / ${tc.max_parallel_prs}</div><div class="kpi-sub">Next lead AI: <b>${esc(STATE.tender_next_lead_runner || 'claude')}</b></div></div>
-        <div class="card"><div class="kpi-label">Tracked Tender PRs</div><div class="kpi-val">${tprs.length}</div><div class="kpi-sub">Mode: <code>${esc(tc.delivery_mode)}</code></div></div>
-        <div class="card"><div class="kpi-label">Staged Patches Waiting</div><div class="kpi-val" style="color:${stagedCount > 0 ? 'var(--amber)' : 'var(--green)'};">${stagedCount}</div><div class="kpi-sub">Ready for 1-click approve &amp; push</div></div>
-        <div class="card"><div class="kpi-label">Tender-Enabled Repos</div><div class="kpi-val">${tenderEnabledRepos}</div><div class="kpi-sub">Authors: <code>${esc(((tc.allowed_authors && tc.allowed_authors.length) ? tc.allowed_authors : [STATE.accounts?.primary, STATE.accounts?.secondary].filter(Boolean)).join(', '))}</code></div></div>
-      `;
-
-      document.getElementById('tender-parallel-label').textContent =
-        `Up to ${tc.max_parallel_prs} PRs tended concurrently (${tc.max_parallel_fixers_per_pr} parallel disjoint fixers/PR, cap ${tc.max_autonomous_cycles_per_pr} cycles/PR)`;
-
-      const awb = document.getElementById('tender-active-workers-box');
-      if (!active.length) {
-        awb.innerHTML = `<div style="color:var(--muted);padding:8px 0;">Idle — zero in-flight Code Tender sessions right now. New PR comments/reviews will automatically wake fix agents on the next poll tick (or trigger one above).</div>`;
-      } else {
-        awb.innerHTML = `<div class="worker-grid">` + active.map(w => {
-          const chips = Object.entries(w.workers || {}).map(([name, wState]) => {
-            const rBadge = wState.runner === 'claude' ? 'b-claude' : (wState.runner === 'agy' ? 'b-agy' : 'b-muted');
-            return `<div class="brain-chip ${esc(wState.status)}">
-              <span>${esc(name)}</span>
-              <span><span class="badge ${rBadge}">${esc(wState.runner)}</span> <span class="badge ${wState.status === 'running' ? 'b-running' : (wState.status === 'done' ? 'b-done' : 'b-muted')}">${esc(wState.status)}</span></span>
-            </div>`;
-          }).join('');
-          return `<div class="worker-card">
-            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
-              <strong><span class="dot run"></span> ${esc(w.repo)} #${w.pr_number}</strong>
-              <span class="badge b-running">${esc(w.phase)} (${w.packets_done}/${w.packets_total})</span>
-            </div>
-            <div style="font-size:12.5px;margin-top:4px;">${esc(w.title)}</div>
-            <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">
-              SHA: <code>${esc((w.head_sha || '').slice(0, 7))}</code> • Author Identity: <code>${esc(w.tender_account)}</code> • PID: <code>${w.pid}</code><br/>
-              Fixer Providers: <span class="badge b-claude">lead: ${esc(w.lead_runner)}</span> ⇄ <span class="badge b-agy">alt: ${esc(w.alt_runner)}</span>
-            </div>
-            <div class="brain-chips">${chips}</div>
-          </div>`;
-        }).join('') + `</div>`;
+      const modeEl = document.getElementById('tender-mode-summary');
+      if (modeEl) {
+        if (!tc.enabled || tc.poll_only_mode) {
+          modeEl.innerHTML = `<span class="dot warn"></span>Manual Mode`;
+        } else {
+          const deliv = tc.delivery_mode === 'stage_patch_only' ? 'Stage Only' : 'Auto-Push';
+          modeEl.innerHTML = `<span class="dot ok"></span>Auto-Tend · ${deliv}`;
+        }
       }
 
-      document.getElementById('tender-logs-box').textContent = STATE.tender_logs || '(no Code Tender logs yet)';
-      document.getElementById('tender-history-tbody').innerHTML = (STATE.tender_history || []).map(h => `
-        <tr>
-          <td><span class="badge ${h.status === 'pass' ? 'b-pass' : 'b-changes'}">${esc(h.status)}</span></td>
-          <td><span class="badge b-muted">GraphQL (0 AI)</span></td>
-          <td>${h.duration_secs}s</td>
-          <td style="color:var(--muted);">${new Date(h.started_epoch_secs * 1000).toISOString().replace('T', ' ').slice(0, 19)}</td>
-        </tr>
-      `).join('');
+      const banner = document.getElementById('tender-live-banner');
+      if (banner) {
+        if (!active.length) {
+          banner.classList.add('hidden');
+          banner.innerHTML = '';
+        } else {
+          banner.classList.remove('hidden');
+          banner.innerHTML = `<div class="worker-grid">` + active.map(w => {
+            const chips = Object.entries(w.workers || {}).map(([name, wState]) => {
+              const rBadge = wState.runner === 'claude' ? 'b-claude' : (wState.runner === 'agy' ? 'b-agy' : 'b-muted');
+              return `<div class="brain-chip ${esc(wState.status)}">
+                <span>${esc(name)}</span>
+                <span><span class="badge ${rBadge}">${esc(wState.runner)}</span> <span class="badge ${wState.status === 'running' ? 'b-running' : (wState.status === 'done' ? 'b-done' : 'b-muted')}">${esc(wState.status)}</span></span>
+              </div>`;
+            }).join('');
+            return `<div class="worker-card" style="border-color:var(--tender);">
+              <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+                <strong><span class="dot run"></span> Tending ${esc(w.repo)} #${w.pr_number}</strong>
+                <span class="badge b-running">${esc(w.phase)} (${w.packets_done}/${w.packets_total})</span>
+              </div>
+              <div style="font-size:12.5px;margin-top:4px;">${esc(w.title)}</div>
+              <div class="brain-chips">${chips}</div>
+            </div>`;
+          }).join('') + `</div>`;
+        }
+      }
+
+      const logEl = document.getElementById('tender-logs-box');
+      if (logEl) logEl.textContent = STATE.tender_logs || '(no Code Tender logs yet)';
+      const histEl = document.getElementById('tender-history-tbody');
+      if (histEl) {
+        histEl.innerHTML = (STATE.tender_history || []).map(h => `
+          <tr>
+            <td><span class="badge ${h.status === 'pass' ? 'b-pass' : 'b-changes'}">${esc(h.status)}</span></td>
+            <td><span class="badge b-muted">GraphQL (0 AI)</span></td>
+            <td>${h.duration_secs}s</td>
+            <td style="color:var(--muted);">${new Date(h.started_epoch_secs * 1000).toISOString().replace('T', ' ').slice(0, 19)}</td>
+          </tr>
+        `).join('');
+      }
     }
 
-    function tenderStatusClass(badge) {
-      if (badge === 'FIXED_PUSHED') return 'b-pass';
-      if (badge === 'STAGED_PATCH') return 'b-staged';
-      if (badge === 'REPLIED_ONLY') return 'b-explained';
-      if (badge === 'CHECK_FAILED' || badge === 'NEEDS_HUMAN') return 'b-changes';
-      return 'b-muted';
+    async function watchPrFromInput() {
+      const inputEl = document.getElementById('watch-pr-input');
+      const raw = (inputEl?.value || '').trim();
+      if (!raw) {
+        showToast('Paste a GitHub PR URL or owner/repo#123 first');
+        inputEl?.focus();
+        return;
+      }
+      try {
+        const res = await api('/api/tender/watch-pr', {
+          method: 'POST',
+          body: JSON.stringify({ input: raw, watched: true })
+        });
+        inputEl.value = '';
+        if (res.key) SELECTED_TENDER_PR_KEY = res.key;
+        TENDER_PR_FILTER = 'all';
+        showToast(res.message || `Watching ${res.key}`);
+        await refreshAll();
+      } catch (e) {
+        showToast('Could not watch PR: ' + e.message);
+      }
+    }
+
+    async function setPrWatched(repo, pr, watched) {
+      try {
+        const res = await api('/api/tender/watch-pr', {
+          method: 'POST',
+          body: JSON.stringify({ repo, pr, watched: Boolean(watched) })
+        });
+        if (watched && res.key) SELECTED_TENDER_PR_KEY = res.key;
+        showToast(res.message || (watched ? `Watching ${repo}#${pr}` : `Paused ${repo}#${pr}`));
+        if (OPEN_PR_PICKER_VISIBLE) {
+          OPEN_PR_PICKER_ITEMS = OPEN_PR_PICKER_ITEMS.map(item =>
+            (item.repo === repo && item.pr_number === pr) ? { ...item, watched: Boolean(watched) } : item
+          );
+          renderOpenPrPicker();
+        }
+        await refreshAll();
+      } catch (e) {
+        showToast('Watch update failed: ' + e.message);
+      }
+    }
+
+    async function removeWatchedPr(repo, pr) {
+      try {
+        const res = await api('/api/tender/remove-pr', {
+          method: 'POST',
+          body: JSON.stringify({ repo, pr })
+        });
+        const key = `${repo}#${pr}`;
+        if (SELECTED_TENDER_PR_KEY === key && !res.paused) {
+          SELECTED_TENDER_PR_KEY = null;
+        }
+        showToast(res.message || `Removed ${key}`);
+        await refreshAll();
+      } catch (e) {
+        showToast('Remove failed: ' + e.message);
+      }
+    }
+
+    function toggleOpenPrPicker(forceState) {
+      OPEN_PR_PICKER_VISIBLE = typeof forceState === 'boolean' ? forceState : !OPEN_PR_PICKER_VISIBLE;
+      const box = document.getElementById('open-pr-picker-box');
+      if (box) box.classList.toggle('hidden', !OPEN_PR_PICKER_VISIBLE);
+      if (OPEN_PR_PICKER_VISIBLE) {
+        loadOpenPrPicker();
+      }
+    }
+
+    async function loadOpenPrPicker() {
+      const listEl = document.getElementById('open-pr-picker-list');
+      if (!listEl) return;
+      OPEN_PR_PICKER_LOADING = true;
+      listEl.innerHTML = `<div style="color:var(--muted);padding:8px 0;">Fetching live open Pull Requests from GitHub...</div>`;
+      try {
+        const res = await api('/api/tender/open-prs');
+        OPEN_PR_PICKER_ITEMS = res.prs || [];
+        OPEN_PR_PICKER_LOADING = false;
+        renderOpenPrPicker();
+        await refreshAll();
+      } catch (e) {
+        OPEN_PR_PICKER_LOADING = false;
+        listEl.innerHTML = `<div style="color:var(--red);padding:8px 0;">Could not load open PRs: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function renderOpenPrPicker() {
+      const listEl = document.getElementById('open-pr-picker-list');
+      if (!listEl || OPEN_PR_PICKER_LOADING) return;
+      if (!OPEN_PR_PICKER_ITEMS.length) {
+        listEl.innerHTML = `<div style="color:var(--muted);padding:8px 0;">No open PRs found on your configured repositories. Paste any GitHub PR URL above or add a repository in Repos &amp; Settings.</div>`;
+        return;
+      }
+      listEl.innerHTML = OPEN_PR_PICKER_ITEMS.map(item => {
+        const watched = Boolean(item.watched);
+        const fb = Number(item.open_feedback_count || 0);
+        return `<div class="repo-card" style="margin-bottom:6px;padding:9px 12px;">
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong>${esc(item.repo)} #${item.pr_number}</strong>
+              ${item.is_draft ? '<span class="badge b-muted">Draft</span>' : ''}
+              ${fb > 0 ? `<span class="badge b-running">💬 ${fb} review comment${fb === 1 ? '' : 's'}</span>` : '<span class="badge b-muted">0 new comments</span>'}
+            </div>
+            <div style="font-size:13px;margin-top:2px;">${esc(item.title)}</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">
+              <code>${esc(item.head_ref)}</code> → <code>${esc(item.base_ref)}</code> · @${esc(item.author)}
+            </div>
+          </div>
+          <div>
+            ${watched
+              ? `<button class="secondary" onclick="setPrWatched('${esc(item.repo)}', ${item.pr_number}, false)">✓ Watching</button>`
+              : `<button class="tender-btn" onclick="setPrWatched('${esc(item.repo)}', ${item.pr_number}, true)">+ Watch PR</button>`
+            }
+          </div>
+        </div>`;
+      }).join('');
     }
 
     function renderTenderPrList() {
-      const prs = STATE?.tender_pull_requests || [];
-      document.getElementById('tender-pr-count-badge').textContent = prs.length;
-      if (!SELECTED_TENDER_PR_KEY && prs.length) SELECTED_TENDER_PR_KEY = prs[0].key;
+      const allPrs = STATE?.tender_pull_requests || [];
+      const counts = { all: 0, watching: 0, tending: 0, attention: 0, handled: 0, inactive: 0 };
+      const decorated = allPrs.map(p => {
+        const meta = classifyTenderPr(p);
+        counts[meta.category] = (counts[meta.category] || 0) + 1;
+        if (meta.category !== 'inactive') counts.all++;
+        return { p, meta };
+      });
 
-      document.getElementById('tender-pr-list-box').innerHTML = prs.map(p => {
-        const badgeCls = tenderStatusClass(p.status_badge);
-        const pendingCnt = (p.pending_items || []).length;
-        const handledCnt = (p.handled_items || []).length;
-        return `<div class="pr-item ${p.key === SELECTED_TENDER_PR_KEY ? 'selected-tender' : ''}" onclick="selectTenderPr('${esc(p.key)}')">
+      const filterBar = document.getElementById('tender-pr-filters');
+      if (filterBar) {
+        const pill = (id, label, cnt) => {
+          const active = TENDER_PR_FILTER === id;
+          return `<button class="${active ? 'tender-btn' : 'secondary'}" style="padding:5px 11px;font-size:12px;" onclick="setTenderPrFilter('${id}')">${label} <span class="badge ${active ? 'b-pass' : 'b-muted'}" style="margin-left:3px;">${cnt}</span></button>`;
+        };
+        filterBar.innerHTML = [
+          pill('all', 'Active Pulls', counts.all),
+          pill('watching', '👀 Watching', counts.watching),
+          pill('tending', '⚡ Tending', counts.tending),
+          pill('attention', '⚠️ Needs Attention', counts.attention),
+          pill('handled', '✅ Fixed & Pushed', counts.handled),
+          counts.inactive > 0 ? pill('inactive', 'Paused / Closed', counts.inactive) : ''
+        ].join('');
+      }
+
+      const filtered = decorated.filter(({ meta }) => {
+        if (TENDER_PR_FILTER === 'all') return meta.category !== 'inactive';
+        return meta.category === TENDER_PR_FILTER;
+      });
+      const displayList = filtered.length ? filtered : (TENDER_PR_FILTER === 'all' ? decorated : []);
+
+      document.getElementById('tender-pr-count-badge').textContent = displayList.length;
+      if ((!SELECTED_TENDER_PR_KEY || !allPrs.some(x => x.key === SELECTED_TENDER_PR_KEY)) && displayList.length) {
+        SELECTED_TENDER_PR_KEY = displayList[0].p.key;
+      }
+
+      const listBox = document.getElementById('tender-pr-list-box');
+      listBox.innerHTML = displayList.map(({ p, meta }) => `
+        <div class="pr-item ${p.key === SELECTED_TENDER_PR_KEY ? 'selected-tender' : ''}" onclick="selectTenderPr('${esc(p.key)}')">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
-            <strong>${esc(p.repo)} #${p.pr_number}</strong>
-            <span class="badge ${badgeCls}">${esc(p.status_badge)}</span>
+            <strong style="font-size:13px;">${esc(p.repo)} #${p.pr_number}</strong>
+            <span class="badge ${meta.badgeCls}">${meta.badgeText}</span>
           </div>
-          <div style="font-size:12.5px;margin-top:4px;">${esc(p.title)}</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">
-            Cycles: ${p.runs_count} • Pending: ${pendingCnt} • Handled: ${handledCnt}${p.staged_patch ? ' • <strong style="color:#fcd34d;">Staged Patch</strong>' : ''}
-          </div>
-        </div>`;
-      }).join('') || '<div style="color:var(--muted);">No tended PRs yet. Use Quick Launch or wait for review feedback.</div>';
+          <div style="font-size:12.5px;margin-top:4px;line-height:1.35;">${esc(p.title)}</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">${esc(meta.sub)}</div>
+        </div>
+      `).join('') || `<div style="color:var(--muted);padding:10px 0;font-size:13px;">No pulls in this view yet. Click <b>Pick Open PR</b> or paste a PR URL above to start watching.</div>`;
 
-      const selected = prs.find(p => p.key === SELECTED_TENDER_PR_KEY);
+      const selectedEntry = decorated.find(d => d.p.key === SELECTED_TENDER_PR_KEY);
       const box = document.getElementById('tender-pr-detail-box');
-      if (!selected) return;
+      if (!selectedEntry) {
+        box.innerHTML = `<div style="color:var(--muted);padding:16px 0;">Select a Pull Request on the left, or click <b>Pick Open PR</b> above to watch an open pull request.</div>`;
+        return;
+      }
 
-      const p = selected;
+      const { p, meta } = selectedEntry;
       const ghUrl = `https://github.com/${p.repo}/pull/${p.pr_number}`;
+      const isWatched = p.watched !== false;
+      const isOpen = p.is_open !== false;
+      const running = isPrActivelyTending(p.repo, p.pr_number);
       const pending = p.pending_items || [];
       const handledAll = p.handled_items || [];
+      const openFb = Math.max(Number(p.open_feedback_count || 0), pending.length);
+
+      // 3-Step Lifecycle Bar: 1. Watch Pull -> 2. Review Comments -> 3. Fix & Push
+      const step1Cls = !isOpen ? '' : (isWatched ? 'done' : 'warn');
+      const step1Sub = !isOpen ? 'PR closed/merged' : (isWatched ? 'Polling every 2m (0 AI tokens)' : 'Paused by user');
+
+      let step2Cls = '';
+      let step2Sub = 'Waiting for review comments';
+      if (running || openFb > 0) {
+        step2Cls = 'active';
+        step2Sub = running ? 'Triaging & fixing comments now' : `${openFb} new comment${openFb === 1 ? '' : 's'} detected`;
+      } else if (handledAll.length > 0) {
+        step2Cls = 'done';
+        step2Sub = `${handledAll.length} comment${handledAll.length === 1 ? '' : 's'} processed`;
+      }
+
+      let step3Cls = '';
+      let step3Sub = 'Standby until comments arrive';
+      if (running) {
+        step3Cls = 'active';
+        step3Sub = 'Running local check gate...';
+      } else if (p.status_badge === 'CHECK_FAILED') {
+        step3Cls = 'warn';
+        step3Sub = 'Local check failed — push blocked';
+      } else if (p.status_badge === 'NEEDS_HUMAN') {
+        step3Cls = 'warn';
+        step3Sub = 'Waiting for human decision';
+      } else if (p.status_badge === 'STAGED_PATCH') {
+        step3Cls = 'active';
+        step3Sub = 'Verified patch ready to push';
+      } else if (p.status_badge === 'FIXED_PUSHED') {
+        step3Cls = 'done';
+        step3Sub = p.last_commit_pushed ? `Pushed commit ${p.last_commit_pushed.slice(0, 7)}` : 'Verified fix pushed';
+      } else if (p.status_badge === 'REPLIED_ONLY') {
+        step3Cls = 'done';
+        step3Sub = 'Replied on PR threads';
+      }
+
+      // Single Clear Contextual Status / Action Banner
+      let statusBannerHtml = '';
+      if (running) {
+        statusBannerHtml = `
+          <div class="status-banner watching">
+            <strong>⚡ Actively Tending This Pull Request</strong>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:4px;">Agents are applying fixes in your local repo context and running verification checks before pushing.</div>
+          </div>`;
+      } else if (p.status_badge === 'CHECK_FAILED') {
+        statusBannerHtml = `
+          <div class="status-banner failed">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:220px;">
+                <strong style="color:#fca5a5;">⚠️ Fix Drafted, But Local Verification Check Failed</strong>
+                <div style="font-size:12.5px;margin-top:4px;">${esc(p.last_summary || 'Auto-push was blocked because the local check command exited non-zero.')}</div>
+                ${p.last_check_cmd_used ? `<div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Check command: <code>${esc(p.last_check_cmd_used)}</code></div>` : ''}
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="tender-btn" onclick="triggerPrTend('${esc(p.repo)}', ${p.pr_number}, false)">🔄 Retry Tend</button>
+                ${p.staged_patch ? `<button class="secondary" onclick="approveAndPushPatch('${esc(p.repo)}', ${p.pr_number})">Push Draft Anyway</button>` : ''}
+                ${p.staged_patch ? `<button class="danger" onclick="discardStagedPatch('${esc(p.repo)}', ${p.pr_number})">Discard Draft</button>` : ''}
+              </div>
+            </div>
+            ${p.staged_patch ? `<details class="clean-acc" style="margin-top:10px;background:var(--bg);"><summary style="padding:8px 12px;font-size:12px;">Inspect Drafted Diff (<code>${esc(p.staged_commit_message || 'fix: address review feedback')}</code>)</summary><div class="acc-body" style="padding:10px;"><pre style="margin:0;">${esc(p.staged_patch)}</pre></div></details>` : ''}
+          </div>`;
+      } else if (p.staged_patch) {
+        statusBannerHtml = `
+          <div class="status-banner staged">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+              <div>
+                <strong style="color:#fcd34d;">📦 Verified Fix Ready to Push</strong>
+                <div style="font-size:12.5px;color:var(--muted);margin-top:3px;">Commit: <code>${esc(p.staged_commit_message || 'fix: address code review feedback')}</code></div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="tender-btn" onclick="approveAndPushPatch('${esc(p.repo)}', ${p.pr_number})">✅ Approve &amp; Push</button>
+                <button class="danger" onclick="discardStagedPatch('${esc(p.repo)}', ${p.pr_number})">Discard</button>
+              </div>
+            </div>
+            <details class="clean-acc" style="margin-top:10px;background:var(--bg);"><summary style="padding:8px 12px;font-size:12px;">View Verified Patch Diff</summary><div class="acc-body" style="padding:10px;"><pre style="margin:0;">${esc(p.staged_patch)}</pre></div></details>
+          </div>`;
+      } else if (openFb > 0) {
+        statusBannerHtml = `
+          <div class="status-banner watching">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+              <div>
+                <strong>💬 ${openFb} New Review Comment${openFb === 1 ? '' : 's'} Ready to Tend</strong>
+                <div style="font-size:12.5px;color:var(--muted);margin-top:3px;">Will auto-tend on the next 2m cycle, or click Tend Now to fix immediately.</div>
+              </div>
+              <button class="tender-btn" onclick="triggerPrTend('${esc(p.repo)}', ${p.pr_number}, false)">🛠️ Tend Comments Now</button>
+            </div>
+          </div>`;
+      } else if (p.status_badge === 'FIXED_PUSHED') {
+        statusBannerHtml = `
+          <div class="status-banner pushed">
+            <strong style="color:#6ee7b7;">✅ Verified Fix Pushed${p.last_commit_pushed ? ` (<code>${esc(p.last_commit_pushed.slice(0, 7))}</code>)` : ''}</strong>
+            <div style="font-size:12.5px;margin-top:4px;">${esc(p.last_summary || 'Review comments were fixed, verified locally, and pushed to the PR branch.')}</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Still watching this PR — if new review comments land, Code Tender will tend them automatically.</div>
+          </div>`;
+      } else if (p.status_badge === 'NEEDS_HUMAN') {
+        statusBannerHtml = `
+          <div class="status-banner staged">
+            <strong style="color:#fcd34d;">👤 Comment Needs Your Decision</strong>
+            <div style="font-size:12.5px;margin-top:4px;">${esc(p.last_summary || 'One or more review comments require a product or architecture decision before editing code.')}</div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Still watching this PR every 2 minutes for new review comments.</div>
+          </div>`;
+      } else if (!isWatched) {
+        statusBannerHtml = `
+          <div class="status-banner">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+              <div>
+                <strong>⏸ Watching Paused</strong>
+                <div style="font-size:12.5px;color:var(--muted);margin-top:3px;">New review comments on this PR are ignored until you resume watching.</div>
+              </div>
+              <button class="tender-btn" onclick="setPrWatched('${esc(p.repo)}', ${p.pr_number}, true)">▶ Resume Watching</button>
+            </div>
+          </div>`;
+      } else {
+        statusBannerHtml = `
+          <div class="status-banner watching">
+            <strong>👀 Watching Pull Request for Review Comments</strong>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:4px;">
+              Checked every 2 minutes via lightweight GraphQL (0 AI tokens). As soon as review comments land, Code Tender will triage, fix in your local repo context, verify checks, and push.
+            </div>
+            ${p.last_summary ? `<div style="font-size:12px;margin-top:6px;color:#cbd5e1;">Last note: ${esc(p.last_summary)}</div>` : ''}
+          </div>`;
+      }
+
+      const pendingHtml = pending.length ? `
+        <h3 style="margin-top:16px;">Pending Review Comments (${pending.length})</h3>
+        ${pending.map(item => {
+          const loc = item.path ? (item.line ? `${item.path}:${item.line}` : item.path) : item.kind;
+          const cleaned = cleanReviewBody(item.body);
+          return `<div class="obs-card">
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+              <div><span class="badge b-running">Pending</span> <strong>@${esc(item.author)}</strong> · <code>${esc(loc)}</code></div>
+              <span style="font-size:11.5px;color:var(--muted);">${esc((item.created_at || '').replace('T', ' ').slice(0, 16))}</span>
+            </div>
+            <div style="margin-top:6px;white-space:pre-wrap;font-size:13px;">${esc(cleaned)}</div>
+          </div>`;
+        }).join('')}` : '';
+
       const handledFiltered = handledAll.filter(h => {
         if (TENDER_ITEM_FILTER === 'fixed') return h.action === 'fixed' || h.action === 'already_addressed';
         if (TENDER_ITEM_FILTER === 'explained') return h.action === 'explained_rationale';
@@ -1954,130 +2352,140 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         return true;
       });
 
-      const stagedHtml = p.staged_patch ? `
-        <div class="card highlight-tender" style="margin-top:14px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-            <div>
-              <h3 style="margin-bottom:2px;">📦 Staged Patch Ready for Approval</h3>
-              <div style="font-size:12px;color:var(--muted);">Commit message: <code>${esc(p.staged_commit_message || 'fix: address code review feedback')}</code></div>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="tender-btn" onclick="approveAndPushPatch('${esc(p.repo)}', ${p.pr_number})">✅ Approve &amp; Push Staged Fix</button>
-              <button class="danger" onclick="discardStagedPatch('${esc(p.repo)}', ${p.pr_number})">🗑 Discard Patch</button>
-            </div>
-          </div>
-          <pre>${esc(p.staged_patch)}</pre>
-        </div>` : '';
-
-      const pendingHtml = pending.length ? `
-        <h3 style="margin-top:18px;">Queued / Pending Review Feedback (${pending.length})</h3>
-        ${pending.map(item => {
-          const loc = item.path ? (item.line ? `${item.path}:${item.line}` : item.path) : item.kind;
+      const handledSectionHtml = handledAll.length ? `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px;margin-bottom:8px;">
+          <h3 style="margin:0;">Tended Comments &amp; Replies (${handledAll.length})</h3>
+          ${handledAll.length > 1 ? `
+            <div style="display:flex;gap:5px;flex-wrap:wrap;">
+              <button class="${TENDER_ITEM_FILTER === 'all' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('all')">All (${handledAll.length})</button>
+              <button class="${TENDER_ITEM_FILTER === 'fixed' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('fixed')">Fixed (${handledAll.filter(h => h.action === 'fixed' || h.action === 'already_addressed').length})</button>
+              <button class="${TENDER_ITEM_FILTER === 'explained' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('explained')">Explained (${handledAll.filter(h => h.action === 'explained_rationale').length})</button>
+              <button class="${TENDER_ITEM_FILTER === 'human' ? 'tender-btn' : 'secondary'}" style="padding:3px 9px;font-size:11.5px;" onclick="setTenderItemFilter('human')">Needs Input (${handledAll.filter(h => h.action === 'needs_human').length})</button>
+            </div>` : ''}
+        </div>
+        ${handledFiltered.map(h => {
+          const aClass = (h.action === 'fixed' || h.action === 'already_addressed') ? 'b-fixed' : (h.action === 'explained_rationale' ? 'b-explained' : 'b-changes');
+          const aLabel = h.action === 'fixed' ? 'Fixed' : (h.action === 'already_addressed' ? 'Already Addressed' : (h.action === 'explained_rationale' ? 'Explained' : 'Needs Input'));
+          const loc = h.path ? (h.line ? `${h.path}:${h.line}` : h.path) : 'PR thread';
           return `<div class="obs-card">
-            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-              <div><span class="badge b-running">${esc(item.kind)}</span> <strong>@${esc(item.author)}</strong></div>
-              <span style="font-size:11.5px;color:var(--muted);">${esc(item.created_at)}</span>
+            <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <span class="badge ${aClass}">${aLabel}</span>
+                <strong>@${esc(h.source_author)}</strong>
+                <code style="font-size:11.5px;color:#93c5fd;">${esc(loc)}</code>
+                ${h.resolved_thread ? '<span class="badge b-pass">✓ Resolved</span>' : ''}
+              </div>
+              ${h.commit_sha ? `<code style="font-size:11.5px;color:var(--muted);">${esc(h.commit_sha.slice(0, 7))}</code>` : ''}
             </div>
-            <div style="margin-top:4px;font-size:12px;color:#93c5fd;"><code>${esc(loc)}</code></div>
-            <div style="margin-top:6px;white-space:pre-wrap;">${esc(item.body)}</div>
+            ${(() => { const cs = cleanReviewBody(h.summary); return cs ? `<div style="margin-top:6px;font-size:13px;">${esc(cs)}</div>` : ''; })()}
+            ${(() => { const cr = cleanReviewBody(h.reply_text); return cr ? `<div style="margin-top:6px;font-size:12.5px;color:#a7f3d0;">↳ ${esc(cr)}</div>` : ''; })()}
           </div>`;
         }).join('')}` : '';
 
-      const handledHtml = handledFiltered.map(h => {
-        const aClass = (h.action === 'fixed' || h.action === 'already_addressed') ? 'b-fixed' : (h.action === 'explained_rationale' ? 'b-explained' : 'b-changes');
-        const loc = h.path ? (h.line ? `${h.path}:${h.line}` : h.path) : 'PR discussion';
-        return `<div class="obs-card">
-          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
-            <div>
-              <span class="badge ${aClass}">${esc(h.action)}</span>
-              <strong>@${esc(h.source_author)}</strong>
-              ${h.resolved_thread ? '<span class="badge b-pass">✓ Thread Resolved</span>' : ''}
-              ${h.reply_posted ? '<span class="badge b-muted">✓ Reply Posted</span>' : ''}
-            </div>
-            ${h.commit_sha ? `<span style="font-size:11.5px;color:var(--muted);">Commit: <code>${esc(h.commit_sha.slice(0, 7))}</code></span>` : ''}
-          </div>
-          <div style="margin-top:6px;font-size:12px;color:#93c5fd;"><code>${esc(loc)}</code></div>
-          <div style="margin-top:6px;"><strong>Summary:</strong> ${esc(h.summary)}</div>
-          <div style="margin-top:6px;color:#d1fae5;"><strong>Agent Reply:</strong> ${esc(h.reply_text)}</div>
-        </div>`;
-      }).join('') || '<div style="color:var(--muted);padding:10px 0;">No handled items match this filter yet.</div>';
-
       const learningList = p.learned_rules || [];
-      const learningHtml = learningList.length ? `
-        <div class="card" style="background:rgba(16,185,129,0.08);border-color:rgba(16,185,129,0.35);margin-top:12px;">
-          <h3 style="color:#6ee7b7;margin-bottom:8px;">🧠 Continuous-Learning Rule Adjustments (${learningList.length})</h3>
-          ${learningList.map(lr => `
-            <div style="border-top:1px solid var(--border);padding:8px 0;font-size:12.5px;">
-              <div>
-                <span class="badge b-pass">${esc(lr.scope)}</span>
-                <code>${esc(lr.target)}</code>
-              </div>
-              <div style="margin-top:4px;"><strong>Rule:</strong> ${esc(lr.rule)}</div>
-              ${lr.rationale ? `<div style="margin-top:3px;color:var(--muted);">Rationale: ${esc(lr.rationale)}</div>` : ''}
+      const metaDetailsHtml = (learningList.length || p.local_context_used || p.last_check_cmd_used) ? `
+        <details class="clean-acc" style="background:var(--panel-2);">
+          <summary style="padding:9px 12px;font-size:12.5px;">
+            <span>Context, Local Check Gate${learningList.length ? ` &amp; ${learningList.length} Learned Rule${learningList.length === 1 ? '' : 's'}` : ''}</span>
+          </summary>
+          <div class="acc-body" style="padding:10px 12px;font-size:12px;">
+            <div style="color:var(--muted);">
+              Local Context: <code>${esc(p.local_context_used || 'auto-detected on next run')}</code> ·
+              Check Gate: <code>${esc(p.last_check_cmd_used || 'auto-inferred on next run')}</code> ·
+              Cycles Run: <code>${p.runs_count || 0}</code>
             </div>
-          `).join('')}
-        </div>` : '';
+            ${learningList.map(lr => `
+              <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px;">
+                <span class="badge b-pass">${esc(lr.scope)}</span> <code>${esc(lr.target)}</code> — ${esc(lr.rule)}
+              </div>
+            `).join('')}
+          </div>
+        </details>` : '';
 
       box.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
-          <div>
-            <h2 style="margin-bottom:4px;">${esc(p.repo)} #${p.pr_number} — ${esc(p.title)}</h2>
-            <div style="font-size:12px;color:var(--muted);">
-              Branch: <code>${esc(p.head_ref)}</code> → <code>${esc(p.base_ref)}</code> • Author: <code>${esc(p.author)}</code> • Tended SHA: <code>${esc((p.last_tended_sha || '-').slice(0, 7))}</code>${p.last_commit_pushed ? ` • Pushed: <code>${esc(p.last_commit_pushed.slice(0, 7))}</code>` : ''}
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <h2 style="margin:0;">${esc(p.repo)} #${p.pr_number} — ${esc(p.title)}</h2>
+              <span class="badge ${meta.badgeCls}">${meta.badgeText}</span>
             </div>
             <div style="font-size:12px;color:var(--muted);margin-top:4px;">
-              Local Context: <code>${esc(p.local_context_used || 'PR worktree only')}</code> • Local Check Gate: <code>${esc(p.last_check_cmd_used || 'none')}</code>
+              ${p.head_ref ? `<code>${esc(p.head_ref)}</code> → <code>${esc(p.base_ref)}</code> · ` : ''}
+              ${p.author ? `@${esc(p.author)} · ` : ''}
+              Head: <code>${esc(((p.head_sha || p.last_tended_sha || '-') + '').slice(0, 7))}</code>
             </div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <a class="btn secondary" href="${esc(ghUrl)}" target="_blank" rel="noopener">↗ GitHub PR</a>
-            <button class="secondary" onclick="openPrInReviewer('${esc(p.repo)}', ${p.pr_number})">🔍 View in Multi-Lens Reviewer</button>
-            <button class="secondary" onclick="triggerPrTend('${esc(p.repo)}', ${p.pr_number}, true)">🧪 Stage Patch Only</button>
-            <button class="tender-btn" onclick="triggerPrTend('${esc(p.repo)}', ${p.pr_number}, false)">🛠️ Auto-Tend Now</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <a class="btn secondary" href="${esc(ghUrl)}" target="_blank" rel="noopener">↗ GitHub</a>
+            ${isWatched
+              ? `<button class="secondary" onclick="setPrWatched('${esc(p.repo)}', ${p.pr_number}, false)">⏸ Pause</button>`
+              : `<button class="tender-btn" onclick="setPrWatched('${esc(p.repo)}', ${p.pr_number}, true)">▶ Watch</button>`
+            }
+            <button class="tender-btn" onclick="triggerPrTend('${esc(p.repo)}', ${p.pr_number}, false)">🛠️ Tend Now</button>
+            <button class="secondary" title="Remove from list" onclick="removeWatchedPr('${esc(p.repo)}', ${p.pr_number})">✕</button>
           </div>
         </div>
-        ${p.last_summary ? `<div class="card" style="background:var(--panel-2);margin-top:12px;"><strong>Latest Tender Summary:</strong> ${esc(p.last_summary)}</div>` : ''}
-        ${learningHtml}
-        ${stagedHtml}
-        ${pendingHtml}
-        <h3 style="margin-top:18px;">Handled Review Items &amp; Replies (${handledAll.length})</h3>
-        <div class="filter-bar">
-          <button class="${TENDER_ITEM_FILTER === 'all' ? 'tender-btn' : 'secondary'}" onclick="setTenderItemFilter('all')">All (${handledAll.length})</button>
-          <button class="${TENDER_ITEM_FILTER === 'fixed' ? 'tender-btn' : 'secondary'}" onclick="setTenderItemFilter('fixed')">Fixed (${handledAll.filter(h => h.action === 'fixed' || h.action === 'already_addressed').length})</button>
-          <button class="${TENDER_ITEM_FILTER === 'explained' ? 'tender-btn' : 'secondary'}" onclick="setTenderItemFilter('explained')">Explained (${handledAll.filter(h => h.action === 'explained_rationale').length})</button>
-          <button class="${TENDER_ITEM_FILTER === 'human' ? 'tender-btn' : 'secondary'}" onclick="setTenderItemFilter('human')">Needs Human (${handledAll.filter(h => h.action === 'needs_human').length})</button>
+
+        <div class="stepper">
+          <div class="step-node ${step1Cls}">
+            <div class="step-title">1. Watch Pull</div>
+            <div class="step-sub">${esc(step1Sub)}</div>
+          </div>
+          <div class="step-node ${step2Cls}">
+            <div class="step-title">2. Review Comments</div>
+            <div class="step-sub">${esc(step2Sub)}</div>
+          </div>
+          <div class="step-node ${step3Cls}">
+            <div class="step-title">3. Tend &amp; Push</div>
+            <div class="step-sub">${esc(step3Sub)}</div>
+          </div>
         </div>
-        ${handledHtml}
+
+        ${statusBannerHtml}
+        ${pendingHtml}
+        ${handledSectionHtml}
+        ${metaDetailsHtml}
       `;
     }
 
     function renderTenderReposAndAgents() {
       if (!STATE) return;
-      document.getElementById('tender-repos-tbody').innerHTML = (STATE.repos || []).map(r => `
-        <tr>
-          <td><strong>${esc(r.full_name)}</strong></td>
-          <td><code>${esc(r.default_branch)}</code></td>
-          <td><code>${esc(r.local_repo_path || '(auto-detect)')}</code></td>
-          <td><code>${esc(r.local_check_cmd || '(auto-infer)')}</code></td>
-          <td><span class="badge ${r.enabled ? 'b-pass' : 'b-muted'}">${r.enabled ? 'REVIEWER ON' : 'PAUSED'}</span></td>
-          <td><span class="badge ${r.tender_enabled ? 'b-pass' : 'b-muted'}">${r.tender_enabled ? 'TENDER ON' : 'PAUSED'}</span></td>
-          <td style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="loadRepoIntoForm('tr', '${esc(r.full_name)}')">Edit</button>
-            <button class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepo('${esc(r.full_name)}')">${r.enabled ? 'Pause Rev' : 'Enable Rev'}</button>
-            <button class="${r.tender_enabled ? 'secondary' : 'tender-btn'}" style="padding:4px 8px;font-size:11.5px;" onclick="toggleRepoTender('${esc(r.full_name)}')">
-              ${r.tender_enabled ? 'Pause Tender' : 'Enable Tender'}
-            </button>
-            <button class="danger" style="padding:4px 8px;font-size:11.5px;" onclick="removeRepo('${esc(r.full_name)}')">Remove</button>
-          </td>
-        </tr>
-      `).join('');
+      const reposList = document.getElementById('tender-repos-list');
+      if (reposList) {
+        reposList.innerHTML = (STATE.repos || []).map(r => `
+          <div class="repo-card">
+            <div style="min-width:0;flex:1;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <strong>${esc(r.full_name)}</strong>
+                <code style="font-size:11.5px;color:var(--muted);">${esc(r.default_branch)}</code>
+              </div>
+              <div style="font-size:12px;color:var(--muted);margin-top:3px;">
+                Local M1: <code>${esc(r.local_repo_path || 'auto-detect')}</code> · Check: <code>${esc(r.local_check_cmd || 'auto-infer')}</code>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+              <button class="${r.tender_enabled ? 'tender-btn' : 'secondary'}" style="padding:5px 10px;font-size:11.5px;" onclick="toggleRepoTender('${esc(r.full_name)}')">
+                ${r.tender_enabled ? '✓ Auto-Watch PRs' : 'Auto-Watch Off'}
+              </button>
+              <button class="secondary" style="padding:5px 9px;font-size:11.5px;" onclick="toggleRepo('${esc(r.full_name)}')">
+                ${r.enabled ? '✓ Reviewer On' : 'Reviewer Off'}
+              </button>
+              <button class="secondary" style="padding:5px 9px;font-size:11.5px;" onclick="loadRepoIntoForm('tr', '${esc(r.full_name)}')">Edit</button>
+              <button class="danger" style="padding:5px 9px;font-size:11.5px;" onclick="removeRepo('${esc(r.full_name)}')">✕</button>
+            </div>
+          </div>
+        `).join('') || `<div style="color:var(--muted);font-size:13px;">No repositories configured yet. Add one on the right or paste a PR URL on Watched Pulls.</div>`;
+      }
 
-      const agents = STATE.tender_agents || ['01-tender-triage', '02-tender-fixer', '03-tender-verifier'];
-      document.getElementById('tender-agents-list-box').innerHTML = agents.map(a => `
-        <div class="pr-item ${a === SELECTED_TENDER_AGENT ? 'selected-tender' : ''}" onclick="loadTenderAgentDetail('${esc(a)}')">
-          <strong>${esc(a)}</strong>
-        </div>
-      `).join('');
+      const agentsBox = document.getElementById('tender-agents-list-box');
+      if (agentsBox) {
+        const agents = STATE.tender_agents || ['01-tender-triage', '02-tender-fixer', '03-tender-verifier'];
+        agentsBox.innerHTML = agents.map(a => `
+          <div class="pr-item ${a === SELECTED_TENDER_AGENT ? 'selected-tender' : ''}" onclick="loadTenderAgentDetail('${esc(a)}')">
+            <strong>${esc(a)}</strong>
+          </div>
+        `).join('');
+      }
     }
 
     async function loadTenderAgentDetail(agentId) {
@@ -2140,34 +2548,13 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function selectTenderPr(key) { SELECTED_TENDER_PR_KEY = key; renderTenderPrList(); }
+    function setTenderPrFilter(f) { TENDER_PR_FILTER = f; renderTenderPrList(); }
     function setTenderItemFilter(f) { TENDER_ITEM_FILTER = f; renderTenderPrList(); }
 
     async function triggerTenderPollNow() {
       const res = await api('/api/actions/tend-poll', { method: 'POST', body: '{}' });
-      showToast(res.message || 'Code Tender parallel poll dispatched!');
-      setTimeout(refreshAll, 900);
-    }
-
-    async function triggerQuickTend() {
-      const repo = document.getElementById('qt-repo-custom').value.trim() || document.getElementById('qt-repo-select').value;
-      const pr = parseInt(document.getElementById('qt-pr').value || '0', 10);
-      const stageRaw = document.getElementById('qt-stage-only').value;
-      const leadRaw = document.getElementById('qt-lead-runner').value;
-      if (!repo || !pr) {
-        showToast('Please choose a repository and valid PR number.');
-        return;
-      }
-      const payload = { repo, pr };
-      if (stageRaw === 'true') payload.stage_only = true;
-      if (stageRaw === 'false') payload.stage_only = false;
-      if (leadRaw !== 'auto') payload.lead_runner = leadRaw;
-
-      const res = await api('/api/actions/tend', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
-      showToast(res.message || `Launched Code Tender worker for ${repo}#${pr}`);
-      setTimeout(refreshAll, 900);
+      showToast(res.message || 'Syncing open pulls & review comments...');
+      setTimeout(refreshAll, 1100);
     }
 
     async function triggerPrTend(repo, pr, stageOnly) {
@@ -2175,8 +2562,9 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         method: 'POST',
         body: JSON.stringify({ repo, pr, stage_only: Boolean(stageOnly) })
       });
-      showToast(res.message || `Launched Code Tender for ${repo}#${pr}`);
-      switchTenderTab('tender-live');
+      SELECTED_TENDER_PR_KEY = `${repo}#${pr}`;
+      switchTenderTab('tender-prs');
+      showToast(res.message || `Started tending ${repo}#${pr}`);
       setTimeout(refreshAll, 900);
     }
 
@@ -2185,7 +2573,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         method: 'POST',
         body: JSON.stringify({ repo, pr })
       });
-      showToast(res.message || `Approved and pushed fix for ${repo}#${pr}!`);
+      showToast(res.message || `Pushed fix for ${repo}#${pr}!`);
       refreshAll();
     }
 
@@ -2194,7 +2582,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         method: 'POST',
         body: JSON.stringify({ repo, pr })
       });
-      showToast(res.message || `Discarded staged patch for ${repo}#${pr}`);
+      showToast(res.message || `Discarded draft patch for ${repo}#${pr}`);
       refreshAll();
     }
 
@@ -2217,7 +2605,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         })
       });
       TENDER_SETTINGS_INITIALIZED = false;
-      showToast('Saved Code Tender AI settings!');
+      showToast('Saved Code Tender settings!');
       refreshAll();
     }
 

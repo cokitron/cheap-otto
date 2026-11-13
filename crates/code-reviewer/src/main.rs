@@ -37,7 +37,7 @@ use crate::state::{
     format_interrupted_status_banner, format_queued_status_banner, format_running_status_banner,
     format_superseded_status_banner, is_process_alive_str,
 };
-use crate::tender::execute_tender_pr_cycle;
+use crate::tender::{execute_tender_pr_cycle, sync_watched_prs_from_snapshots};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -1761,8 +1761,16 @@ fn run_tender_poll(
     let gh = GitHubClient::new(&cfg);
     let max_parallel = cfg.tender.max_parallel_prs.clamp(1, 12);
     let mut active_count = ActiveTenderWorkerState::list_active(&state_dir).len();
+    let initial_ledger = LedgerStore::load_or_default(&state_dir)?;
 
-    for repo_cfg in cfg.repos.iter().filter(|r| r.enabled && r.tender_enabled) {
+    for repo_cfg in &cfg.repos {
+        let has_explicit_watched_pr = initial_ledger
+            .tender_pull_requests
+            .values()
+            .any(|t| t.repo.eq_ignore_ascii_case(&repo_cfg.full_name) && t.watched && t.is_open);
+        if !repo_cfg.tender_enabled && !has_explicit_watched_pr {
+            continue;
+        }
         if let Some(filter) = only_repo
             && !repo_cfg.full_name.eq_ignore_ascii_case(filter)
         {
@@ -1773,6 +1781,9 @@ fn run_tender_poll(
             .as_deref()
             .unwrap_or(cfg.accounts.primary.as_str());
         let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+        if !dry_run {
+            let _ = sync_watched_prs_from_snapshots(&cfg, repo_cfg, &state_dir, &snapshots);
+        }
         let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
 
         for snap in &snapshots {
@@ -1790,7 +1801,15 @@ fn run_tender_poll(
 
             let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
             let existing = ledger_snap.tender_pull_requests.get(&key);
-            let allowed = cfg.is_tender_author_allowed(repo_cfg, &snap.author);
+            if existing.is_some_and(|t| !t.watched) {
+                continue;
+            }
+            let explicitly_watched = existing.is_some_and(|t| t.watched);
+            if !repo_cfg.tender_enabled && !explicitly_watched {
+                continue;
+            }
+            let allowed =
+                explicitly_watched || cfg.is_tender_author_allowed(repo_cfg, &snap.author);
             let decision = evaluate_tender_trigger(
                 existing,
                 snap,

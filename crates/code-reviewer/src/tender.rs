@@ -14,7 +14,7 @@ use crate::github::GitHubClient;
 use crate::state::{
     ActiveTenderWorkerState, BOT_TENDER_MARKER, BrainLiveState, LearnedRuleRecord, LedgerStore,
     TenderActionStatus, TenderFeedbackItem, TenderHandledItem, TenderPrSnapshot, TenderPrState,
-    TenderRunStatus, acquire_file_spinlock,
+    TenderRunStatus, TenderTriggerDecision, acquire_file_spinlock, evaluate_tender_trigger,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -967,6 +967,74 @@ pub fn save_tender_kb_file(
     fs::write(workspace_root.join(rel), content).map_err(|e| e.to_string())
 }
 
+/// Synchronizes open PR snapshots from GitHub into `store.tender_pull_requests`:
+/// - Auto-registers open, non-draft, allowed-author PRs on `tender_enabled` repos as `watched = true` (`Idle` / Watching).
+/// - Refreshes title, refs, `head_sha`, `is_open`, and live `open_feedback_count` on existing watched PRs.
+/// - Marks previously open PRs missing from GitHub's open list as `is_open = false`.
+pub fn sync_watched_prs_from_snapshots(
+    cfg: &WorkspaceConfig,
+    repo_cfg: &WatchedRepoConfig,
+    state_dir: &Path,
+    snapshots: &[TenderPrSnapshot],
+) -> Result<(), String> {
+    let open_nums: BTreeSet<u64> = snapshots.iter().map(|s| s.pr_number).collect();
+    let complete_open_window = snapshots.len() < 25;
+    LedgerStore::with_exclusive_lock(state_dir, |store| {
+        if complete_open_window {
+            for tpr in store.tender_pull_requests.values_mut() {
+                if tpr.repo.eq_ignore_ascii_case(&repo_cfg.full_name)
+                    && !open_nums.contains(&tpr.pr_number)
+                {
+                    tpr.is_open = false;
+                    tpr.open_feedback_count = 0;
+                }
+            }
+        }
+
+        for snap in snapshots {
+            let key = LedgerStore::pr_key(&repo_cfg.full_name, snap.pr_number);
+            let actionable_count = match evaluate_tender_trigger(
+                store.tender_pull_requests.get(&key),
+                snap,
+                true,
+                u32::MAX,
+                cfg.tender.ignore_clean_pass_reviews,
+            ) {
+                TenderTriggerDecision::HandleFeedback { items, .. } => items.len(),
+                _ => 0,
+            };
+
+            if let Some(existing) = store.tender_pull_requests.get_mut(&key) {
+                existing.is_open = true;
+                existing.title = snap.title.clone();
+                existing.head_ref = snap.head_ref.clone();
+                existing.base_ref = snap.base_ref.clone();
+                existing.head_sha = Some(snap.head_sha.clone());
+                existing.open_feedback_count = actionable_count;
+            } else if repo_cfg.tender_enabled
+                && !snap.is_draft
+                && !snap.is_fork
+                && cfg.is_tender_author_allowed(repo_cfg, &snap.author)
+            {
+                let mut fresh = TenderPrState::new(
+                    &repo_cfg.full_name,
+                    snap.pr_number,
+                    &snap.title,
+                    &snap.author,
+                    &snap.base_ref,
+                    &snap.head_ref,
+                );
+                fresh.watched = true;
+                fresh.is_open = true;
+                fresh.head_sha = Some(snap.head_sha.clone());
+                fresh.open_feedback_count = actionable_count;
+                store.tender_pull_requests.insert(key, fresh);
+            }
+        }
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct TriagePlanEnvelope {
     #[serde(default)]
@@ -1189,6 +1257,70 @@ pub fn format_tender_reply_body(reply_text: &str, commit_sha: Option<&str>) -> S
         out.push_str(&format!("\n\n- **Commit:** `{}`", short));
     }
     out
+}
+
+/// Strips hidden bot metadata comments (`<!-- ... -->`), `<picture>`/`<img>` badges, and
+/// `<details>` blocks (when surrounding visible text is already present) so UI summaries and
+/// LLM prompt budgets see concise human-readable review text instead of raw HTML state blobs.
+pub fn strip_review_html_noise(raw: &str) -> String {
+    fn strip_span_ci(input: &str, open_pat: &str, close_pat: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        let open_lc = open_pat.to_ascii_lowercase();
+        let close_lc = close_pat.to_ascii_lowercase();
+        while !rest.is_empty() {
+            let lower = rest.to_ascii_lowercase();
+            let Some(start) = lower.find(&open_lc) else {
+                out.push_str(rest);
+                break;
+            };
+            out.push_str(&rest[..start]);
+            let after_open = &rest[start + open_pat.len()..];
+            let after_lower = &lower[start + open_pat.len()..];
+            if let Some(end_rel) = after_lower.find(&close_lc) {
+                rest = &after_open[end_rel + close_pat.len()..];
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    let without_comments = strip_span_ci(raw, "<!--", "-->");
+    let without_pics = strip_span_ci(&without_comments, "<picture", "</picture>");
+    let without_imgs = strip_span_ci(&without_pics, "<img", ">");
+    let without_details = strip_span_ci(&without_imgs, "<details", "</details>");
+    let candidate = if without_details.trim().is_empty() {
+        without_imgs
+    } else {
+        without_details
+    };
+    let cleaned = candidate
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        raw.trim().to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn concise_ui_snippet(raw: &str, max_chars: usize) -> String {
+    let cleaned = strip_review_html_noise(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.chars().count() <= max_chars {
+        cleaned
+    } else {
+        let mut head: String = cleaned.chars().take(max_chars).collect();
+        head.push('…');
+        head
+    }
 }
 
 pub fn load_tender_agent_prompt(workspace_root: &Path, agent_id: &str) -> String {
@@ -1514,6 +1646,9 @@ pub fn execute_tender_pr_cycle(
     tender_state.title = pr_snap.title.clone();
     tender_state.head_ref = pr_snap.head_ref.clone();
     tender_state.base_ref = pr_snap.base_ref.clone();
+    tender_state.is_open = true;
+    tender_state.head_sha = Some(pr_snap.head_sha.clone());
+    tender_state.open_feedback_count = 0;
     tender_state.runs_count = tender_state.runs_count.saturating_add(1);
     tender_state.last_tended_sha = Some(pr_snap.head_sha.clone());
     tender_state.last_tended_feedback_at = Some(latest_feedback_at.to_string());
@@ -1848,7 +1983,7 @@ fn run_triage_agent(
                 "path": item.path,
                 "line": item.line,
                 "review_state": item.review_state,
-                "body": truncate_chars(&item.body, 4_000),
+                "body": truncate_chars(&strip_review_html_noise(&item.body), 4_000),
             })
         })
         .collect();
@@ -1957,7 +2092,7 @@ fn run_parallel_fixer_packets(
                                 "feedback_id": f.feedback_id,
                                 "path": f.path,
                                 "line": f.line,
-                                "body": truncate_chars(&f.body, 2_500),
+                                "body": truncate_chars(&strip_review_html_noise(&f.body), 2_500),
                             })
                         })
                         .collect();
@@ -2094,7 +2229,7 @@ fn run_verifier_agent(
                 "author": i.author,
                 "path": i.path,
                 "line": i.line,
-                "body": truncate_chars(&i.body, 2_000),
+                "body": truncate_chars(&strip_review_html_noise(&i.body), 2_000),
             })
         })
         .collect();
@@ -2219,7 +2354,7 @@ fn build_handled_items(
                 line: fb.line,
                 thread_node_id: fb.thread_node_id.clone(),
                 reply_comment_id: fb.reply_comment_id,
-                summary: truncate_chars(&fb.body, 140).replace('\n', " "),
+                summary: concise_ui_snippet(&fb.body, 160),
                 action,
                 reply_text: reply,
                 commit_sha: None,
@@ -2926,5 +3061,103 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sync_watched_prs_tracks_open_pauses_and_closes() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_watched_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+        };
+
+        let snaps = vec![
+            TenderPrSnapshot {
+                pr_number: 10,
+                title: "Add billing".to_string(),
+                author: cfg.accounts.primary.clone(),
+                is_draft: false,
+                is_fork: false,
+                base_ref: "main".to_string(),
+                head_ref: "feat/billing".to_string(),
+                head_sha: "aaa1111".to_string(),
+                feedback_items: Vec::new(),
+            },
+            TenderPrSnapshot {
+                pr_number: 11,
+                title: "Refactor auth".to_string(),
+                author: cfg.accounts.primary.clone(),
+                is_draft: false,
+                is_fork: false,
+                base_ref: "main".to_string(),
+                head_ref: "feat/auth".to_string(),
+                head_sha: "bbb2222".to_string(),
+                feedback_items: Vec::new(),
+            },
+        ];
+
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &snaps).unwrap();
+        let ledger1 = LedgerStore::load_or_default(&state_dir).unwrap();
+        assert!(ledger1.tender_pull_requests["acme/web#10"].watched);
+        assert!(ledger1.tender_pull_requests["acme/web#10"].is_open);
+        assert!(ledger1.tender_pull_requests["acme/web#11"].watched);
+
+        // User pauses #10; next sync keeps #10 paused and marks #11 closed when #11 merges.
+        LedgerStore::with_exclusive_lock(&state_dir, |store| {
+            store
+                .tender_pull_requests
+                .get_mut("acme/web#10")
+                .unwrap()
+                .watched = false;
+        })
+        .unwrap();
+
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &snaps[..1]).unwrap();
+        let ledger2 = LedgerStore::load_or_default(&state_dir).unwrap();
+        assert!(!ledger2.tender_pull_requests["acme/web#10"].watched);
+        assert!(ledger2.tender_pull_requests["acme/web#10"].is_open);
+        assert!(!ledger2.tender_pull_requests["acme/web#11"].is_open);
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn strips_bot_html_comments_and_details_noise() {
+        let noisy = "<!-- cubic:review-state:v1 {\"blob\":123} -->\n<picture><img src=\"x\" /></picture> **P1:** Validate tenant code format.\n<details><summary>Prompt for AI agents</summary>long duplicate prompt</details>";
+        let cleaned = strip_review_html_noise(noisy);
+        assert_eq!(cleaned, "**P1:** Validate tenant code format.");
     }
 }
