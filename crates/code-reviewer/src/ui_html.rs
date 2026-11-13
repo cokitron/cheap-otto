@@ -551,7 +551,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <div class="card">
             <h2>Add / Update Watched Repository</h2>
             <div class="form-row">
-              <div><label>Owner / Repo</label><input id="r-name" placeholder="acme-org/web-app" /></div>
+              <div><label>Owner / Repo (or GitHub URL)</label><input id="r-name" placeholder="acme-org/web-app or https://github.com/acme-org/web-app" onblur="normalizeRepoInputAndDetect('r')" /></div>
               <div><label>Default Branch</label><input id="r-branch" value="main" /></div>
             </div>
             <div class="form-row">
@@ -566,10 +566,12 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             </div>
             <div class="form-row">
               <div style="grid-column: span 2;">
-                <label>Local App Checkout Path on M1 (Code Tender spawns grounded in this app's deps &amp; docs; blank = auto-detect)</label>
-                <div style="display:flex;gap:8px;">
-                  <input id="r-local-path" placeholder="~/apps/web-app" />
-                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('r')">🔎 Auto-Detect Local Clone</button>
+                <label>Local App Checkout Path on M1 (Code Tender spawns grounded in this app's deps &amp; docs)</label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                  <input id="r-local-path" style="flex:1;min-width:200px;" placeholder="~/apps/web-app" />
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="openM1Browser('r')">📂 Browse M1 Folders</button>
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="loadGitInfoFromPath('r')">📥 Load Git Info</button>
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('r')">🔎 Auto-Detect</button>
                 </div>
               </div>
             </div>
@@ -822,7 +824,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <div class="card">
             <h2>Add / Update Watched Repository</h2>
             <div class="form-row">
-              <div><label>Owner / Repo</label><input id="tr-name" placeholder="acme-org/web-app" /></div>
+              <div><label>Owner / Repo (or GitHub URL)</label><input id="tr-name" placeholder="acme-org/web-app or https://github.com/acme-org/web-app" onblur="normalizeRepoInputAndDetect('tr')" /></div>
               <div><label>Default Branch</label><input id="tr-branch" value="main" /></div>
             </div>
             <div class="form-row">
@@ -838,9 +840,11 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
             <div class="form-row">
               <div style="grid-column: span 2;">
                 <label>Local App Checkout Path on M1 (links node_modules/.venv + injects README/CLAUDE.md context)</label>
-                <div style="display:flex;gap:8px;">
-                  <input id="tr-local-path" placeholder="~/apps/web-app" />
-                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('tr')">🔎 Auto-Detect Local Clone</button>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                  <input id="tr-local-path" style="flex:1;min-width:200px;" placeholder="~/apps/web-app" />
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="openM1Browser('tr')">📂 Browse M1 Folders</button>
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="loadGitInfoFromPath('tr')">📥 Load Git Info</button>
+                  <button type="button" class="secondary" style="white-space:nowrap;" onclick="detectLocalRepo('tr')">🔎 Auto-Detect</button>
                 </div>
               </div>
             </div>
@@ -981,6 +985,32 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         </div>
       </div>
     </aside>
+  </div>
+
+  <div id="m1-browser-modal" class="hidden" style="position:fixed;inset:0;background:rgba(2,6,23,0.78);z-index:100;display:none;align-items:center;justify-content:center;padding:20px;">
+    <div class="card" style="width:min(860px,100%);max-height:86vh;display:flex;flex-direction:column;gap:12px;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <h2 style="margin:0;">📂 Select Repository Folder on M1 (`otto-mac`)</h2>
+        <button class="secondary" style="padding:5px 10px;" onclick="closeM1Browser()">✕ Close</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button id="m1-up-btn" class="secondary" style="padding:6px 10px;" onclick="navigateM1Up()">⬆ Up</button>
+        <input id="m1-path-input" style="flex:1;min-width:240px;" placeholder="~/" onkeydown="if(event.key==='Enter') navigateM1Browser(this.value)" />
+        <button class="secondary" style="padding:6px 12px;" onclick="navigateM1Browser(document.getElementById('m1-path-input').value)">Open Path</button>
+        <button class="tender-btn" style="padding:6px 12px;" onclick="pickM1Folder(document.getElementById('m1-path-input').value)">✓ Use Current Folder</button>
+      </div>
+      <div id="m1-browser-status" style="font-size:12px;color:var(--muted);"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;overflow:hidden;min-height:280px;">
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px;overflow-y:auto;">
+          <h3 style="margin-bottom:8px;">⚡ Discovered Local Git Repos on M1</h3>
+          <div id="m1-discovered-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px;overflow-y:auto;">
+          <h3 style="margin-bottom:8px;">📁 Folders in Current Directory</h3>
+          <div id="m1-dir-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -1522,10 +1552,81 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
       refreshAll();
     }
 
-    async function detectLocalRepo(prefix) {
-      const repo = document.getElementById(prefix + '-name').value.trim();
+    let M1_BROWSER_PREFIX = 'r';
+    let M1_BROWSER_PARENT = null;
+
+    function parseRepoSlugJs(raw) {
+      let s = (raw || '').trim().split('?')[0].split('#')[0].replace(/\/+$/, '');
+      if (!s) return '';
+      if (s.includes('://')) {
+        const idx = s.indexOf('://');
+        const rest = s.slice(idx + 3);
+        const slash = rest.indexOf('/');
+        if (slash >= 0) s = rest.slice(slash + 1);
+      } else if (s.includes(':') && !s.startsWith('/')) {
+        s = s.slice(s.indexOf(':') + 1);
+      } else if (s.startsWith('github.com/')) {
+        s = s.slice('github.com/'.length);
+      } else if (s.startsWith('www.github.com/')) {
+        s = s.slice('www.github.com/'.length);
+      }
+      const parts = s.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        return parts[0] + '/' + parts[1].replace(/\.git$/i, '');
+      }
+      return s.replace(/\.git$/i, '');
+    }
+
+    async function normalizeRepoInputAndDetect(prefix) {
+      const el = document.getElementById(prefix + '-name');
+      const cleaned = parseRepoSlugJs(el.value);
+      if (cleaned && cleaned !== el.value.trim()) {
+        el.value = cleaned;
+      }
+      if (cleaned && cleaned.includes('/') && !document.getElementById(prefix + '-local-path').value.trim()) {
+        await detectLocalRepo(prefix, true);
+      }
+    }
+
+    function applyLocalGitInfo(prefix, info) {
+      if (!info) return;
+      if (info.path) {
+        document.getElementById(prefix + '-local-path').value = info.path;
+      }
+      if (info.full_name) {
+        document.getElementById(prefix + '-name').value = info.full_name;
+      }
+      if (info.default_branch) {
+        document.getElementById(prefix + '-branch').value = info.default_branch;
+      }
+      if (info.inferred_check_cmd && !document.getElementById(prefix + '-check').value.trim()) {
+        document.getElementById(prefix + '-check').value = info.inferred_check_cmd;
+      }
+    }
+
+    async function loadGitInfoFromPath(prefix) {
+      const path = document.getElementById(prefix + '-local-path').value.trim();
+      if (!path) {
+        showToast('Enter or browse an M1 folder path first');
+        return;
+      }
+      try {
+        const info = await api('/api/m1/git-info?path=' + encodeURIComponent(path));
+        applyLocalGitInfo(prefix, info);
+        showToast(info.full_name
+          ? `Loaded ${info.full_name} (${info.default_branch}) from M1 path`
+          : `Folder loaded (no GitHub origin remote found in .git/config)`);
+      } catch (e) {
+        showToast('Load failed: ' + e.message);
+      }
+    }
+
+    async function detectLocalRepo(prefix, silentMiss = false) {
+      const nameEl = document.getElementById(prefix + '-name');
+      const repo = parseRepoSlugJs(nameEl.value);
+      if (repo) nameEl.value = repo;
       if (!repo) {
-        showToast('Enter Owner / Repo first (e.g. owner/repo)');
+        if (!silentMiss) showToast('Enter Owner / Repo or GitHub URL first');
         return;
       }
       try {
@@ -1533,14 +1634,92 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         if (res.local_repo_path) {
           document.getElementById(prefix + '-local-path').value = res.local_repo_path;
         }
+        if (res.default_branch) {
+          document.getElementById(prefix + '-branch').value = res.default_branch;
+        }
         if (res.inferred_check_cmd && !document.getElementById(prefix + '-check').value.trim()) {
           document.getElementById(prefix + '-check').value = res.inferred_check_cmd;
         }
-        showToast(res.local_repo_path
-          ? `Detected local clone: ${res.local_repo_path}`
-          : `No local clone found on M1 for ${repo} (will use PR worktree fallback)`);
+        if (!silentMiss || res.local_repo_path) {
+          showToast(res.local_repo_path
+            ? `Detected local clone: ${res.local_repo_path}`
+            : `No local clone found on M1 for ${repo} (will use PR worktree fallback)`);
+        }
       } catch (e) {
-        showToast('Detect failed: ' + e.message);
+        if (!silentMiss) showToast('Detect failed: ' + e.message);
+      }
+    }
+
+    async function openM1Browser(prefix) {
+      M1_BROWSER_PREFIX = prefix;
+      const modal = document.getElementById('m1-browser-modal');
+      modal.classList.remove('hidden');
+      modal.style.display = 'flex';
+      const initial = document.getElementById(prefix + '-local-path').value.trim();
+      await navigateM1Browser(initial);
+    }
+
+    function closeM1Browser() {
+      const modal = document.getElementById('m1-browser-modal');
+      modal.classList.add('hidden');
+      modal.style.display = 'none';
+    }
+
+    function navigateM1Up() {
+      if (M1_BROWSER_PARENT) navigateM1Browser(M1_BROWSER_PARENT);
+    }
+
+    async function navigateM1Browser(path) {
+      const status = document.getElementById('m1-browser-status');
+      status.textContent = 'Scanning M1 folder...';
+      try {
+        const q = path ? ('?path=' + encodeURIComponent(path)) : '';
+        const d = await api('/api/m1/browse' + q);
+        document.getElementById('m1-path-input').value = d.current_path || '';
+        M1_BROWSER_PARENT = d.parent_path || null;
+        document.getElementById('m1-up-btn').disabled = !M1_BROWSER_PARENT;
+
+        const cur = d.current || {};
+        status.innerHTML = cur.is_git_repo
+          ? `<span class="badge b-pass">GIT REPO</span> <code>${esc(cur.full_name || cur.origin_url || 'no origin')}</code> • branch <code>${esc(cur.default_branch || 'main')}</code>`
+          : `Browsing <code>${esc(d.current_path || '')}</code>`;
+
+        document.getElementById('m1-discovered-list').innerHTML = (d.discovered_repos || []).map(r => `
+          <div class="pr-item" style="margin:0;padding:8px 10px;" onclick="pickM1Folder('${esc(r.path.replace(/'/g, "\\'"))}')">
+            <div style="display:flex;justify-content:space-between;gap:6px;align-items:center;">
+              <strong>${esc(r.full_name || r.name)}</strong>
+              <span class="badge b-pass">${esc(r.default_branch || 'main')}</span>
+            </div>
+            <div style="font-size:11.5px;color:var(--muted);margin-top:2px;"><code>${esc(r.path)}</code></div>
+          </div>
+        `).join('') || '<div style="color:var(--muted);font-size:12px;">No git clones auto-discovered in standard roots; browse on the right.</div>';
+
+        document.getElementById('m1-dir-list').innerHTML = (d.directories || []).map(dir => `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--panel-2);">
+            <div style="cursor:pointer;flex:1;min-width:0;" onclick="navigateM1Browser('${esc(dir.path.replace(/'/g, "\\'"))}')">
+              <div style="font-size:13px;font-weight:600;">
+                ${dir.is_git_repo ? '📦' : '📁'} ${esc(dir.name)}
+                ${dir.full_name ? `<span class="badge b-pass" style="margin-left:4px;">${esc(dir.full_name)}</span>` : ''}
+              </div>
+            </div>
+            <button type="button" class="secondary" style="padding:4px 8px;font-size:11.5px;" onclick="pickM1Folder('${esc(dir.path.replace(/'/g, "\\'"))}')">✓ Select</button>
+          </div>
+        `).join('') || '<div style="color:var(--muted);font-size:12px;">Empty folder.</div>';
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function pickM1Folder(path) {
+      try {
+        const info = await api('/api/m1/git-info?path=' + encodeURIComponent(path));
+        applyLocalGitInfo(M1_BROWSER_PREFIX, info);
+        closeM1Browser();
+        showToast(info.full_name
+          ? `Loaded ${info.full_name} (${info.default_branch}) from M1!`
+          : `Selected ${info.path} (enter Owner / Repo if no GitHub origin)`);
+      } catch (e) {
+        showToast('Could not read M1 folder: ' + e.message);
       }
     }
 
@@ -1561,9 +1740,11 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     }
 
     async function submitWatchedRepoForm(prefix) {
-      const fullName = document.getElementById(prefix + '-name').value.trim();
-      if (!fullName) {
-        showToast('Please enter Owner / Repo');
+      const nameEl = document.getElementById(prefix + '-name');
+      const fullName = parseRepoSlugJs(nameEl.value);
+      nameEl.value = fullName;
+      if (!fullName || !fullName.includes('/')) {
+        showToast('Enter Owner / Repo, a GitHub URL, or browse an M1 Git folder first');
         return;
       }
       const payload = {
@@ -1578,9 +1759,13 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         review_event_policy: document.getElementById(prefix + '-ev-pol').value,
         gdrive_folder_id: document.getElementById(prefix + '-drive').value.trim() || null
       };
-      await api('/api/repos/add', { method: 'POST', body: JSON.stringify(payload) });
-      showToast(`Saved watched repo ${payload.full_name}`);
-      refreshAll();
+      try {
+        await api('/api/repos/add', { method: 'POST', body: JSON.stringify(payload) });
+        showToast(`Saved watched repo ${payload.full_name}`);
+        refreshAll();
+      } catch (e) {
+        showToast('Save failed: ' + e.message);
+      }
     }
 
     async function toggleRepo(full_name) {

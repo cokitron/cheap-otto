@@ -8,7 +8,7 @@ use crate::brains::{
 };
 use crate::config::{
     AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
-    home_dir, repo_fs_slug,
+    home_dir, normalize_repo_input, repo_fs_slug,
 };
 use crate::github::GitHubClient;
 use crate::state::{
@@ -162,9 +162,8 @@ pub fn resolve_local_checkout_dir(repo_cfg: &WatchedRepoConfig) -> Option<PathBu
 }
 
 /// Scans standard local workspace roots (`~/`, `~/otto-workspaces`, `~/projects`, `~/repos`, `~/code`)
-/// up to 2 levels deep for a full non-bare git checkout matching `owner/repo`.
-/// Explicitly skips hidden directories and macOS TCC/system folders so background daemons never stall.
-pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
+/// up to 2 levels deep for full non-bare git checkouts, skipping dotfiles and macOS TCC/system folders.
+fn collect_local_repo_candidates() -> Vec<PathBuf> {
     let home = home_dir();
     let skip_home_dirs = [
         "Library",
@@ -188,6 +187,7 @@ pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
     ];
 
     let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
     for (root, is_home_root) in roots {
         if !root.is_dir() {
             continue;
@@ -208,7 +208,9 @@ pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
                 continue;
             }
             if p.join(".git").is_dir() {
-                candidates.push(p);
+                if seen.insert(p.clone()) {
+                    candidates.push(p);
+                }
                 continue;
             }
             if let Ok(sub_entries) = fs::read_dir(&p) {
@@ -222,17 +224,23 @@ pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
                         continue;
                     }
                     let sp = sub.path();
-                    if sp.is_dir() && sp.join(".git").is_dir() {
+                    if sp.is_dir() && sp.join(".git").is_dir() && seen.insert(sp.clone()) {
                         candidates.push(sp);
                     }
                 }
             }
         }
     }
+    candidates
+}
 
-    for dir in candidates {
+/// Finds a local non-bare git checkout matching `owner/repo` (or Git URL).
+pub fn detect_local_repo_checkout(full_name: &str) -> Option<PathBuf> {
+    let norm_target =
+        normalize_repo_input(full_name).unwrap_or_else(|_| full_name.trim().to_string());
+    for dir in collect_local_repo_candidates() {
         if let Some(origin) = read_git_origin_url(&dir)
-            && remote_url_matches_repo(&origin, full_name)
+            && remote_url_matches_repo(&origin, &norm_target)
         {
             return Some(dir);
         }
@@ -257,6 +265,152 @@ fn read_git_origin_url(repo_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn detect_local_default_branch(repo_dir: &Path) -> String {
+    let git_dir = repo_dir.join(".git");
+    if let Ok(sym) = fs::read_to_string(git_dir.join("refs/remotes/origin/HEAD"))
+        && let Some(branch) = sym.trim().strip_prefix("ref: refs/remotes/origin/")
+        && !branch.trim().is_empty()
+    {
+        return branch.trim().to_string();
+    }
+    if git_dir.join("refs/remotes/origin/main").is_file() {
+        return "main".to_string();
+    }
+    if git_dir.join("refs/remotes/origin/master").is_file() {
+        return "master".to_string();
+    }
+    if let Ok(head) = fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(branch) = head.trim().strip_prefix("ref: refs/heads/")
+        && !branch.trim().is_empty()
+    {
+        return branch.trim().to_string();
+    }
+    "main".to_string()
+}
+
+fn build_local_repo_summary(dir: &Path) -> serde_json::Value {
+    let is_git = dir.join(".git").exists();
+    let origin_url = if is_git {
+        read_git_origin_url(dir)
+    } else {
+        None
+    };
+    let full_name = origin_url
+        .as_deref()
+        .and_then(|u| normalize_repo_input(u).ok());
+    let default_branch = if is_git {
+        detect_local_default_branch(dir)
+    } else {
+        "main".to_string()
+    };
+    let inferred_check_cmd = infer_local_check_cmd(dir);
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    serde_json::json!({
+        "name": name,
+        "path": dir.display().to_string(),
+        "is_git_repo": is_git,
+        "origin_url": origin_url,
+        "full_name": full_name,
+        "default_branch": default_branch,
+        "inferred_check_cmd": inferred_check_cmd,
+    })
+}
+
+/// Inspects an arbitrary M1 local directory for Git origin URL, default branch, and check command.
+pub fn inspect_local_git_repo(raw_path: &str) -> Result<serde_json::Value, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    let expanded = expand_tilde(trimmed);
+    if !expanded.is_dir() {
+        return Err(format!(
+            "directory not found on M1: `{}`",
+            expanded.display()
+        ));
+    }
+    Ok(build_local_repo_summary(&expanded))
+}
+
+/// Lists subdirectories inside an M1 folder (defaulting to `$HOME`) plus auto-discovered local git repositories.
+pub fn browse_m1_directories(raw_path: Option<&str>) -> Result<serde_json::Value, String> {
+    let home = home_dir();
+    let target = raw_path
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_tilde)
+        .unwrap_or_else(|| home.clone());
+    if !target.is_dir() {
+        return Err(format!("directory not found on M1: `{}`", target.display()));
+    }
+
+    let skip_system = [
+        "Library",
+        "Applications",
+        "Movies",
+        "Music",
+        "Pictures",
+        "Public",
+    ];
+    let is_home = target == home;
+
+    let mut subdirs: Vec<serde_json::Value> = Vec::new();
+    let entries = fs::read_dir(&target).map_err(|e| format!("cannot read directory: {}", e))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || (is_home && skip_system.contains(&name.as_str())) {
+            continue;
+        }
+        subdirs.push(build_local_repo_summary(&p));
+        if subdirs.len() >= 300 {
+            break;
+        }
+    }
+    subdirs.sort_by(|a, b| {
+        let ag = a["is_git_repo"].as_bool().unwrap_or(false);
+        let bg = b["is_git_repo"].as_bool().unwrap_or(false);
+        bg.cmp(&ag).then_with(|| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_ascii_lowercase())
+        })
+    });
+
+    let mut discovered_repos: Vec<serde_json::Value> = collect_local_repo_candidates()
+        .into_iter()
+        .map(|d| build_local_repo_summary(&d))
+        .filter(|v| v["full_name"].as_str().is_some())
+        .collect();
+    discovered_repos.sort_by(|a, b| {
+        a["full_name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["full_name"].as_str().unwrap_or(""))
+    });
+
+    let parent_path = target.parent().map(|p| p.display().to_string());
+    let current = build_local_repo_summary(&target);
+
+    Ok(serde_json::json!({
+        "home_path": home.display().to_string(),
+        "current_path": target.display().to_string(),
+        "parent_path": parent_path,
+        "current": current,
+        "directories": subdirs,
+        "discovered_repos": discovered_repos,
+    }))
 }
 
 /// Links heavy gitignored local dependencies (`node_modules`, `.venv`, etc.) from the user's local checkout

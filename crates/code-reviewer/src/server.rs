@@ -6,7 +6,7 @@ use crate::brains::{
 };
 use crate::config::{
     AccountPolicy, CliRunner, ReviewEventPolicy, TenderDeliveryMode, WatchedRepoConfig,
-    WorkspaceConfig, expand_tilde, home_dir, repo_fs_slug,
+    WorkspaceConfig, expand_tilde, home_dir, normalize_repo_input, repo_fs_slug,
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
@@ -14,9 +14,9 @@ use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderRunStatus, TrackedPrState,
 };
 use crate::tender::{
-    TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch,
-    detect_local_repo_checkout, infer_local_check_cmd, load_tender_kb_payload,
-    save_tender_agent_notes, save_tender_kb_file,
+    TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch, browse_m1_directories,
+    detect_local_repo_checkout, infer_local_check_cmd, inspect_local_git_repo,
+    load_tender_kb_payload, save_tender_agent_notes, save_tender_kb_file,
 };
 use crate::ui_html::DASHBOARD_HTML;
 use serde::Deserialize;
@@ -360,15 +360,29 @@ fn dispatch_api(
             Ok(json!({ "ok": true }))
         }
         ("GET", "/api/repos/detect-local") => {
-            let repo = parse_query_param(query, "repo")
+            let raw_repo = parse_query_param(query, "repo")
                 .ok_or_else(|| "missing `repo` query parameter".to_string())?;
+            let repo = normalize_repo_input(&raw_repo).unwrap_or(raw_repo);
             let detected = detect_local_repo_checkout(&repo);
             let inferred_check_cmd = detected.as_deref().and_then(infer_local_check_cmd);
+            let git_info = detected
+                .as_deref()
+                .and_then(|p| inspect_local_git_repo(&p.display().to_string()).ok());
             Ok(json!({
                 "repo": repo,
                 "local_repo_path": detected.map(|p| p.display().to_string()),
                 "inferred_check_cmd": inferred_check_cmd,
+                "default_branch": git_info.as_ref().and_then(|v| v["default_branch"].as_str()),
             }))
+        }
+        ("GET", "/api/m1/browse") => {
+            let path = parse_query_param(query, "path");
+            browse_m1_directories(path.as_deref())
+        }
+        ("GET", "/api/m1/git-info") => {
+            let path = parse_query_param(query, "path")
+                .ok_or_else(|| "missing `path` query parameter".to_string())?;
+            inspect_local_git_repo(&path)
         }
         ("POST", "/api/actions/poll") => {
             spawn_detached_self(&ctx.workspace, "sched-pr-poller.log", &["poll"])?;

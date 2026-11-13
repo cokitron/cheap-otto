@@ -396,8 +396,8 @@ impl WorkspaceConfig {
         }
     }
 
-    pub fn upsert_repo(&mut self, entry: WatchedRepoConfig) -> Result<(), ConfigError> {
-        validate_repo_slug(&entry.full_name)?;
+    pub fn upsert_repo(&mut self, mut entry: WatchedRepoConfig) -> Result<(), ConfigError> {
+        entry.full_name = normalize_repo_input(&entry.full_name)?;
         if let Some(existing) = self
             .repos
             .iter_mut()
@@ -416,6 +416,51 @@ impl WorkspaceConfig {
             .retain(|r| !r.full_name.eq_ignore_ascii_case(full_name));
         self.repos.len() != before
     }
+}
+
+/// Accepts `owner/repo`, `https://github.com/owner/repo(.git)`, `git@github.com:owner/repo(.git)`,
+/// or `ssh://git@github.com/owner/repo(.git)` and returns canonical `owner/repo`.
+pub fn normalize_repo_input(raw: &str) -> Result<String, ConfigError> {
+    let mut s = raw.trim();
+    if let Some((before_q, _)) = s.split_once('?') {
+        s = before_q;
+    }
+    if let Some((before_hash, _)) = s.split_once('#') {
+        s = before_hash;
+    }
+    s = s.trim_end_matches('/');
+
+    if let Some((_, rest)) = s.split_once("://") {
+        // https://github.com/owner/repo or ssh://git@github.com/owner/repo
+        if let Some((_, path)) = rest.split_once('/') {
+            s = path;
+        }
+    } else if s.contains(':') && !s.starts_with('/') {
+        // git@github.com:owner/repo.git
+        if let Some((_, path)) = s.split_once(':') {
+            s = path;
+        }
+    } else if let Some(rest) = s
+        .strip_prefix("github.com/")
+        .or_else(|| s.strip_prefix("www.github.com/"))
+    {
+        s = rest;
+    }
+
+    // If a full PR/tree URL was pasted (e.g. https://github.com/owner/repo/pull/12), keep first 2 segments
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        let owner = parts[0].trim();
+        let repo = parts[1].trim();
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        let candidate = format!("{}/{}", owner, repo);
+        validate_repo_slug(&candidate)?;
+        return Ok(candidate);
+    }
+
+    let stripped = s.strip_suffix(".git").unwrap_or(s);
+    validate_repo_slug(stripped)?;
+    Ok(stripped.to_string())
 }
 
 pub fn validate_repo_slug(slug: &str) -> Result<(&str, &str), ConfigError> {
@@ -574,5 +619,30 @@ mod tests {
 
         cfg.tender.allowed_authors = vec!["*".to_string()];
         assert!(cfg.is_tender_author_allowed(&repo, "random-stranger"));
+    }
+
+    #[test]
+    fn normalizes_git_urls_and_slugs() {
+        assert_eq!(
+            normalize_repo_input("acme-org/web-app").unwrap(),
+            "acme-org/web-app"
+        );
+        assert_eq!(
+            normalize_repo_input("https://github.com/acme-org/web-app.git").unwrap(),
+            "acme-org/web-app"
+        );
+        assert_eq!(
+            normalize_repo_input("https://github.com/acme-org/web-app/pull/42").unwrap(),
+            "acme-org/web-app"
+        );
+        assert_eq!(
+            normalize_repo_input("git@github.com:acme-org/web-app.git").unwrap(),
+            "acme-org/web-app"
+        );
+        assert_eq!(
+            normalize_repo_input("ssh://git@github.com/acme-org/web-app.git/").unwrap(),
+            "acme-org/web-app"
+        );
+        assert!(normalize_repo_input("not-a-repo").is_err());
     }
 }
