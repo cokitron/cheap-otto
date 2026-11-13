@@ -15,11 +15,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub(crate) mod base64_basic {
@@ -1253,26 +1253,105 @@ pub fn resolve_intercalated_runners(
     }
 }
 
+const AUTH_PROBE_TIMEOUT_SECS: u64 = 10;
+const AGENT_REVIEW_TIMEOUT_SECS: u64 = 600;
+
+/// Runs a child command with bounded wall-clock timeout while draining stdout/stderr
+/// on separate threads so neither full pipes nor stalled agent CLIs can hang forever.
+pub(crate) fn run_command_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output, String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {label}: {e}"))?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_pipe {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut err) = stderr_pipe {
+            let _ = err.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+                    let stderr_tail =
+                        truncate_chars(String::from_utf8_lossy(&stderr_bytes).trim(), 400);
+                    let _ = stdout_handle.join();
+                    return Err(if stderr_tail.is_empty() {
+                        format!("{label} timed out after {}s", timeout.as_secs())
+                    } else {
+                        format!(
+                            "{label} timed out after {}s ({stderr_tail})",
+                            timeout.as_secs()
+                        )
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!("{label} wait failed: {e}"));
+            }
+        }
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 pub fn is_runner_authenticated(runner: CliRunner) -> bool {
     match runner {
         CliRunner::Claude => {
-            let Ok(out) = Command::new(claude_binary())
-                .args(["auth", "status"])
-                .stdin(Stdio::null())
-                .output()
-            else {
+            let mut cmd = Command::new(claude_binary());
+            cmd.args(["auth", "status"]).stdin(Stdio::null());
+            let Ok(out) = run_command_with_timeout(
+                cmd,
+                Duration::from_secs(AUTH_PROBE_TIMEOUT_SECS),
+                "claude auth status",
+            ) else {
                 return false;
             };
             let s = String::from_utf8_lossy(&out.stdout);
             s.contains("\"loggedIn\": true") || s.contains("\"loggedIn\":true")
         }
         CliRunner::Agy => {
-            // Fast zero-token model catalog probe (<0.5s).
-            let Ok(out) = Command::new(agy_binary())
-                .args(["models"])
-                .stdin(Stdio::null())
-                .output()
-            else {
+            // Fast zero-token model catalog probe with hard wall-clock timeout.
+            let mut cmd = Command::new(agy_binary());
+            cmd.args(["models"]).stdin(Stdio::null());
+            let Ok(out) = run_command_with_timeout(
+                cmd,
+                Duration::from_secs(AUTH_PROBE_TIMEOUT_SECS),
+                "agy models",
+            ) else {
                 return false;
             };
             let combined = format!(
@@ -1333,6 +1412,8 @@ fn invoke_agent_cli(
                 prompt,
                 "--effort",
                 effort,
+                "--print-timeout",
+                "600s",
                 "--dangerously-skip-permissions",
                 "--disable-slash-commands",
                 "--output-format",
@@ -1345,14 +1426,16 @@ fn invoke_agent_cli(
         }
     };
 
-    let output = cmd
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| BrainError::RunnerFailed {
-            runner: runner.slug().to_string(),
-            details: e.to_string(),
-        })?;
+    cmd.current_dir(workdir).stdin(Stdio::null());
+    let output = run_command_with_timeout(
+        cmd,
+        Duration::from_secs(AGENT_REVIEW_TIMEOUT_SECS),
+        &format!("{} review", runner.slug()),
+    )
+    .map_err(|details| BrainError::RunnerFailed {
+        runner: runner.slug().to_string(),
+        details,
+    })?;
 
     if !output.status.success() {
         return Err(BrainError::RunnerFailed {
@@ -1507,17 +1590,30 @@ pub fn parse_json_from_llm<T: serde::de::DeserializeOwned>(raw: &str) -> Result<
             if let Ok(v) = serde_json::from_str::<T>(candidate) {
                 return Ok(v);
             }
+            if let Some(Ok(v)) = serde_json::Deserializer::from_str(candidate)
+                .into_iter::<T>()
+                .next()
+            {
+                return Ok(v);
+            }
         }
     }
 
-    if let (Some(first_brace), Some(last_brace)) = (trimmed.find('{'), trimmed.rfind('}'))
-        && first_brace < last_brace
-    {
-        let slice = &trimmed[first_brace..=last_brace];
-        return serde_json::from_str::<T>(slice).map_err(|e| e.to_string());
+    let mut last_err = None;
+    for (idx, ch) in trimmed.char_indices() {
+        if ch == '{' {
+            match serde_json::Deserializer::from_str(&trimmed[idx..])
+                .into_iter::<T>()
+                .next()
+            {
+                Some(Ok(v)) => return Ok(v),
+                Some(Err(e)) => last_err = Some(e.to_string()),
+                None => {}
+            }
+        }
     }
 
-    Err("no JSON object found in model output".to_string())
+    Err(last_err.unwrap_or_else(|| "no JSON object found in model output".to_string()))
 }
 
 pub(crate) fn run_git(cwd: Option<&Path>, args: &[&str]) -> Result<String, BrainError> {
@@ -1647,5 +1743,23 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(a_shards.len(), 1);
+    }
+
+    #[test]
+    fn extracts_first_valid_json_ignoring_trailing_text_and_braces() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Mini {
+            packet_id: String,
+            ok: bool,
+        }
+        let raw = "Done!\n{\"packet_id\":\"pkt-2\",\"ok\":true}\nExtra trailing text with {other: brace}.";
+        let parsed: Mini = parse_json_from_llm(raw).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            Mini {
+                packet_id: "pkt-2".to_string(),
+                ok: true
+            }
+        );
     }
 }

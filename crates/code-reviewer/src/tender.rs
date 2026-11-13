@@ -4,7 +4,7 @@
 use crate::brains::{
     BrainError, RunnerPair, agy_binary, append_kb_entry, base64_basic::encode_basic_auth,
     claude_binary, git_binary, load_living_docs_bundle, notify_pixel_hook, parse_json_from_llm,
-    resolve_intercalated_runners, run_git, truncate_chars,
+    resolve_intercalated_runners, run_command_with_timeout, run_git, truncate_chars,
 };
 use crate::config::{
     AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
@@ -23,6 +23,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub const TENDER_AGENTS: &[&str] = &["01-tender-triage", "02-tender-fixer", "03-tender-verifier"];
 
@@ -446,16 +447,26 @@ fn link_local_dependencies_into_worktree(local_checkout: &Path, workdir: &Path) 
         if !src.is_dir() || dst.exists() {
             continue;
         }
-        // Only link paths that git explicitly ignores so `git status` and `git add -A` never stage them.
-        let ignored = Command::new(git_binary())
-            .args(["-C", &workdir.to_string_lossy(), "check-ignore", "-q"])
-            .arg(&rel)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !ignored {
+        let rel_norm = rel.to_string_lossy().replace('\\', "/");
+        let rel_dir_probe = format!("{rel_norm}/");
+        // Check with trailing `/` as well because `.gitignore` entries like `node_modules/`
+        // do not match non-directory probes before the symlink exists.
+        let check_ignore = |probe: &str| {
+            Command::new(git_binary())
+                .args([
+                    "-C",
+                    &workdir.to_string_lossy(),
+                    "check-ignore",
+                    "-q",
+                    probe,
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !check_ignore(&rel_dir_probe) && !check_ignore(&rel_norm) {
             continue;
         }
         if let Some(parent) = dst.parent() {
@@ -463,13 +474,210 @@ fn link_local_dependencies_into_worktree(local_checkout: &Path, workdir: &Path) 
         }
         #[cfg(unix)]
         {
-            if std::os::unix::fs::symlink(&src, &dst).is_ok() {
-                linked.push(rel.to_string_lossy().to_string());
+            let is_node_modules = rel.file_name().is_some_and(|n| n == "node_modules");
+            let linked_ok = if is_node_modules {
+                populate_node_modules_with_workspace_retarget(
+                    &src,
+                    &dst,
+                    local_checkout,
+                    workdir,
+                    rel_norm == "node_modules",
+                )
+            } else {
+                std::os::unix::fs::symlink(&src, &dst).is_ok()
+            };
+            if linked_ok {
+                // Directory symlinks (`120000`) do not match trailing-slash `.gitignore` rules,
+                // so also record `/rel` in git's local `info/exclude` to keep `git add -A` safe.
+                exclude_linked_path_in_worktree(workdir, &rel_norm);
+                linked.push(rel_norm);
             }
         }
     }
 
     linked
+}
+
+#[cfg(unix)]
+fn retargeted_worktree_target(
+    src_item: &Path,
+    canon_local: &Path,
+    workdir: &Path,
+) -> Option<PathBuf> {
+    let meta = fs::symlink_metadata(src_item).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let canon_target = fs::canonicalize(src_item).ok()?;
+    let rel = canon_target.strip_prefix(canon_local).ok()?;
+    let first = rel.components().next()?;
+    if first.as_os_str() == "node_modules" {
+        return None;
+    }
+    let worktree_target = workdir.join(rel);
+    if worktree_target.exists() {
+        Some(worktree_target)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn populate_node_modules_with_workspace_retarget(
+    src_nm: &Path,
+    dst_nm: &Path,
+    local_checkout: &Path,
+    workdir: &Path,
+    link_root_workspaces: bool,
+) -> bool {
+    if fs::create_dir_all(dst_nm).is_err() {
+        return false;
+    }
+    let canon_local =
+        fs::canonicalize(local_checkout).unwrap_or_else(|_| local_checkout.to_path_buf());
+    let Ok(entries) = fs::read_dir(src_nm) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let src_item = entry.path();
+        let dst_item = dst_nm.join(&name);
+        if fs::symlink_metadata(&dst_item).is_ok() {
+            continue;
+        }
+
+        let name_str = name.to_string_lossy();
+        let is_plain_scope_dir =
+            name_str.starts_with('@') && fs::symlink_metadata(&src_item).is_ok_and(|m| m.is_dir());
+        if is_plain_scope_dir {
+            let scope_children: Vec<PathBuf> = fs::read_dir(&src_item)
+                .ok()
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            let has_workspace_link = scope_children
+                .iter()
+                .any(|p| retargeted_worktree_target(p, &canon_local, workdir).is_some());
+            if has_workspace_link {
+                if fs::create_dir_all(&dst_item).is_ok() {
+                    for child_src in scope_children {
+                        if let Some(child_name) = child_src.file_name() {
+                            let target =
+                                retargeted_worktree_target(&child_src, &canon_local, workdir)
+                                    .unwrap_or_else(|| child_src.clone());
+                            let _ = std::os::unix::fs::symlink(target, dst_item.join(child_name));
+                        }
+                    }
+                }
+            } else {
+                let _ = std::os::unix::fs::symlink(&src_item, &dst_item);
+            }
+            continue;
+        }
+
+        let target =
+            retargeted_worktree_target(&src_item, &canon_local, workdir).unwrap_or(src_item);
+        let _ = std::os::unix::fs::symlink(target, &dst_item);
+    }
+
+    if link_root_workspaces {
+        link_missing_workdir_workspaces(workdir, dst_nm);
+    }
+    true
+}
+
+#[cfg(unix)]
+fn link_missing_workdir_workspaces(workdir: &Path, dst_nm: &Path) {
+    let mut dirs_to_check = Vec::new();
+    for root in ["apps", "packages", "tooling"] {
+        let root_path = workdir.join(root);
+        let Ok(entries) = fs::read_dir(&root_path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() || entry.file_name() == "node_modules" {
+                continue;
+            }
+            dirs_to_check.push(p.clone());
+            if let Ok(sub) = fs::read_dir(&p) {
+                for sub_entry in sub.flatten() {
+                    let sp = sub_entry.path();
+                    if sp.is_dir() && sub_entry.file_name() != "node_modules" {
+                        dirs_to_check.push(sp);
+                    }
+                }
+            }
+        }
+    }
+
+    for pkg_dir in dirs_to_check {
+        let pkg_json = pkg_dir.join("package.json");
+        let Ok(raw) = fs::read_to_string(&pkg_json) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(pkg_name) = parsed.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let pkg_name = pkg_name.trim();
+        if pkg_name.is_empty() || pkg_name.contains("..") || pkg_name.starts_with('/') {
+            continue;
+        }
+        let target_link = dst_nm.join(pkg_name);
+        if fs::symlink_metadata(&target_link).is_ok() {
+            continue;
+        }
+        if let Some(parent) = target_link.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = std::os::unix::fs::symlink(&pkg_dir, &target_link);
+    }
+}
+
+fn exclude_linked_path_in_worktree(workdir: &Path, rel_norm: &str) {
+    let Ok(out) = Command::new(git_binary())
+        .args([
+            "-C",
+            &workdir.to_string_lossy(),
+            "rev-parse",
+            "--git-path",
+            "info/exclude",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let raw_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw_path.is_empty() {
+        return;
+    }
+    let exclude_path = if Path::new(&raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        workdir.join(raw_path)
+    };
+    if let Some(parent) = exclude_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let entry = format!("/{}", rel_norm.trim_start_matches('/'));
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == entry) {
+        return;
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&entry);
+    updated.push('\n');
+    let _ = fs::write(&exclude_path, updated);
 }
 
 /// Automatically infers a fast, real verification command (`typecheck`, `lint`, `test`) for a repo when
@@ -2153,22 +2361,145 @@ fn post_replies_and_resolve_threads(
     );
 }
 
+const LOCAL_CHECK_GATE_TIMEOUT_SECS: u64 = 600;
+const TENDER_CLI_TIMEOUT_SECS: u64 = 720;
+
+fn extract_node_major_from_spec(spec: &str) -> Option<u32> {
+    let mut digits = String::new();
+    for ch in spec.trim().chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse::<u32>().ok().filter(|&v| v >= 10)
+}
+
+/// Reads `.nvmrc`, `.node-version`, or `package.json` (`devEngines.runtime` / `engines.node`)
+/// to determine the project's expected Node.js major version.
+pub(crate) fn parse_requested_node_major(workdir: &Path) -> Option<u32> {
+    for pin_file in [".nvmrc", ".node-version"] {
+        let p = workdir.join(pin_file);
+        if let Ok(raw) = fs::read_to_string(&p)
+            && let Some(major) = extract_node_major_from_spec(&raw)
+        {
+            return Some(major);
+        }
+    }
+
+    let pkg_path = workdir.join("package.json");
+    let raw = fs::read_to_string(&pkg_path).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    if let Some(runtime) = pkg.get("devEngines").and_then(|d| d.get("runtime")) {
+        let items: Vec<&serde_json::Value> = if let Some(arr) = runtime.as_array() {
+            arr.iter().collect()
+        } else {
+            vec![runtime]
+        };
+        for item in items {
+            let is_node = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case("node"));
+            if is_node
+                && let Some(ver) = item.get("version").and_then(|v| v.as_str())
+                && let Some(major) = extract_node_major_from_spec(ver)
+            {
+                return Some(major);
+            }
+        }
+    }
+
+    pkg.get("engines")
+        .and_then(|e| e.get("node"))
+        .and_then(|v| v.as_str())
+        .and_then(extract_node_major_from_spec)
+}
+
+/// Resolves a matching `node@<major>/bin` (Homebrew keg-only, nvm, fnm) directory when the host
+/// default `node` is a different major version than `.nvmrc` / `package.json` requires.
+fn resolve_project_node_bin_dir(workdir: &Path) -> Option<PathBuf> {
+    let major = parse_requested_node_major(workdir)?;
+    let node_exe = if cfg!(windows) { "node.exe" } else { "node" };
+
+    let mut candidates = vec![
+        PathBuf::from(format!("/opt/homebrew/opt/node@{major}/bin")),
+        PathBuf::from(format!("/usr/local/opt/node@{major}/bin")),
+    ];
+
+    let home = home_dir();
+    let nvm_versions = home.join(".nvm").join("versions").join("node");
+    if let Ok(entries) = fs::read_dir(&nvm_versions) {
+        let prefix_dot = format!("v{major}.");
+        let exact = format!("v{major}");
+        let mut matches: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix_dot) || name == exact {
+                    Some(e.path().join("bin"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        matches.sort();
+        matches.reverse();
+        candidates.extend(matches);
+    }
+
+    let fnm_versions = home
+        .join(".local")
+        .join("share")
+        .join("fnm")
+        .join("node-versions");
+    if let Ok(entries) = fs::read_dir(&fnm_versions) {
+        let prefix_dot = format!("v{major}.");
+        let mut matches: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with(&prefix_dot) {
+                    Some(e.path().join("installation").join("bin"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        matches.sort();
+        matches.reverse();
+        candidates.extend(matches);
+    }
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join(node_exe).is_file())
+}
+
+fn build_workdir_path(workdir: &Path) -> std::ffi::OsString {
+    let home = home_dir();
+    let mut local_bins = vec![workdir.join("node_modules").join(".bin")];
+    if let Some(node_bin) = resolve_project_node_bin_dir(workdir) {
+        local_bins.push(node_bin);
+    }
+    local_bins.push(PathBuf::from("/opt/homebrew/bin"));
+    local_bins.push(home.join(".cargo").join("bin"));
+    local_bins.push(home.join(".local").join("bin"));
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_parts: Vec<PathBuf> = local_bins.into_iter().filter(|p| p.is_dir()).collect();
+    path_parts.extend(std::env::split_paths(&existing_path));
+    std::env::join_paths(path_parts).unwrap_or(existing_path)
+}
+
 fn run_local_check_gate(
     workdir: &Path,
     check_cmd: &str,
     cargo_target_dir: Option<&Path>,
 ) -> (bool, String) {
-    let home = home_dir();
-    let local_bins = vec![
-        workdir.join("node_modules").join(".bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        home.join(".cargo").join("bin"),
-        home.join(".local").join("bin"),
-    ];
-    let existing_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut path_parts: Vec<PathBuf> = local_bins.into_iter().filter(|p| p.is_dir()).collect();
-    path_parts.extend(std::env::split_paths(&existing_path));
-    let merged_path = std::env::join_paths(path_parts).unwrap_or(existing_path);
+    let merged_path = build_workdir_path(workdir);
 
     #[cfg(unix)]
     let mut cmd = {
@@ -2192,7 +2523,11 @@ fn run_local_check_gate(
         cmd.env("CARGO_TARGET_DIR", target_dir);
     }
 
-    match cmd.output() {
+    match run_command_with_timeout(
+        cmd,
+        Duration::from_secs(LOCAL_CHECK_GATE_TIMEOUT_SECS),
+        "local check gate",
+    ) {
         Ok(o) => {
             let combined = format!(
                 "{}\n{}",
@@ -2201,7 +2536,7 @@ fn run_local_check_gate(
             );
             (o.status.success(), combined)
         }
-        Err(e) => (false, format!("failed to execute local check gate: {}", e)),
+        Err(e) => (false, e),
     }
 }
 
@@ -2257,6 +2592,8 @@ fn invoke_tender_cli(
                 prompt,
                 "--effort",
                 effort,
+                "--print-timeout",
+                "720s",
                 "--dangerously-skip-permissions",
                 "--disable-slash-commands",
                 "--output-format",
@@ -2270,16 +2607,21 @@ fn invoke_tender_cli(
     };
 
     // Security invariant: strip GitHub auth tokens from child LLM agent processes so prompt injection can never read them.
-    let output = cmd
-        .current_dir(workdir)
+    cmd.current_dir(workdir)
+        .env("PATH", build_workdir_path(workdir))
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| BrainError::RunnerFailed {
-            runner: runner.slug().to_string(),
-            details: e.to_string(),
-        })?;
+        .stdin(Stdio::null());
+
+    let output = run_command_with_timeout(
+        cmd,
+        Duration::from_secs(TENDER_CLI_TIMEOUT_SECS),
+        &format!("{} tender", runner.slug()),
+    )
+    .map_err(|details| BrainError::RunnerFailed {
+        runner: runner.slug().to_string(),
+        details,
+    })?;
 
     if !output.status.success() {
         return Err(BrainError::RunnerFailed {
@@ -2487,5 +2829,102 @@ mod tests {
             Ok(false)
         );
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn parses_requested_node_major_from_nvmrc_and_package_json() {
+        let dir = std::env::temp_dir().join(format!("otto_node_major_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join(".nvmrc"), "v24.11.0\n").unwrap();
+        assert_eq!(parse_requested_node_major(&dir), Some(24));
+
+        fs::remove_file(dir.join(".nvmrc")).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"devEngines":{"runtime":{"name":"node","version":"^24"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_requested_node_major(&dir), Some(24));
+
+        fs::write(
+            dir.join("package.json"),
+            r#"{"engines":{"node":">=22 <25"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_requested_node_major(&dir), Some(22));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_gitignored_trailing_slash_node_modules_cleanly() {
+        let base = std::env::temp_dir().join(format!("otto_link_nm_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let local_checkout = base.join("local");
+        let workdir = base.join("wt");
+        fs::create_dir_all(local_checkout.join("node_modules/vitest")).unwrap();
+        fs::create_dir_all(local_checkout.join("node_modules/@acme")).unwrap();
+        fs::create_dir_all(local_checkout.join("packages/shared")).unwrap();
+        fs::create_dir_all(workdir.join("packages/shared")).unwrap();
+        fs::write(
+            workdir.join("packages/shared/package.json"),
+            r#"{"name":"@acme/shared"}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../packages/shared",
+            local_checkout.join("node_modules/@acme/shared"),
+        )
+        .unwrap();
+        fs::create_dir_all(workdir.join("packages/brand-new")).unwrap();
+        fs::write(
+            workdir.join("packages/brand-new/package.json"),
+            r#"{"name":"@acme/brand-new"}"#,
+        )
+        .unwrap();
+
+        assert!(
+            Command::new(git_binary())
+                .args(["-C", &workdir.to_string_lossy(), "init"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(workdir.join(".gitignore"), "node_modules/\n").unwrap();
+
+        let linked = link_local_dependencies_into_worktree(&local_checkout, &workdir);
+        assert_eq!(linked, vec!["node_modules".to_string()]);
+        assert!(workdir.join("node_modules/vitest").is_symlink());
+        assert_eq!(
+            fs::canonicalize(workdir.join("node_modules/@acme/shared")).unwrap(),
+            fs::canonicalize(workdir.join("packages/shared")).unwrap(),
+            "workspace package must retarget into the PR worktree, not local_checkout"
+        );
+        assert_eq!(
+            fs::canonicalize(workdir.join("node_modules/@acme/brand-new")).unwrap(),
+            fs::canonicalize(workdir.join("packages/brand-new")).unwrap(),
+            "PR-added workspace packages must be linked cleanly into workdir node_modules"
+        );
+
+        let status = Command::new(git_binary())
+            .args([
+                "-C",
+                &workdir.to_string_lossy(),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ])
+            .output()
+            .unwrap();
+        let porcelain = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            !porcelain.contains("node_modules"),
+            "symlinked node_modules must stay ignored, got: {porcelain}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
