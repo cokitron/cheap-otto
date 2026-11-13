@@ -1044,6 +1044,7 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                 {
                     tpr.is_open = false;
                     tpr.open_feedback_count = 0;
+                    prune_non_actionable_handled_items(tpr, false);
                 }
             }
         }
@@ -1096,21 +1097,10 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
     .map_err(|e| e.to_string())
 }
 
-/// Cleans duplicate/wrapper entries and upgrades any `NeedsHuman` items whose review threads were
-/// answered by us (PR author or Code Tender) or resolved on GitHub so addressed threads never stay `Needs Input`.
-fn reconcile_pr_handled_items_and_status(
-    tpr: &mut TenderPrState,
-    snap: &TenderPrSnapshot,
-    newly_resolved_threads: &BTreeSet<(u64, String)>,
-) {
-    let has_inline_threads = snap
-        .feedback_items
-        .iter()
-        .any(|f| f.kind == TenderFeedbackKind::ReviewThreadComment);
-
-    // Drop self-authored comment entries and non-actionable bot status-wrapper entries from earlier runs.
+fn prune_non_actionable_handled_items(tpr: &mut TenderPrState, has_inline_threads: bool) {
+    let pr_author = tpr.author.clone();
     tpr.handled_items.retain(|h| {
-        if h.source_author.eq_ignore_ascii_case(&snap.author) {
+        if !pr_author.is_empty() && h.source_author.eq_ignore_ascii_case(&pr_author) {
             return false;
         }
         if h.path.is_none() {
@@ -1130,9 +1120,40 @@ fn reconcile_pr_handled_items_and_status(
         true
     });
 
-    // Deduplicate existing handled_items in-place (latest wins).
     let prev = std::mem::take(&mut tpr.handled_items);
     upsert_handled_items(&mut tpr.handled_items, prev);
+
+    if tpr.last_status == TenderRunStatus::NeedsHuman
+        && !tpr
+            .handled_items
+            .iter()
+            .any(|h| h.action == TenderActionStatus::NeedsHuman)
+    {
+        tpr.last_status = if tpr.last_commit_pushed.is_some() {
+            TenderRunStatus::FixedAndPushed
+        } else if !tpr.handled_items.is_empty() {
+            TenderRunStatus::RepliedOnly
+        } else {
+            TenderRunStatus::Idle
+        };
+    }
+}
+
+/// Cleans duplicate/wrapper entries and upgrades any `NeedsHuman` items whose review threads were
+/// answered by us (PR author or Code Tender) or resolved on GitHub so addressed threads never stay `Needs Input`.
+fn reconcile_pr_handled_items_and_status(
+    tpr: &mut TenderPrState,
+    snap: &TenderPrSnapshot,
+    newly_resolved_threads: &BTreeSet<(u64, String)>,
+) {
+    if tpr.author.is_empty() {
+        tpr.author = snap.author.clone();
+    }
+    let has_inline_threads = snap
+        .feedback_items
+        .iter()
+        .any(|f| f.kind == TenderFeedbackKind::ReviewThreadComment);
+    prune_non_actionable_handled_items(tpr, has_inline_threads);
 
     // Reconcile against live GitHub thread states.
     for fb in &snap.feedback_items {
