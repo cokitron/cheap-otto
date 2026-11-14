@@ -1264,9 +1264,33 @@ pub(crate) fn run_command_with_timeout(
     label: &str,
 ) -> Result<std::process::Output, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {label}: {e}"))?;
+    let child_pid = child.id();
+
+    let kill_tree = |pid: u32, c: &mut std::process::Child| {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{pid}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+        }
+        let _ = c.kill();
+        let _ = c.wait();
+    };
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -1292,8 +1316,7 @@ pub(crate) fn run_command_with_timeout(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(child_pid, &mut child);
                     let stderr_bytes = stderr_handle.join().unwrap_or_default();
                     let stderr_tail =
                         truncate_chars(String::from_utf8_lossy(&stderr_bytes).trim(), 400);
@@ -1310,8 +1333,7 @@ pub(crate) fn run_command_with_timeout(
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(child_pid, &mut child);
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
                 return Err(format!("{label} wait failed: {e}"));

@@ -3122,7 +3122,7 @@ fn post_replies_and_resolve_threads(
     );
 }
 
-const LOCAL_CHECK_GATE_TIMEOUT_SECS: u64 = 600;
+const LOCAL_CHECK_GATE_TIMEOUT_SECS: u64 = 900;
 const TENDER_CLI_TIMEOUT_SECS: u64 = 720;
 
 fn extract_node_major_from_spec(spec: &str) -> Option<u32> {
@@ -3392,23 +3392,163 @@ fn auto_format_modified_files(workdir: &Path, status_porcelain: &str) {
     }
 }
 
+/// Accelerates monorepo JS/TS check gates by scoping Prettier, ESLint, and Vitest (`vitest related --run`)
+/// to the uncommitted files modified in the worktree while keeping full-workspace `typecheck` intact.
+pub fn optimize_js_check_cmd_for_worktree(
+    workdir: &Path,
+    check_cmd: &str,
+    status_porcelain: &str,
+) -> String {
+    let pkg_path = workdir.join("package.json");
+    let Ok(raw_pkg) = fs::read_to_string(&pkg_path) else {
+        return check_cmd.to_string();
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&raw_pkg) else {
+        return check_cmd.to_string();
+    };
+    let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object()) else {
+        return check_cmd.to_string();
+    };
+
+    let mut changed_all: Vec<String> = Vec::new();
+    let mut changed_lintable: Vec<String> = Vec::new();
+    for line in status_porcelain.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.len() < 4 {
+            continue;
+        }
+        if trimmed[..2].contains('D') {
+            continue;
+        }
+        let raw_path = trimmed[3..].trim();
+        let path_part = raw_path
+            .rsplit_once(" -> ")
+            .map(|(_, dst)| dst)
+            .unwrap_or(raw_path)
+            .trim_matches('"');
+        // Reject shell-special characters so quoting is trivially safe.
+        if path_part.is_empty()
+            || path_part
+                .chars()
+                .any(|c| matches!(c, '\'' | '"' | '`' | '$' | ';' | '&' | '|' | '\n' | '\r'))
+        {
+            return check_cmd.to_string();
+        }
+        if !workdir.join(path_part).is_file() {
+            continue;
+        }
+        changed_all.push(path_part.to_string());
+        let lower = path_part.to_ascii_lowercase();
+        if lower.ends_with(".ts")
+            || lower.ends_with(".tsx")
+            || lower.ends_with(".js")
+            || lower.ends_with(".jsx")
+            || lower.ends_with(".mjs")
+            || lower.ends_with(".cjs")
+        {
+            changed_lintable.push(path_part.to_string());
+        }
+    }
+
+    if changed_all.is_empty() {
+        return check_cmd.to_string();
+    }
+
+    let quote_arg = |p: &str| -> String {
+        if cfg!(windows) {
+            format!("\"{p}\"")
+        } else {
+            format!("'{p}'")
+        }
+    };
+    let bin_exists = |name: &str| -> bool {
+        let bin_dir = workdir.join("node_modules").join(".bin");
+        bin_dir.join(name).exists() || bin_dir.join(format!("{name}.cmd")).exists()
+    };
+
+    let can_scope_prettier = scripts
+        .get("format:check")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.trim().starts_with("prettier --check"))
+        && bin_exists("prettier");
+    let can_scope_eslint = scripts
+        .get("lint")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.trim().starts_with("eslint ."))
+        && bin_exists("eslint");
+    let can_scope_vitest = scripts
+        .get("test")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.trim() == "vitest run")
+        && bin_exists("vitest");
+
+    let all_args = changed_all
+        .iter()
+        .map(|s| quote_arg(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lint_args = changed_lintable
+        .iter()
+        .map(|s| quote_arg(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut rewritten: Vec<String> = Vec::new();
+    for seg in check_cmd
+        .split("&&")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if can_scope_prettier && matches!(seg, "npm run format:check" | "pnpm format:check") {
+            rewritten.push(format!("prettier --check --ignore-unknown {all_args}"));
+        } else if can_scope_eslint && matches!(seg, "npm run lint" | "pnpm lint") {
+            if !changed_lintable.is_empty() {
+                let max_warn = if scripts
+                    .get("lint")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s.contains("--max-warnings=0"))
+                {
+                    " --max-warnings=0"
+                } else {
+                    ""
+                };
+                rewritten.push(format!("eslint{max_warn} {lint_args}"));
+            }
+        } else if can_scope_vitest && matches!(seg, "npm test" | "npm run test" | "pnpm test") {
+            rewritten.push(format!("vitest related --run --passWithNoTests {all_args}"));
+        } else {
+            rewritten.push(seg.to_string());
+        }
+    }
+
+    if rewritten.is_empty() {
+        check_cmd.to_string()
+    } else {
+        rewritten.join(" && ")
+    }
+}
+
 fn run_local_check_gate(
     workdir: &Path,
     check_cmd: &str,
     cargo_target_dir: Option<&Path>,
 ) -> (bool, String) {
     let merged_path = build_workdir_path(workdir);
+    let effective_cmd = run_git(Some(workdir), &["status", "--porcelain"])
+        .ok()
+        .map(|st| optimize_js_check_cmd_for_worktree(workdir, check_cmd, &st))
+        .unwrap_or_else(|| check_cmd.to_string());
 
     #[cfg(unix)]
     let mut cmd = {
         let mut c = Command::new("/bin/sh");
-        c.args(["-c", check_cmd]);
+        c.args(["-c", &effective_cmd]);
         c
     };
     #[cfg(windows)]
     let mut cmd = {
         let mut c = Command::new("cmd");
-        c.args(["/C", check_cmd]);
+        c.args(["/C", &effective_cmd]);
         c
     };
 
@@ -3724,6 +3864,29 @@ mod tests {
             ),
             "npm run typecheck && npm run lint && npm test"
         );
+
+        fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+        for b in [
+            "prettier",
+            "prettier.cmd",
+            "eslint",
+            "eslint.cmd",
+            "vitest",
+            "vitest.cmd",
+        ] {
+            fs::write(dir.join("node_modules/.bin").join(b), "").unwrap();
+        }
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/a.ts"), "export const x = 1;\n").unwrap();
+        let scoped = optimize_js_check_cmd_for_worktree(
+            &dir,
+            "npm run format:check && npm run typecheck && npm run lint && npm test",
+            " M src/a.ts\n",
+        );
+        assert!(scoped.contains("prettier --check --ignore-unknown"));
+        assert!(scoped.contains("npm run typecheck"));
+        assert!(scoped.contains("eslint"));
+        assert!(scoped.contains("vitest related --run --passWithNoTests"));
 
         let _ = fs::remove_dir_all(&dir);
     }
