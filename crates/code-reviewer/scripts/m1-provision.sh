@@ -97,10 +97,14 @@ if [ -f "$HOME/.code-reviewer/poll.lock" ]; then
   fi
 fi
 
-# 1. Hardware & Fanless Thermal Guard
-if ! pmset -g batt 2>/dev/null | grep -q "AC Power"; then
-  printf '{"job_id":"pr-poller","project":"code-reviewer","kind":"ci","status":"skipped_hardware_guard","commit_sha":"none","started_epoch_secs":%s,"duration_secs":0,"log_file":"~/.cheap-otto/logs/code-reviewer/sched-pr-poller.log"}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/history.jsonl"
-  exit 0
+# 1. Hardware & Fanless Thermal Guard (allow Battery Power >= 20% so battery-limiter / normal unplugged runs aren't starved)
+BATT_INFO=$(pmset -g batt 2>/dev/null || true)
+if ! printf '%s' "$BATT_INFO" | grep -q "AC Power"; then
+  BATT_PCT=$(printf '%s' "$BATT_INFO" | grep -Eo '[0-9]+%' | head -n 1 | tr -d '%')
+  if [ -n "$BATT_PCT" ] && [ "$BATT_PCT" -lt 20 ] 2>/dev/null; then
+    printf '{"job_id":"pr-poller","project":"code-reviewer","kind":"ci","status":"skipped_hardware_guard","commit_sha":"none","started_epoch_secs":%s,"duration_secs":0,"log_file":"~/.cheap-otto/logs/code-reviewer/sched-pr-poller.log"}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/history.jsonl"
+    exit 0
+  fi
 fi
 THERM=$(sysctl -n kern.thermalstate 2>/dev/null || echo 0)
 if [ "$THERM" -ge 2 ] 2>/dev/null; then
@@ -260,9 +264,13 @@ if [ -f "$HOME/.code-reviewer/tender-poll.lock" ]; then
   fi
 fi
 
-if ! pmset -g batt 2>/dev/null | grep -q "AC Power"; then
-  printf '{"job_id":"code-tender","status":"skipped_hardware_guard","started_epoch_secs":%s,"duration_secs":0}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/tender-history.jsonl"
-  exit 0
+BATT_INFO=$(pmset -g batt 2>/dev/null || true)
+if ! printf '%s' "$BATT_INFO" | grep -q "AC Power"; then
+  BATT_PCT=$(printf '%s' "$BATT_INFO" | grep -Eo '[0-9]+%' | head -n 1 | tr -d '%')
+  if [ -n "$BATT_PCT" ] && [ "$BATT_PCT" -lt 20 ] 2>/dev/null; then
+    printf '{"job_id":"code-tender","status":"skipped_hardware_guard","started_epoch_secs":%s,"duration_secs":0}\n' "$START_TS" >> "$HOME/.cheap-otto/runs/code-reviewer/tender-history.jsonl"
+    exit 0
+  fi
 fi
 THERM=$(sysctl -n kern.thermalstate 2>/dev/null || echo 0)
 if [ "$THERM" -ge 2 ] 2>/dev/null; then
