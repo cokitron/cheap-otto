@@ -30,6 +30,10 @@ pub const STATUS_BANNER_MARKER: &str = "<!-- otto-code-reviewer:status-banner --
 /// Prevents Code Tender from ever re-triggering on its own replies or commit summaries.
 pub const BOT_TENDER_MARKER: &str = "<!-- otto-code-tender:v1 -->";
 
+/// Sub-marker embedded in Code Tender comments that explicitly leave a thread open for human input,
+/// preventing auto-resolution from mistaking a `NeedsHuman` note for an addressed reply.
+pub const BOT_TENDER_NEEDS_HUMAN_MARKER: &str = "<!-- otto-code-tender:needs-human -->";
+
 #[derive(Debug, Error)]
 pub enum StateError {
     #[error("failed to read state file {path}: {source}")]
@@ -1474,9 +1478,14 @@ pub fn is_non_actionable_tender_item(
     ignore_clean_pass_reviews: bool,
 ) -> bool {
     let body = item.body.trim();
+    let is_self_tender_note = if item.kind == TenderFeedbackKind::ReviewThreadComment {
+        body.starts_with(BOT_TENDER_MARKER)
+    } else {
+        body.contains(BOT_TENDER_MARKER)
+    };
     if body.is_empty()
         || body == "</details>"
-        || body.contains(BOT_TENDER_MARKER)
+        || is_self_tender_note
         || body.contains(STATUS_BANNER_MARKER)
     {
         return true;
@@ -1553,6 +1562,17 @@ pub fn evaluate_tender_trigger(
         .and_then(|t| t.last_commit_pushed.as_deref())
         .unwrap_or("");
 
+    let mut recorded_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut recorded_threads: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    if let Some(t) = existing {
+        for h in t.handled_items.iter().chain(t.pending_items.iter()) {
+            recorded_ids.insert(h.feedback_id.as_str());
+            if let Some(tid) = h.thread_node_id.as_deref() {
+                recorded_threads.insert(tid);
+            }
+        }
+    }
+
     // Identify review threads whose latest reply is already authored by us (Code Tender or PR author),
     // so we never re-trigger or flag Needs Input on concerns we already addressed.
     let mut thread_last_is_ours: BTreeMap<&str, bool> = BTreeMap::new();
@@ -1562,12 +1582,21 @@ pub fn evaluate_tender_trigger(
         {
             let is_ours = item.answered_by_tender
                 || item.answered_by_pr_author
-                || item.body.contains(BOT_TENDER_MARKER)
+                || (item.body.trim_start().starts_with(BOT_TENDER_MARKER)
+                    && !item.body.contains(BOT_TENDER_NEEDS_HUMAN_MARKER))
                 || (item.author.eq_ignore_ascii_case(&snapshot.author)
                     && !item.body.contains(BOT_COMMENT_MARKER));
             thread_last_is_ours.insert(tid, is_ours);
         }
     }
+
+    let is_item_recorded = |item: &TenderFeedbackItem| -> bool {
+        recorded_ids.contains(item.feedback_id.as_str())
+            || item
+                .thread_node_id
+                .as_deref()
+                .is_some_and(|tid| recorded_threads.contains(tid))
+    };
 
     let actionable: Vec<TenderFeedbackItem> = snapshot
         .feedback_items
@@ -1575,7 +1604,6 @@ pub fn evaluate_tender_trigger(
         .filter(|item| {
             !is_non_actionable_tender_item(item, &snapshot.author, ignore_clean_pass_reviews)
         })
-        .filter(|item| item.created_at.as_str() > cursor)
         .filter(|item| match item.kind {
             TenderFeedbackKind::ReviewThreadComment => {
                 if item.is_resolved || item.answered_by_tender || item.answered_by_pr_author {
@@ -1591,9 +1619,18 @@ pub fn evaluate_tender_trigger(
                     .as_deref()
                     .and_then(|tid| thread_last_is_ours.get(tid).copied())
                     .unwrap_or(false);
-                !already_answered
+                if already_answered {
+                    return false;
+                }
+                // Trigger if new activity arrived after `cursor` OR if this unresolved/unanswered
+                // thread has never been recorded in `handled_items`/`pending_items` (e.g. a second
+                // review bot's comments arrived or published with earlier draft timestamps while an
+                // initial tend cycle was already running).
+                item.created_at.as_str() > cursor || !is_item_recorded(item)
             }
-            TenderFeedbackKind::ReviewSummary | TenderFeedbackKind::IssueComment => true,
+            TenderFeedbackKind::ReviewSummary | TenderFeedbackKind::IssueComment => {
+                item.created_at.as_str() > cursor
+            }
         })
         .cloned()
         .collect();
@@ -1602,7 +1639,12 @@ pub fn evaluate_tender_trigger(
         return TenderTriggerDecision::UpToDate;
     }
 
-    // If Code Tender already pushed this exact head SHA and no human comments arrived after, nothing left to tend.
+    let has_unrecorded_thread = actionable.iter().any(|item| {
+        item.kind == TenderFeedbackKind::ReviewThreadComment && !is_item_recorded(item)
+    });
+
+    // If Code Tender already pushed this exact head SHA, all actionable threads were already recorded,
+    // and no newer comments arrived after `cursor`, nothing left to tend.
     let latest_feedback_at = actionable
         .iter()
         .map(|i| i.created_at.as_str())
@@ -1610,7 +1652,10 @@ pub fn evaluate_tender_trigger(
         .unwrap_or("")
         .to_string();
 
-    if snapshot.head_sha == last_pushed_sha && latest_feedback_at.as_str() <= cursor {
+    if snapshot.head_sha == last_pushed_sha
+        && latest_feedback_at.as_str() <= cursor
+        && !has_unrecorded_thread
+    {
         return TenderTriggerDecision::UpToDate;
     }
 
@@ -2029,5 +2074,72 @@ mod tests {
             evaluate_tender_trigger(None, &snap, true, 3, true),
             TenderTriggerDecision::UpToDate
         );
+    }
+
+    #[test]
+    fn tender_catches_unrecorded_open_threads_even_when_cursor_already_advanced() {
+        let mut existing = TenderPrState::new(
+            "acme-org/web-app",
+            222,
+            "feat: outcomes",
+            "alice-dev",
+            "main",
+            "feat/outcomes",
+        );
+        existing.runs_count = 1;
+        existing.last_commit_pushed = Some("sha_after_first_push".to_string());
+        existing.last_tended_feedback_at = Some("2026-11-14T02:04:00Z".to_string());
+        existing.handled_items.push(TenderHandledItem {
+            feedback_id: "thread-comment:100".to_string(),
+            source_author: "cubic-dev-ai".to_string(),
+            path: Some("src/a.ts".to_string()),
+            line: Some(10),
+            thread_node_id: Some("T_100".to_string()),
+            reply_comment_id: Some(100),
+            summary: "Fix A".to_string(),
+            action: TenderActionStatus::Fixed,
+            reply_text: "Fixed".to_string(),
+            commit_sha: Some("sha_after_first_push".to_string()),
+            issue_number: None,
+            issue_url: None,
+            draft_issue_title: None,
+            draft_issue_body: None,
+            resolved_thread: true,
+            reply_posted: true,
+        });
+
+        let snap = TenderPrSnapshot {
+            pr_number: 222,
+            title: "feat: outcomes".to_string(),
+            author: "alice-dev".to_string(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat/outcomes".to_string(),
+            head_sha: "sha_after_first_push".to_string(),
+            feedback_items: vec![TenderFeedbackItem {
+                feedback_id: "thread-comment:200".to_string(),
+                thread_node_id: Some("T_200".to_string()),
+                reply_comment_id: Some(200),
+                kind: TenderFeedbackKind::ReviewThreadComment,
+                author: "chatgpt-codex-connector".to_string(),
+                created_at: "2026-11-14T02:03:40Z".to_string(),
+                path: Some("src/b.ts".to_string()),
+                line: Some(20),
+                review_state: None,
+                is_resolved: false,
+                inline_comment_count: 0,
+                answered_by_tender: false,
+                answered_by_pr_author: false,
+                latest_author_reply: None,
+                body: "P2: Handle null fallback".to_string(),
+            }],
+        };
+
+        assert!(matches!(
+            evaluate_tender_trigger(Some(&existing), &snap, true, 5, true),
+            TenderTriggerDecision::HandleFeedback { items, .. }
+                if items.len() == 1 && items[0].feedback_id == "thread-comment:200"
+        ));
     }
 }

@@ -1877,7 +1877,8 @@ fn run_tender_poll(
                         continue;
                     }
 
-                    let attempt_key = format!("{}:{}", head_sha, latest_feedback_at);
+                    let attempt_key =
+                        format!("{}:{}:{}", head_sha, latest_feedback_at, items.len());
                     let prior_attempts = existing
                         .and_then(|t| {
                             (t.last_attempt_key.as_deref() == Some(attempt_key.as_str()))

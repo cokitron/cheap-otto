@@ -1577,38 +1577,80 @@ fn invoke_agent_json_inner<T: serde::de::DeserializeOwned>(
 }
 
 /// Parses a JSON object from LLM text output (supporting raw JSON or fenced ```json blocks).
+/// Prefers the LAST valid fenced JSON block or LAST top-level balanced `{...}` JSON object
+/// so metadata/code snippets echoed earlier in reasoning prose never shadow the final envelope.
 pub fn parse_json_from_llm<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
     let trimmed = raw.trim();
     if let Ok(v) = serde_json::from_str::<T>(trimmed) {
         return Ok(v);
     }
 
-    if let Some(fence_start) = trimmed.find("```json") {
-        let after = &trimmed[fence_start + "```json".len()..];
-        if let Some(fence_end) = after.find("```") {
-            let candidate = after[..fence_end].trim();
-            if let Ok(v) = serde_json::from_str::<T>(candidate) {
-                return Ok(v);
+    // 1. Collect all fenced ```json ... ``` blocks and try them from LAST to FIRST.
+    let mut fenced_candidates: Vec<&str> = Vec::new();
+    let mut scan_from = 0usize;
+    while let Some(rel_start) = trimmed[scan_from..].find("```json") {
+        let content_start = scan_from + rel_start + "```json".len();
+        if let Some(rel_end) = trimmed[content_start..].find("```") {
+            fenced_candidates.push(trimmed[content_start..content_start + rel_end].trim());
+            scan_from = content_start + rel_end + "```".len();
+        } else {
+            break;
+        }
+    }
+    for candidate in fenced_candidates.into_iter().rev() {
+        if let Ok(v) = serde_json::from_str::<T>(candidate) {
+            return Ok(v);
+        }
+        if let Some(Ok(v)) = serde_json::Deserializer::from_str(candidate)
+            .into_iter::<T>()
+            .next()
+        {
+            return Ok(v);
+        }
+    }
+
+    // 2. Extract top-level (non-nested) balanced `{...}` JSON objects left-to-right,
+    //    then try deserializing `T` from LAST to FIRST so final envelopes win over earlier prose `{}` snippets.
+    let mut top_level_objects: Vec<&str> = Vec::new();
+    let mut byte_pos = 0usize;
+    while byte_pos < trimmed.len() {
+        let Some(rel_brace) = trimmed[byte_pos..].find('{') else {
+            break;
+        };
+        let obj_start = byte_pos + rel_brace;
+        let mut stream = serde_json::Deserializer::from_str(&trimmed[obj_start..])
+            .into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(serde_json::Value::Object(_))) => {
+                let consumed = stream.byte_offset().max(1);
+                let obj_end = obj_start + consumed;
+                top_level_objects.push(&trimmed[obj_start..obj_end]);
+                byte_pos = obj_end;
             }
-            if let Some(Ok(v)) = serde_json::Deserializer::from_str(candidate)
-                .into_iter::<T>()
-                .next()
-            {
-                return Ok(v);
+            _ => {
+                byte_pos = obj_start + 1;
             }
         }
     }
 
     let mut last_err = None;
-    for (idx, ch) in trimmed.char_indices() {
+    for obj_slice in top_level_objects.into_iter().rev() {
+        match serde_json::from_str::<T>(obj_slice) {
+            Ok(v) => return Ok(v),
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+
+    // Fallback scan across any `{` offset if malformed trailing braces confused Value scanning.
+    for (idx, ch) in trimmed.char_indices().rev() {
         if ch == '{' {
             match serde_json::Deserializer::from_str(&trimmed[idx..])
                 .into_iter::<T>()
                 .next()
             {
                 Some(Ok(v)) => return Ok(v),
-                Some(Err(e)) => last_err = Some(e.to_string()),
-                None => {}
+                Some(Err(e)) if last_err.is_none() => last_err = Some(e.to_string()),
+                _ => {}
             }
         }
     }
@@ -1761,5 +1803,26 @@ mod tests {
                 ok: true
             }
         );
+    }
+
+    #[test]
+    fn prefers_final_envelope_over_earlier_prose_json_snippets() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Envelope {
+            #[serde(default)]
+            summary: String,
+            items: Vec<Item>,
+        }
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Item {
+            feedback_id: String,
+        }
+
+        let raw = "Inspecting comment <!-- metadata:{\"confidence\":9} --> and `{}` first.\n\
+                   {\"summary\":\"triaged 2 items\",\"items\":[{\"feedback_id\":\"fb-1\"},{\"feedback_id\":\"fb-2\"}]}";
+        let parsed: Envelope = parse_json_from_llm(raw).expect("must parse final envelope");
+        assert_eq!(parsed.summary, "triaged 2 items");
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.items[0].feedback_id, "fb-1");
     }
 }

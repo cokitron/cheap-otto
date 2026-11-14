@@ -12,10 +12,10 @@ use crate::config::{
 };
 use crate::github::GitHubClient;
 use crate::state::{
-    ActiveTenderWorkerState, BOT_TENDER_MARKER, BrainLiveState, LearnedRuleRecord, LedgerStore,
-    TenderActionStatus, TenderFeedbackItem, TenderFeedbackKind, TenderHandledItem,
-    TenderPrSnapshot, TenderPrState, TenderRunStatus, TenderTriggerDecision, acquire_file_spinlock,
-    evaluate_tender_trigger,
+    ActiveTenderWorkerState, BOT_TENDER_MARKER, BOT_TENDER_NEEDS_HUMAN_MARKER, BrainLiveState,
+    LearnedRuleRecord, LedgerStore, TenderActionStatus, TenderFeedbackItem, TenderFeedbackKind,
+    TenderHandledItem, TenderPrSnapshot, TenderPrState, TenderRunStatus, TenderTriggerDecision,
+    acquire_file_spinlock, evaluate_tender_trigger,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -420,24 +420,28 @@ pub fn browse_m1_directories(raw_path: Option<&str>) -> Result<serde_json::Value
 fn link_local_dependencies_into_worktree(local_checkout: &Path, workdir: &Path) -> Vec<String> {
     #[allow(unused_mut)]
     let mut linked = Vec::new();
+    // If `install_worktree_js_deps_if_lockfile_diverged` already populated fresh root `node_modules`
+    // for this PR's lockfile, skip linking stale JS `node_modules` (including sub-workspaces) from `local_checkout`.
+    let worktree_has_own_js_nm = workdir.join("node_modules").exists();
     let mut candidate_rel_paths: Vec<PathBuf> = vec![
-        PathBuf::from("node_modules"),
         PathBuf::from(".venv"),
         PathBuf::from("venv"),
         PathBuf::from(".pnpm-store"),
         PathBuf::from("vendor"),
     ];
-
-    for monorepo_root in ["apps", "packages"] {
-        let root_dir = local_checkout.join(monorepo_root);
-        if let Ok(entries) = fs::read_dir(&root_dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    candidate_rel_paths.push(
-                        PathBuf::from(monorepo_root)
-                            .join(e.file_name())
-                            .join("node_modules"),
-                    );
+    if !worktree_has_own_js_nm {
+        candidate_rel_paths.insert(0, PathBuf::from("node_modules"));
+        for monorepo_root in ["apps", "packages"] {
+            let root_dir = local_checkout.join(monorepo_root);
+            if let Ok(entries) = fs::read_dir(&root_dir) {
+                for e in entries.flatten() {
+                    if e.path().is_dir() {
+                        candidate_rel_paths.push(
+                            PathBuf::from(monorepo_root)
+                                .join(e.file_name())
+                                .join("node_modules"),
+                        );
+                    }
                 }
             }
         }
@@ -709,9 +713,9 @@ pub fn infer_local_check_cmd(workdir: &Path) -> Option<String> {
         let scripts = pkg.get("scripts").and_then(|s| s.as_object());
         let mut cmds: Vec<String> = Vec::new();
         if let Some(map) = scripts {
-            for key in ["typecheck", "check", "lint"] {
+            let prefix = if pm == "npm" { "npm run" } else { pm };
+            for key in ["format:check", "typecheck", "lint"] {
                 if map.contains_key(key) {
-                    let prefix = if pm == "npm" { "npm run" } else { pm };
                     cmds.push(format!("{} {}", prefix, key));
                 }
             }
@@ -719,6 +723,11 @@ pub fn infer_local_check_cmd(workdir: &Path) -> Option<String> {
                 && !test_val.contains("no test specified")
             {
                 cmds.push(format!("{} test", pm));
+            }
+            // Only fall back to an umbrella `check` script when granular `typecheck`/`lint`/`test`
+            // scripts are absent, avoiding duplicate runs and heavy `--coverage` fork storms.
+            if cmds.is_empty() && map.contains_key("check") {
+                cmds.push(format!("{} check", prefix));
             }
         }
         if cmds.is_empty() && workdir.join("tsconfig.json").is_file() {
@@ -741,6 +750,43 @@ pub fn infer_local_check_cmd(workdir: &Path) -> Option<String> {
     }
 
     None
+}
+
+/// Strips redundant umbrella `npm run check` / `pnpm check` / `yarn check` segments when granular
+/// `typecheck` / `lint` / `test` commands are already chained in the same check pipeline.
+pub fn sanitize_local_check_cmd(raw_cmd: &str) -> String {
+    let parts: Vec<&str> = raw_cmd
+        .split("&&")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() <= 1 {
+        return raw_cmd.trim().to_string();
+    }
+    let has_granular = parts.iter().any(|p| {
+        p.contains("typecheck")
+            || p.ends_with(" test")
+            || *p == "npm test"
+            || *p == "pnpm test"
+            || *p == "yarn test"
+    });
+    if !has_granular {
+        return parts.join(" && ");
+    }
+    let filtered: Vec<&str> = parts
+        .into_iter()
+        .filter(|&p| {
+            !matches!(
+                p,
+                "npm run check" | "pnpm check" | " pnpm run check" | "yarn check" | "bun run check"
+            )
+        })
+        .collect();
+    if filtered.is_empty() {
+        raw_cmd.trim().to_string()
+    } else {
+        filtered.join(" && ")
+    }
 }
 
 /// Collects project guides, manifest scripts, and workspace structure directly from the local app checkout
@@ -1016,11 +1062,22 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
             if !watched {
                 continue;
             }
+            let existing_pr = pre_ledger.tender_pull_requests.get(&key);
             let tender_account = cfg.select_tender_account(repo_cfg, &snap.author);
             for item in &snap.feedback_items {
+                let recorded_needs_human = existing_pr.is_some_and(|tpr| {
+                    tpr.handled_items.iter().any(|h| {
+                        h.action == TenderActionStatus::NeedsHuman
+                            && (h.feedback_id == item.feedback_id
+                                || (h.thread_node_id.is_some()
+                                    && h.thread_node_id == item.thread_node_id))
+                    })
+                });
+                let safe_to_auto_resolve = item.answered_by_pr_author
+                    || (item.answered_by_tender && !recorded_needs_human);
                 if item.kind == TenderFeedbackKind::ReviewThreadComment
                     && !item.is_resolved
-                    && (item.answered_by_pr_author || item.answered_by_tender)
+                    && safe_to_auto_resolve
                     && let Some(tid) = item.thread_node_id.as_deref()
                     && gh_client.resolve_review_thread(tender_account, tid).is_ok()
                 {
@@ -1272,7 +1329,6 @@ pub fn upsert_handled_items(target: &mut Vec<TenderHandledItem>, incoming: Vec<T
 struct TriagePlanEnvelope {
     #[serde(default)]
     summary: String,
-    #[serde(default)]
     items: Vec<TriageDecisionItem>,
     #[serde(default)]
     packets: Vec<FixerWorkPacket>,
@@ -1312,7 +1368,6 @@ pub struct FixerWorkPacket {
 struct FixerOutcomeEnvelope {
     #[serde(default)]
     summary: String,
-    #[serde(default)]
     edited_files: Vec<String>,
 }
 
@@ -1324,7 +1379,6 @@ struct VerifierOutcomeEnvelope {
     commit_message: String,
     #[serde(default)]
     summary: String,
-    #[serde(default)]
     item_outcomes: Vec<VerifiedItemOutcome>,
     #[serde(default)]
     tender_kb_updates: Vec<TenderKbRuleProposal>,
@@ -1496,9 +1550,22 @@ pub fn format_tender_reply_body_with_issue(
     commit_sha: Option<&str>,
     created_issue: Option<(u64, &str)>,
 ) -> String {
+    format_tender_reply_body_for_action(reply_text, commit_sha, created_issue, false)
+}
+
+pub fn format_tender_reply_body_for_action(
+    reply_text: &str,
+    commit_sha: Option<&str>,
+    created_issue: Option<(u64, &str)>,
+    needs_human: bool,
+) -> String {
     let mut out = String::new();
     out.push_str(BOT_TENDER_MARKER);
     out.push('\n');
+    if needs_human {
+        out.push_str(BOT_TENDER_NEEDS_HUMAN_MARKER);
+        out.push('\n');
+    }
     out.push_str("🛠️ **Code Tender:** ");
     out.push_str(reply_text.trim());
     if let Some((num, url)) = created_issue
@@ -1702,7 +1769,7 @@ pub fn execute_tender_pr_cycle(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
+        .map(sanitize_local_check_cmd)
         .or_else(|| infer_local_check_cmd(&wt.path));
 
     // Pull any prior Multi-Lens Code Reviewer observations for additional structured precision.
@@ -1799,8 +1866,11 @@ pub fn execute_tender_pr_cycle(
         .into());
     }
 
-    // STAGE 3A: Mandatory Local Check Verification Gate + 1 bounded repair attempt if failed
+    // STAGE 3A: Auto-format touched files + Mandatory Local Check Verification Gate + 1 bounded repair attempt if failed
     let has_dirty_changes = !status_out.trim().is_empty();
+    if has_dirty_changes {
+        auto_format_modified_files(&wt.path, &status_out);
+    }
     let mut check_passed = true;
     let mut check_log = String::from("(no code edits or no runnable test suite detected)");
     if has_dirty_changes && let Some(ref check_cmd) = effective_check_cmd {
@@ -1834,6 +1904,11 @@ pub fn execute_tender_pr_cycle(
                 check_cmd,
                 &log1,
             );
+            if let Ok(repaired_status) = run_git(Some(&wt.path), &["status", "--porcelain"])
+                && !repaired_status.trim().is_empty()
+            {
+                auto_format_modified_files(&wt.path, &repaired_status);
+            }
             let (ok2, log2) =
                 run_local_check_gate(&wt.path, check_cmd, cargo_target_dir.as_deref());
             check_passed = ok2;
@@ -1941,7 +2016,11 @@ pub fn execute_tender_pr_cycle(
     tender_state.open_feedback_count = 0;
     tender_state.runs_count = tender_state.runs_count.saturating_add(1);
     tender_state.last_tended_sha = Some(pr_snap.head_sha.clone());
-    tender_state.last_tended_feedback_at = Some(latest_feedback_at.to_string());
+    let next_cursor = match tender_state.last_tended_feedback_at.as_deref() {
+        Some(prev) if prev > latest_feedback_at => prev.to_string(),
+        _ => latest_feedback_at.to_string(),
+    };
+    tender_state.last_tended_feedback_at = Some(next_cursor);
     tender_state.last_attempt_key = None;
     tender_state.attempts_for_key = 0;
     tender_state.local_context_used = local_checkout.as_ref().map(|p| p.display().to_string());
@@ -2470,7 +2549,8 @@ fn run_triage_agent(
         sha = pr_snap.head_sha,
     );
 
-    invoke_tender_json_resilient(
+    let expected_non_empty = !items.is_empty();
+    invoke_tender_json_validated(
         agents_cfg,
         lead,
         alt,
@@ -2478,6 +2558,16 @@ fn run_triage_agent(
         "01-tender-triage",
         &prompt,
         false,
+        |plan: &TriagePlanEnvelope| {
+            if expected_non_empty && plan.items.is_empty() {
+                Err(
+                    "triage envelope returned empty `items` array for non-empty feedback"
+                        .to_string(),
+                )
+            } else {
+                Ok(())
+            }
+        },
     )
 }
 
@@ -2729,7 +2819,8 @@ fn run_verifier_agent(
         }
     );
 
-    invoke_tender_json_resilient(
+    let expected_non_empty = !items.is_empty();
+    invoke_tender_json_validated(
         agents_cfg,
         verifier,
         alt,
@@ -2737,6 +2828,16 @@ fn run_verifier_agent(
         "03-tender-verifier",
         &prompt,
         false,
+        |ver: &VerifierOutcomeEnvelope| {
+            if expected_non_empty && ver.item_outcomes.is_empty() {
+                Err(
+                    "verifier envelope returned empty `item_outcomes` array for non-empty feedback"
+                        .to_string(),
+                )
+            } else {
+                Ok(())
+            }
+        },
     )
 }
 
@@ -2940,8 +3041,12 @@ fn post_replies_and_resolve_threads(
         if let Some(comment_id) = item.reply_comment_id
             && item.thread_node_id.is_some()
         {
-            let body =
-                format_tender_reply_body_with_issue(&item.reply_text, pushed_sha, issue_link);
+            let body = format_tender_reply_body_for_action(
+                &item.reply_text,
+                pushed_sha,
+                issue_link,
+                item.action == TenderActionStatus::NeedsHuman,
+            );
             if gh
                 .reply_to_pull_request_review_comment(
                     tender_account,
@@ -3218,6 +3323,75 @@ fn install_worktree_js_deps_if_lockfile_diverged(local_checkout: Option<&Path>, 
     }
 }
 
+/// Best-effort auto-formatter on modified/added files so repo formatting gates (`prettier --check`, `cargo fmt --check`)
+/// pass cleanly after agent edits without burning a repair cycle on whitespace.
+fn auto_format_modified_files(workdir: &Path, status_porcelain: &str) {
+    let mut touched_js_files: Vec<String> = Vec::new();
+    let mut touched_rs = false;
+    for line in status_porcelain.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.len() < 4 {
+            continue;
+        }
+        let status_code = &trimmed[..2];
+        if status_code.contains('D') {
+            continue;
+        }
+        let raw_path = trimmed[3..].trim();
+        let path_part = raw_path
+            .rsplit_once(" -> ")
+            .map(|(_, dst)| dst)
+            .unwrap_or(raw_path)
+            .trim_matches('"');
+        if !workdir.join(path_part).is_file() {
+            continue;
+        }
+        let lower = path_part.to_ascii_lowercase();
+        if lower.ends_with(".rs") {
+            touched_rs = true;
+        } else if lower.ends_with(".ts")
+            || lower.ends_with(".tsx")
+            || lower.ends_with(".js")
+            || lower.ends_with(".jsx")
+            || lower.ends_with(".mjs")
+            || lower.ends_with(".cjs")
+            || lower.ends_with(".json")
+            || lower.ends_with(".css")
+            || lower.ends_with(".md")
+        {
+            touched_js_files.push(path_part.to_string());
+        }
+    }
+
+    let merged_path = build_workdir_path(workdir);
+    if touched_rs && workdir.join("Cargo.toml").is_file() {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["fmt", "--all"])
+            .current_dir(workdir)
+            .env("PATH", &merged_path)
+            .stdin(Stdio::null());
+        let _ = run_command_with_timeout(cmd, Duration::from_secs(45), "auto-cargo-fmt");
+    }
+
+    let prettier_bin = workdir
+        .join("node_modules")
+        .join(".bin")
+        .join(if cfg!(windows) {
+            "prettier.cmd"
+        } else {
+            "prettier"
+        });
+    if !touched_js_files.is_empty() && prettier_bin.exists() {
+        let mut cmd = Command::new(prettier_bin);
+        cmd.args(["--write", "--ignore-unknown"])
+            .args(&touched_js_files)
+            .current_dir(workdir)
+            .env("PATH", &merged_path)
+            .stdin(Stdio::null());
+        let _ = run_command_with_timeout(cmd, Duration::from_secs(60), "auto-prettier");
+    }
+}
+
 fn run_local_check_gate(
     workdir: &Path,
     check_cmd: &str,
@@ -3240,6 +3414,8 @@ fn run_local_check_gate(
 
     cmd.current_dir(workdir)
         .env("PATH", merged_path)
+        .env("CI", "1")
+        .env("VITEST_MAX_WORKERS", "2")
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null());
@@ -3370,6 +3546,45 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
     prompt: &str,
     allow_write_tools: bool,
 ) -> Result<T, BrainError> {
+    invoke_tender_json_validated(
+        agents_cfg,
+        preferred,
+        fallback,
+        workdir,
+        stage_name,
+        prompt,
+        allow_write_tools,
+        |_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invoke_tender_json_validated<T, F>(
+    agents_cfg: &AgentsConfig,
+    preferred: CliRunner,
+    fallback: CliRunner,
+    workdir: &Path,
+    stage_name: &str,
+    prompt: &str,
+    allow_write_tools: bool,
+    validate: F,
+) -> Result<T, BrainError>
+where
+    T: serde::de::DeserializeOwned,
+    F: Fn(&T) -> Result<(), String>,
+{
+    let parse_and_check = |raw: &str| -> Result<T, BrainError> {
+        let parsed = parse_json_from_llm::<T>(raw).map_err(|d| BrainError::InvalidBrainJson {
+            brain: stage_name.to_string(),
+            details: d,
+        })?;
+        validate(&parsed).map_err(|d| BrainError::InvalidBrainJson {
+            brain: stage_name.to_string(),
+            details: d,
+        })?;
+        Ok(parsed)
+    };
+
     let tool = if allow_write_tools { "Edit" } else { "Grep" };
     let sess_pref = format!(
         "ct-{}-{}-{}",
@@ -3379,12 +3594,7 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
     );
     notify_pixel_hook(&sess_pref, "PreToolUse", Some(tool), workdir);
     let first = invoke_tender_cli(agents_cfg, preferred, workdir, prompt, allow_write_tools)
-        .and_then(|raw| {
-            parse_json_from_llm::<T>(&raw).map_err(|d| BrainError::InvalidBrainJson {
-                brain: stage_name.to_string(),
-                details: d,
-            })
-        });
+        .and_then(|raw| parse_and_check(&raw));
     notify_pixel_hook(&sess_pref, "Stop", None, workdir);
     match first {
         Ok(v) => Ok(v),
@@ -3407,10 +3617,7 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
                 invoke_tender_cli(agents_cfg, fallback, workdir, prompt, allow_write_tools);
             notify_pixel_hook(&sess_alt, "Stop", None, workdir);
             let raw = raw_res?;
-            parse_json_from_llm::<T>(&raw).map_err(|d| BrainError::InvalidBrainJson {
-                brain: stage_name.to_string(),
-                details: d,
-            })
+            parse_and_check(&raw)
         }
         Err(err) => Err(err),
     }
@@ -3504,12 +3711,18 @@ mod tests {
         fs::remove_file(dir.join("Cargo.toml")).unwrap();
         fs::write(
             dir.join("package.json"),
-            r#"{"name":"web-app","scripts":{"typecheck":"tsc --noEmit","test":"vitest run"}}"#,
+            r#"{"name":"web-app","scripts":{"format:check":"prettier --check .","typecheck":"tsc --noEmit","check":"npm run typecheck && vitest --coverage","lint":"eslint .","test":"vitest run"}}"#,
         )
         .unwrap();
         assert_eq!(
             infer_local_check_cmd(&dir).as_deref(),
-            Some("npm run typecheck && npm test")
+            Some("npm run format:check && npm run typecheck && npm run lint && npm test")
+        );
+        assert_eq!(
+            sanitize_local_check_cmd(
+                "npm run typecheck && npm run check && npm run lint && npm test"
+            ),
+            "npm run typecheck && npm run lint && npm test"
         );
 
         let _ = fs::remove_dir_all(&dir);

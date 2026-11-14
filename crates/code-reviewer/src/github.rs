@@ -5,8 +5,9 @@
 
 use crate::config::{WorkspaceConfig, expand_tilde, validate_repo_slug};
 use crate::state::{
-    BOT_COMMENT_MARKER, BOT_TENDER_MARKER, GitHubInlineCommentPayload, HumanReplyItem,
-    OpenPrSnapshot, TenderFeedbackItem, TenderFeedbackKind, TenderPrSnapshot,
+    BOT_COMMENT_MARKER, BOT_TENDER_MARKER, BOT_TENDER_NEEDS_HUMAN_MARKER,
+    GitHubInlineCommentPayload, HumanReplyItem, OpenPrSnapshot, TenderFeedbackItem,
+    TenderFeedbackKind, TenderPrSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -833,11 +834,16 @@ fn parse_graphql_tender_response(root: &Value) -> Result<Vec<TenderPrSnapshot>, 
                 let root_db_id = first_c["databaseId"].as_u64().unwrap_or(0);
 
                 // Inspect the latest comment in the thread to detect if Code Tender or the PR author already answered it.
+                // A `NeedsHuman` bot note (`BOT_TENDER_NEEDS_HUMAN_MARKER` / "Leaving this thread open") leaves the thread
+                // awaiting input and must NOT count as answered by either Code Tender or the PR author.
                 let last_c = *valid_comments.last().unwrap_or(&first_c);
                 let last_author = last_c["author"]["login"].as_str().unwrap_or("unknown");
                 let last_body = last_c["body"].as_str().unwrap_or("");
-                let answered_by_tender = last_body.contains(BOT_TENDER_MARKER);
-                let answered_by_pr_author = !answered_by_tender
+                let is_tender_comment = last_body.contains(BOT_TENDER_MARKER);
+                let is_tender_needs_human = last_body.contains(BOT_TENDER_NEEDS_HUMAN_MARKER)
+                    || (is_tender_comment && last_body.contains("Leaving this thread open"));
+                let answered_by_tender = is_tender_comment && !is_tender_needs_human;
+                let answered_by_pr_author = !is_tender_comment
                     && !last_body.contains(BOT_COMMENT_MARKER)
                     && last_author.eq_ignore_ascii_case(&pr_author);
                 let latest_author_reply = if answered_by_pr_author {
@@ -1036,5 +1042,58 @@ mod tests {
             answered_thread.latest_author_reply.as_deref(),
             Some("Tracked in #164.")
         );
+    }
+
+    #[test]
+    fn needs_human_bot_reply_under_same_author_does_not_count_as_answered() {
+        let sample = serde_json::json!({
+            "data": {
+                "repository": {
+                    "openPrs": {
+                        "nodes": [{
+                            "number": 224,
+                            "title": "refactor: wallet",
+                            "isDraft": false,
+                            "isCrossRepository": false,
+                            "baseRefName": "development",
+                            "headRefName": "feat/wallet",
+                            "headRefOid": "0ab540f",
+                            "author": { "login": "alice-dev" },
+                            "reviews": { "nodes": [] },
+                            "comments": { "nodes": [] },
+                            "reviewThreads": {
+                                "nodes": [{
+                                    "id": "PRRT_NH",
+                                    "isResolved": false,
+                                    "path": "src/wallet.ts",
+                                    "line": 10,
+                                    "originalLine": 10,
+                                    "comments": {
+                                        "nodes": [
+                                            {
+                                                "databaseId": 900,
+                                                "author": { "login": "cubic-dev-ai" },
+                                                "body": "P2: Validate origin",
+                                                "createdAt": "2026-11-14T02:00:00Z"
+                                            },
+                                            {
+                                                "databaseId": 901,
+                                                "author": { "login": "alice-dev" },
+                                                "body": format!("{BOT_TENDER_MARKER}\n{BOT_TENDER_NEEDS_HUMAN_MARKER}\n🛠️ **Code Tender:** Leaving this thread open for a human."),
+                                                "createdAt": "2026-11-14T02:05:00Z"
+                                            }
+                                        ]
+                                    }
+                                }]
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        let parsed = parse_graphql_tender_response(&sample).unwrap();
+        let fb = &parsed[0].feedback_items[0];
+        assert!(!fb.answered_by_tender);
+        assert!(!fb.answered_by_pr_author);
     }
 }
