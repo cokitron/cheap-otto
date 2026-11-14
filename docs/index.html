@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cheap-otto · Put the old MacBook to work</title>
+<meta name="description" content="Turn a spare, lid-closed MacBook into a cross-OS dev bridge, a parallel agent worktree farm and an overnight code reviewer for your Windows workstation. 100% reversible.">
+<meta name="theme-color" content="#F7D842">
+<meta property="og:title" content="cheap-otto · Put the old MacBook to work">
+<meta property="og:description" content="A cross-OS dev bridge, parallel agent worktree farm and overnight code reviewer, running on the MacBook in your drawer.">
+<meta property="og:image" content="https://cokitron.github.io/cheap-otto/assets/social-preview.png">
+<meta property="og:url" content="https://cokitron.github.io/cheap-otto/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/otto-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+<script>
+  // Theme before paint: saved choice, else OS preference, else Night Shift.
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('otto-theme'); } catch (e) {}
+    if (t !== 'night' && t !== 'paper') {
+      t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'night';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<style>
+  /* ===== cheap-otto tokens (mirror of the design system's tokens.json) ===== */
+  :root, [data-theme="night"] {
+    --bg: #080808; --surface: #121212; --card: #161616; --card-hover: #1e1e1e; --press: #252525;
+    --ink: #ffffff; --ink-dark: #0a0a0a; --on-dark: #ffffff; --muted: #8e8e8e; --muted-on-dark: #8e8e8e;
+    --rule: #2c2c2c; --line-strong: #3a3a3a; --line-chip: #444444; --code-bg: #222222; --tile-dark: #171717;
+    --yellow: #F7D842; --yellow-hover: #ffe159; --amber: #DE9E1E; --coral: #F07A74; --mint: #4ADE80; --cyan: #38BDF8;
+    --link: #F7D842; --focus: #F7D842; --otter-fur: #9a6a3c; --otter-muzzle: #f1dfc0;
+    --shadow-sm: 2px 2px 0 #ffffff; --shadow: 4px 4px 0 #ffffff; --shadow-lg: 6px 6px 0 #ffffff; --shadow-signal: 3px 3px 0 #F7D842;
+    --stroke-hair: 1.5px; --stroke-2: 2px; --stroke-3: 3px; --stroke-rule: 4px;
+    --font-display: "Archivo Black", "Arial Black", Impact, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "IBM Plex Mono", "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, ui-monospace, monospace;
+    color-scheme: dark;
+  }
+  [data-theme="paper"] {
+    --bg: #f4f1e8; --surface: #ebe7da; --card: #ffffff; --card-hover: #faf8f2; --press: #e3dfd2;
+    --ink: #0a0a0a; --muted: #5c5a52; --rule: #c9c4b4; --line-strong: #b9b3a1; --line-chip: #a8a290; --code-bg: #e3dfd2; --tile-dark: #0a0a0a;
+    --link: #0a0a0a; --focus: #0a0a0a;
+    --shadow-sm: 2px 2px 0 #0a0a0a; --shadow: 4px 4px 0 #0a0a0a; --shadow-lg: 6px 6px 0 #0a0a0a;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; border-radius: 0; }
+  html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.5 var(--font-mono); -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  }
+  a { color: var(--link); text-underline-offset: 3px; }
+  a:hover { background: var(--yellow); color: var(--ink-dark); text-decoration: none; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  code { font-family: var(--font-mono); background: var(--code-bg); border: 1px solid var(--line-strong); padding: 1px 5px; font-size: 12px; }
+  img.px { image-rendering: pixelated; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 22px; }
+  @media (max-width: 600px) { .wrap { padding: 0 16px; } }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ===== atoms ===== */
+  .btn {
+    font: 700 12px/1.2 var(--font-mono); letter-spacing: .04em; text-transform: uppercase;
+    padding: 9px 15px; border: var(--stroke-2) solid var(--ink); background: var(--yellow); color: var(--ink-dark);
+    box-shadow: var(--shadow-sm); display: inline-flex; align-items: center; gap: 8px; cursor: pointer; text-decoration: none;
+    transition: transform 60ms ease, box-shadow 60ms ease;
+  }
+  .btn:hover { background: var(--yellow-hover); color: var(--ink-dark); transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--ink); }
+  .btn:active { transform: translate(2px,2px); box-shadow: 0 0 0 var(--ink); }
+  .btn.sec { background: var(--card); color: var(--ink); }
+  .btn.sec:hover { background: var(--press); color: var(--ink); }
+  .btn.mint { background: var(--mint); }
+  .btn.big { font-size: 14px; padding: 13px 20px; box-shadow: var(--shadow); }
+  .btn.big:hover { box-shadow: 5px 5px 0 var(--ink); }
+  .btn.sm { font-size: 11px; padding: 5px 9px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+  /* buttons on yellow keep an ink-dark frame in both themes */
+  .on-yellow .btn { border-color: var(--ink-dark); box-shadow: 2px 2px 0 var(--ink-dark); }
+  .on-yellow .btn.big { box-shadow: 4px 4px 0 var(--ink-dark); }
+  .on-yellow .btn:hover { box-shadow: 5px 5px 0 var(--ink-dark); }
+  .on-yellow .btn.sec { background: var(--ink-dark); color: #fff; }
+  .on-yellow .btn.sec:hover { background: #222; color: #fff; }
+
+  .status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: var(--stroke-hair) solid var(--line-chip); background: var(--surface); color: var(--ink); font-size: 11.5px; letter-spacing: .03em; text-transform: uppercase; }
+  .sq { width: 8px; height: 8px; display: inline-block; background: var(--mint); flex: none; }
+  .sq.warn { background: var(--amber); } .sq.err { background: var(--coral); } .sq.idle { background: var(--muted); }
+  .sq.run { background: var(--yellow); animation: blink .9s steps(2,start) infinite; }
+  @keyframes blink { to { opacity: .2; } }
+  .inv { display: inline-block; background: var(--ink); color: var(--bg); font-weight: 800; padding: 0 6px; line-height: 1.45; }
+  .inv.y { background: var(--yellow); color: var(--ink-dark); } .inv.m { background: var(--mint); color: var(--ink-dark); }
+  .inv.c { background: var(--coral); color: var(--ink-dark); } .inv.cy { background: var(--cyan); color: var(--ink-dark); }
+
+  .sechead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
+  .sectag { background: var(--ink); color: var(--bg); font: 400 14px/1.3 var(--font-display); letter-spacing: .04em; padding: 3px 9px; text-transform: uppercase; }
+  .secsub { color: var(--muted); font-size: 12.5px; }
+  .h2 { font: 400 clamp(34px, 6vw, 72px)/.92 var(--font-display); letter-spacing: -.03em; text-transform: uppercase; margin: 14px 0 14px; max-width: 16ch; }
+  .lede { font-size: 15px; line-height: 1.65; max-width: 62ch; margin: 0 0 28px; }
+  section.block { padding: 88px 0 24px; }
+  @media (max-width: 700px) { section.block { padding-top: 64px; } }
+
+  .card { background: var(--card); border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow); }
+  .label { font-size: 11.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+
+  .term { background: var(--tile-dark); color: var(--on-dark); border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow); font: 12.5px/1.65 var(--font-mono); min-width: 0; }
+  .term-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: var(--stroke-2) solid var(--ink); background: var(--yellow); color: var(--ink-dark); font-weight: 800; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  .term-bar .btn { border-color: var(--ink-dark); box-shadow: 2px 2px 0 var(--ink-dark); background: var(--ink-dark); color: #fff; }
+  .term pre { margin: 0; padding: 14px 16px; overflow-x: auto; white-space: pre; min-height: 3.3em; }
+  .term .p { color: var(--yellow); } .term .c { color: var(--muted-on-dark); } .term .ok { color: var(--mint); } .term .err { color: var(--coral); } .term .w { color: var(--amber); } .term .cy { color: var(--cyan); }
+  .cursor { display: inline-block; width: .6em; height: 1.1em; background: var(--yellow); vertical-align: -2px; animation: blink 1s steps(2,start) infinite; }
+
+  /* ===== topbar ===== */
+  header.top { position: sticky; top: 0; z-index: 50; background: var(--bg); border-bottom: var(--stroke-2) solid var(--ink); }
+  .top-in { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 22px; max-width: 1240px; margin: 0 auto; }
+  .brandmark { display: inline-flex; align-items: center; gap: 8px; background: var(--ink); color: var(--bg); font: 400 13px/1 var(--font-display); letter-spacing: .04em; padding: 7px 10px; text-transform: uppercase; text-decoration: none; border: var(--stroke-2) solid var(--ink); }
+  .brandmark:hover { background: var(--ink); color: var(--bg); }
+  .brandmark b { background: var(--yellow); color: var(--ink-dark); padding: 1px 4px; font-weight: 400; }
+  .modenav { display: inline-flex; border: var(--stroke-2) solid var(--ink); background: var(--surface); box-shadow: var(--shadow-sm); }
+  .modenav a, .modenav button { border: 0; border-right: var(--stroke-2) solid var(--ink); background: transparent; color: var(--muted); padding: 7px 12px; font: 700 12px/1.2 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; text-decoration: none; cursor: pointer; }
+  .modenav > :last-child { border-right: 0; }
+  .modenav a:hover, .modenav button:hover { background: var(--press); color: var(--ink); }
+  .modenav .on { background: var(--yellow); color: var(--ink-dark); }
+  .top-nav { display: flex; gap: 12px; align-items: center; }
+  @media (max-width: 980px) { .top-nav .modenav.sections { display: none; } }
+  @media (max-width: 520px) { .top-in { padding: 10px 16px; } .gh-txt { display: none; } }
+
+  /* ===== hero ===== */
+  .hero { padding: 40px 0 0; }
+  .hero-slab { position: relative; background: var(--yellow); color: var(--ink-dark); border: var(--stroke-3) solid var(--ink); box-shadow: var(--shadow-lg); padding: 28px 30px 0; overflow: hidden; }
+  .hero-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
+  .hero-chips .status { background: var(--ink-dark); color: #fff; border-color: var(--ink-dark); }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: end; }
+  .hero h1 { margin: 0; font: 400 clamp(46px, 9.2vw, 124px)/.9 var(--font-display); letter-spacing: -.035em; text-transform: uppercase; }
+  .hero h1 .strike { position: relative; white-space: nowrap; }
+  .hero h1 .strike::after { content: ""; position: absolute; left: -2%; right: -2%; top: 50%; height: .09em; background: var(--ink-dark); transform: rotate(-3deg); }
+  .hero-lede { font-size: 15px; line-height: 1.65; max-width: 60ch; margin: 22px 0 24px; font-weight: 400; }
+  .hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 30px; }
+  .hero-art { position: relative; align-self: end; display: flex; flex-direction: column; align-items: center; }
+  .hero-art img { width: 210px; height: auto; display: block; animation: peek 2.4s steps(1) infinite; }
+  @keyframes peek { 0%, 70% { transform: translateY(0); } 72%, 86% { transform: translateY(-10px); } 88% { transform: translateY(0); } }
+  .bubble { position: absolute; top: -6px; left: -18px; background: #fff; color: var(--ink-dark); border: var(--stroke-2) solid var(--ink-dark); box-shadow: 3px 3px 0 var(--ink-dark); font-weight: 800; font-size: 12px; padding: 6px 9px; text-transform: uppercase; letter-spacing: .04em; }
+  .bubble::after { content: ""; position: absolute; right: 18px; bottom: -10px; width: 10px; height: 10px; background: #fff; border-right: var(--stroke-2) solid var(--ink-dark); border-bottom: var(--stroke-2) solid var(--ink-dark); transform: skewX(30deg); }
+  .hero-floor { height: 0; }
+  @media (max-width: 820px) {
+    .hero-grid { grid-template-columns: 1fr; }
+    .hero-art { align-items: flex-start; }
+    .hero-art img { width: 160px; }
+    .bubble { left: 150px; top: 10px; }
+    .bubble::after { left: -8px; right: auto; bottom: 10px; transform: skewY(30deg) rotate(90deg); }
+    .hero-slab { padding: 22px 18px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .hero-art img, .sq.run, .cursor { animation: none; } }
+
+  .hero-term { margin: 28px 0 0; }
+  .hero-term pre { min-height: 8.6em; }
+
+  /* ===== ticker ===== */
+  .ticker { margin-top: 56px; border-top: var(--stroke-2) solid var(--ink); border-bottom: var(--stroke-2) solid var(--ink); background: var(--ink); color: var(--bg); overflow: hidden; }
+  .ticker-track { display: flex; width: max-content; animation: tick 48s linear infinite; }
+  .ticker span { font: 400 15px/1 var(--font-display); letter-spacing: .04em; text-transform: uppercase; padding: 14px 0; white-space: nowrap; }
+  .ticker span::after { content: "■"; color: var(--yellow); margin: 0 22px; font-size: 11px; vertical-align: 2px; }
+  [data-theme="paper"] .ticker span::after { color: var(--yellow); }
+  @keyframes tick { to { transform: translateX(-50%); } }
+  @media (prefers-reduced-motion: reduce) { .ticker-track { animation: none; flex-wrap: wrap; width: auto; } }
+
+  /* ===== bridge ===== */
+  .bridge { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr); gap: 0; align-items: stretch; }
+  .machine { padding: 18px; border: var(--stroke-3) solid var(--ink); box-shadow: var(--shadow-lg); color: var(--ink-dark); display: flex; flex-direction: column; gap: 10px; min-height: 280px; position: relative; z-index: 1; }
+  .machine.win { background: var(--cyan); }
+  .machine.mac { background: var(--yellow); }
+  .machine h3 { margin: 0; font: 400 26px/.95 var(--font-display); text-transform: uppercase; letter-spacing: -.02em; }
+  .machine .path { font-weight: 700; font-size: 12px; background: var(--ink-dark); color: #fff; padding: 4px 8px; align-self: flex-start; max-width: 100%; overflow-wrap: anywhere; }
+  .machine ul { margin: auto 0 0; padding: 0; list-style: none; font-size: 12px; font-weight: 700; }
+  .machine li { border-top: var(--stroke-hair) solid var(--ink-dark); padding: 6px 0; }
+  .lanes { display: flex; flex-direction: column; justify-content: center; gap: 14px; padding: 14px 0; }
+  .lane { position: relative; height: 46px; border-top: var(--stroke-2) dashed var(--ink); border-bottom: var(--stroke-2) dashed var(--ink); background: var(--surface); overflow: hidden; }
+  .lane-label { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: var(--bg); border: var(--stroke-2) solid var(--ink); padding: 3px 8px; font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; z-index: 2; white-space: nowrap; }
+  .pkt { position: absolute; top: 50%; width: 12px; height: 12px; margin-top: -6px; background: var(--ink); animation: ltr 2.6s linear infinite; }
+  .lane.rtl .pkt { animation-name: rtl; }
+  .pkt.y { background: var(--yellow); outline: 2px solid var(--ink-dark); } .pkt.cy { background: var(--cyan); outline: 2px solid var(--ink-dark); } .pkt.m { background: var(--mint); outline: 2px solid var(--ink-dark); }
+  @keyframes ltr { from { left: -14px; } to { left: 100%; } }
+  @keyframes rtl { from { left: 100%; } to { left: -14px; } }
+  @media (prefers-reduced-motion: reduce) { .pkt { animation: none; left: 20%; } .pkt:nth-child(3) { left: 70%; } }
+  @media (max-width: 860px) {
+    .bridge { grid-template-columns: 1fr; }
+    .machine { min-height: 0; }
+    .lanes { padding: 10px 0; }
+  }
+
+  /* ===== jobs (vitals) ===== */
+  .vitals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 1100px) { .vitals { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 640px) { .vitals { grid-template-columns: 1fr; } }
+  .vital { border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow); padding: 15px 16px; min-height: 230px; display: flex; flex-direction: column; background: var(--card); color: var(--ink); text-decoration: none; transition: transform 70ms ease, box-shadow 70ms ease; }
+  a.vital:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 var(--ink); background: var(--card-hover); color: var(--ink); }
+  .vital.y { background: var(--yellow); color: var(--ink-dark); } a.vital.y:hover { background: var(--yellow-hover); color: var(--ink-dark); }
+  .vital.m { background: var(--mint); color: var(--ink-dark); } a.vital.m:hover { background: var(--mint); color: var(--ink-dark); }
+  .vital.d { background: var(--tile-dark); color: var(--on-dark); } a.vital.d:hover { background: var(--tile-dark); color: var(--on-dark); }
+  .vital-val { font: 400 34px/1 var(--font-display); letter-spacing: -.03em; margin: 12px 0 10px; text-transform: uppercase; overflow-wrap: anywhere; }
+  .vital-dash { width: 28px; height: var(--stroke-rule); background: currentColor; margin: 0 0 12px; }
+  .vital p { margin: 0 0 14px; font-size: 12.5px; line-height: 1.55; }
+  .vital .cmds { margin-top: auto; font-size: 11.5px; font-weight: 700; opacity: .9; }
+  .vital.d .cmds { color: var(--muted-on-dark); opacity: 1; }
+
+  /* ===== farm ===== */
+  .farm { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .farm > *, .guard > *, .doctor > *, .board > * { min-width: 0; }
+  @media (max-width: 960px) { .farm { grid-template-columns: 1fr; } }
+  .panel { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .panel h3 { margin: 0; font: 400 18px/1 var(--font-display); text-transform: uppercase; letter-spacing: -.01em; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > span { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .seg { display: flex; flex-wrap: wrap; border: var(--stroke-2) solid var(--ink); background: var(--surface); }
+  .seg button { flex: 1 1 auto; border: 0; border-right: var(--stroke-2) solid var(--ink); background: transparent; color: var(--muted); padding: 7px 8px; font: 700 11.5px/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .03em; cursor: pointer; }
+  .seg button:last-child { border-right: 0; }
+  .seg button:hover { background: var(--press); color: var(--ink); }
+  .seg button[aria-pressed="true"] { background: var(--yellow); color: var(--ink-dark); }
+  input[type=text], select { width: 100%; background: var(--bg); color: var(--ink); border: var(--stroke-2) solid var(--ink); padding: 8px 10px; font: 12.5px/1.4 var(--font-mono); }
+  select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--ink) 50%), linear-gradient(135deg, var(--ink) 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+  .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 700px) { .board { grid-template-columns: 1fr; } }
+  .col-head { display: flex; justify-content: space-between; align-items: baseline; border-bottom: var(--stroke-2) solid var(--ink); padding-bottom: 7px; margin-bottom: 14px; font-size: 12px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
+  .col-stack { display: flex; flex-direction: column; gap: 14px; min-height: 120px; }
+  .col-empty { border: var(--stroke-2) dashed var(--line-strong); color: var(--muted); padding: 14px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; text-align: center; }
+  .ticket { background: var(--card); border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow); padding: 13px 14px; display: flex; flex-direction: column; gap: 8px; animation: drop 160ms steps(3) both; }
+  @keyframes drop { from { transform: translate(-6px, -6px); box-shadow: 10px 10px 0 var(--ink); } }
+  .ticket-meta { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; overflow-wrap: anywhere; }
+  .ticket-title { font-weight: 800; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+  .bar { display: flex; gap: 3px; }
+  .bar i { flex: 1; height: 10px; border: var(--stroke-hair) solid var(--ink); background: transparent; }
+  .bar i.f { background: var(--yellow); }
+  .ticket .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .mini-otter { width: 30px; height: auto; animation: bob .5s steps(2) infinite; }
+  @keyframes bob { 50% { transform: translateY(-2px); } }
+
+  /* ===== guardrails ===== */
+  .guard { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .guard { grid-template-columns: 1fr; } }
+  .battery { display: flex; align-items: center; gap: 6px; }
+  .batt-body { flex: 1; display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; padding: 6px; border: var(--stroke-3) solid var(--ink); height: 74px; }
+  .batt-body i { background: transparent; border: var(--stroke-hair) dashed var(--line-strong); }
+  .batt-body i.f { border: 0; background: var(--mint); }
+  .batt-body.amber i.f { background: var(--amber); } .batt-body.coral i.f { background: var(--coral); }
+  .batt-cap { width: 10px; height: 30px; background: var(--ink); }
+  .readout { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .readout .num { font: 400 68px/.85 var(--font-display); letter-spacing: -.04em; }
+  .verdict { font-weight: 800; text-transform: uppercase; letter-spacing: .04em; font-size: 12px; padding: 5px 9px; color: var(--ink-dark); background: var(--mint); }
+  .verdict.amber { background: var(--amber); } .verdict.coral { background: var(--coral); }
+  input[type=range] { width: 100%; appearance: none; height: 28px; background: transparent; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 8px; background: var(--surface); border: var(--stroke-2) solid var(--ink); }
+  input[type=range]::-moz-range-track { height: 8px; background: var(--surface); border: var(--stroke-2) solid var(--ink); }
+  input[type=range]::-webkit-slider-thumb { appearance: none; width: 20px; height: 26px; margin-top: -11px; background: var(--yellow); border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow-sm); }
+  input[type=range]::-moz-range-thumb { width: 18px; height: 24px; background: var(--yellow); border: var(--stroke-2) solid var(--ink); border-radius: 0; box-shadow: var(--shadow-sm); }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; font-weight: 700; }
+  .toggles { display: flex; flex-wrap: wrap; gap: 8px; }
+  .toggle { display: inline-flex; align-items: center; gap: 8px; border: var(--stroke-2) solid var(--ink); background: var(--bg); padding: 6px 10px; font: 700 11.5px/1.2 var(--font-mono); text-transform: uppercase; letter-spacing: .03em; color: var(--ink); cursor: pointer; }
+  .toggle .box { width: 12px; height: 12px; border: var(--stroke-2) solid var(--ink); }
+  .toggle[aria-pressed="true"] .box { background: var(--yellow); box-shadow: inset 0 0 0 2px var(--bg); }
+  .actions { display: flex; flex-direction: column; gap: 8px; }
+  .action { border: var(--stroke-2) solid var(--ink); padding: 10px 12px; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: center; background: var(--card); }
+  .action b { font-size: 12.5px; }
+  .action small { grid-column: 2; color: var(--muted); font-size: 11.5px; }
+  .action.allow { background: var(--mint); color: var(--ink-dark); } .action.allow small { color: var(--ink-dark); }
+  .action.evict { background: var(--coral); color: var(--ink-dark); } .action.evict small { color: var(--ink-dark); }
+  .action.pause { background: var(--amber); color: var(--ink-dark); } .action.pause small { color: var(--ink-dark); }
+  .action .sq { background: var(--ink-dark); }
+
+  /* ===== doctor ===== */
+  .doctor { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .doctor { grid-template-columns: 1fr; } }
+  .doctor .term pre { min-height: 17em; }
+  .score { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .score i { height: 64px; border: var(--stroke-2) solid var(--ink); background: var(--surface); display: grid; place-items: center; font-style: normal; font-weight: 800; font-size: 12px; color: var(--muted); }
+  .score i.pass { background: var(--mint); color: var(--ink-dark); } .score i.warn { background: var(--amber); color: var(--ink-dark); }
+
+  /* ===== reviewer ===== */
+  .brains { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  @media (max-width: 900px) { .brains { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .brain { border: var(--stroke-2) solid var(--ink); background: var(--card); box-shadow: var(--shadow); padding: 13px; min-height: 118px; display: flex; flex-direction: column; justify-content: space-between; gap: 10px; }
+  .brain .n { font: 400 30px/1 var(--font-display); letter-spacing: -.03em; }
+  .brain .t { font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; overflow-wrap: anywhere; }
+  .brain .s { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .brain.run { background: var(--yellow); color: var(--ink-dark); } .brain.run .s { color: var(--ink-dark); }
+  .brain.done { background: var(--mint); color: var(--ink-dark); } .brain.done .s { color: var(--ink-dark); }
+  .brain.verifier { background: var(--tile-dark); color: var(--on-dark); grid-column: span 1; }
+  .brain.verifier .s { color: var(--muted-on-dark); }
+  .brain.verifier.run { background: var(--coral); color: var(--ink-dark); } .brain.verifier.run .s { color: var(--ink-dark); }
+  .brain.verifier.done { background: var(--mint); color: var(--ink-dark); } .brain.verifier.done .s { color: var(--ink-dark); }
+  .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: var(--stroke-2) solid var(--ink); margin-top: 24px; }
+  @media (max-width: 800px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .fact { padding: 14px 16px; border-right: var(--stroke-2) solid var(--ink); }
+  .fact:last-child { border-right: 0; }
+  @media (max-width: 800px) { .fact:nth-child(2) { border-right: 0; } .fact:nth-child(-n+2) { border-bottom: var(--stroke-2) solid var(--ink); } }
+  .fact b { display: block; font: 400 28px/1 var(--font-display); letter-spacing: -.03em; margin-bottom: 6px; }
+  .fact span { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+
+  /* ===== quickstart ===== */
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .tabs button { background: var(--bg); color: var(--muted); border: var(--stroke-2) solid var(--line-strong); padding: 7px 13px; font: 700 12px/1.2 var(--font-mono); letter-spacing: .04em; text-transform: uppercase; cursor: pointer; }
+  .tabs button:hover { border-color: var(--ink); color: var(--ink); }
+  .tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); box-shadow: var(--shadow-signal); }
+  .tabs .n { opacity: .6; margin-right: 6px; }
+
+  /* ===== brand kit ===== */
+  .kit { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 900px) { .kit { grid-template-columns: 1fr; } }
+  .kit-tile { padding: 0; display: flex; flex-direction: column; }
+  .kit-art { min-height: 190px; display: grid; place-items: center; padding: 22px; border-bottom: var(--stroke-2) solid var(--ink); }
+  .kit-art.light { background: #f4f1e8; } .kit-art.dark { background: #080808; }
+  .kit-art img { max-width: 100%; height: auto; }
+  .kit-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+  .kit-foot .label { font-size: 11px; }
+  .swatches { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+  @media (max-width: 760px) { .swatches { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .swatch { border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow-sm); background: var(--card); color: var(--ink); padding: 0; text-align: left; cursor: pointer; font: inherit; }
+  .swatch:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--ink); }
+  .swatch .chip { height: 70px; border-bottom: var(--stroke-2) solid var(--ink); }
+  .swatch .meta { padding: 7px 9px; display: flex; flex-direction: column; gap: 2px; }
+  .swatch .meta b { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .swatch .meta span { font-size: 11px; color: var(--muted); }
+  .type-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+  @media (max-width: 760px) { .type-row { grid-template-columns: 1fr; } }
+  .type-card { padding: 16px; }
+  .type-card .big { font: 400 56px/1 var(--font-display); letter-spacing: -.03em; margin: 8px 0; overflow-wrap: anywhere; }
+  .type-card .big.mono { font: 800 40px/1.1 var(--font-mono); letter-spacing: -.02em; }
+
+  /* ===== footer ===== */
+  footer { margin-top: 96px; background: var(--yellow); color: var(--ink-dark); border-top: var(--stroke-3) solid var(--ink); }
+  .foot-in { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: end; padding: 40px 22px 28px; max-width: 1240px; margin: 0 auto; }
+  .foot-word { width: min(100%, 640px); height: auto; display: block; }
+  .foot-links { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 22px; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .foot-links a { color: var(--ink-dark); }
+  .foot-links a:hover { background: var(--ink-dark); color: var(--yellow); }
+  .foot-otter { width: 150px; height: auto; }
+  .colophon { border-top: var(--stroke-hair) solid var(--ink-dark); padding: 12px 22px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; max-width: 1240px; margin: 0 auto; }
+  @media (max-width: 640px) { .foot-in { grid-template-columns: 1fr; } .foot-otter { width: 110px; } }
+
+  .toast { position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, calc(100% + 40px)); visibility: hidden; background: var(--ink); color: var(--bg); border: var(--stroke-2) solid var(--ink); box-shadow: var(--shadow-signal); padding: 9px 14px; font-weight: 800; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; z-index: 80; transition: transform 120ms steps(3), visibility 0s 120ms; }
+  .toast.show { transform: translate(-50%, 0); visibility: visible; transition: transform 120ms steps(3); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brandmark" href="#top" aria-label="cheap-otto home">cheap-<b>otto</b></a>
+    <div class="top-nav">
+      <nav class="modenav sections" aria-label="Sections">
+        <a href="#bridge">Bridge</a><a href="#farm">Farm</a><a href="#guardrails">Guardrails</a><a href="#reviewer">Reviewer</a><a href="#install">Install</a>
+      </nav>
+      <div class="modenav" role="group" aria-label="Theme">
+        <button type="button" data-theme-btn="night">Night</button><button type="button" data-theme-btn="paper">Paper</button>
+      </div>
+      <a class="btn" href="https://github.com/cokitron/cheap-otto">★ <span class="gh-txt">GitHub</span></a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ================= HERO ================= -->
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-slab on-yellow">
+        <div class="hero-chips">
+          <span class="status"><i class="sq"></i>otto-mac online</span>
+          <span class="status"><i class="sq run"></i>4 agents working</span>
+          <span class="status"><i class="sq warn"></i>Lid closed · screen broken</span>
+          <span class="status"><i class="sq"></i>Battery held at 78%</span>
+        </div>
+        <div class="hero-grid">
+          <div>
+            <h1>Put the <span class="strike">dead</span> old MacBook to work.</h1>
+            <p class="hero-lede">cheap-otto pairs your <b>Windows workstation</b> with a spare, lid-closed <b>MacBook</b> over SSH so they work like one machine. You get native macOS builds, a farm of coding agents in isolated worktrees, and a PR reviewer that runs overnight. Every change it makes to macOS can be undone with one command.</p>
+            <div class="hero-cta">
+              <a class="btn big" href="#install">Get started →</a>
+              <a class="btn big sec" href="https://github.com/cokitron/cheap-otto">★ Star on GitHub</a>
+            </div>
+          </div>
+          <div class="hero-art" aria-hidden="true">
+            <span class="bubble">o=o</span>
+            <img class="px" src="assets/otto-pixel.svg" alt="" width="210" height="190">
+          </div>
+        </div>
+      </div>
+
+      <div class="term hero-term" role="region" aria-label="Example session">
+        <div class="term-bar"><span>windows → otto-mac</span><span id="typer-step">1 / 4</span></div>
+        <pre id="typer" aria-live="off"></pre>
+      </div>
+    </div>
+
+    <div class="ticker" aria-hidden="true">
+      <div class="ticker-track" id="ticker"></div>
+    </div>
+  </section>
+
+  <!-- ================= JOBS ================= -->
+  <section class="block" id="jobs">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">Five jobs</span><span class="secsub">for the laptop in your drawer</span></div>
+      <h2 class="h2">One old laptop, five jobs.</h2>
+      <div class="vitals">
+        <a class="vital y" href="#bridge"><span class="label">01 · bridge</span><span class="vital-val">Bridge</span><p>Sync a Windows repo to the Mac, run native ARM64 builds, forward dev ports back to localhost.</p><span class="cmds">pair · sync · exec · shell</span></a>
+        <a class="vital" href="#farm"><span class="label">02 · farm</span><span class="vital-val">Farm</span><p>Hand tasks to Claude Code, Antigravity or Kiro, each in its own git worktree and tmux session.</p><span class="cmds">delegate · inspect · ask · pull</span></a>
+        <a class="vital d" href="#farm"><span class="label">03 · watch</span><span class="vital-val">:7420</span><p>Mission Control web GUI and REST API, plus the pixel-agents office on :7421.</p><span class="cmds">ui · serve · template</span></a>
+        <a class="vital m" href="#reviewer"><span class="label">04 · night shift</span><span class="vital-val">CI</span><p>launchd schedules, overnight agent runs with draft PRs, and an 8-brain code reviewer.</p><span class="cmds">schedule · runs · code-reviewer</span></a>
+        <a class="vital" href="#guardrails"><span class="label">05 · guardrails</span><span class="vital-dash" aria-hidden="true"></span><span class="vital-val">Undo</span><p>Clamshell mode, a battery ceiling and thermal arbitration, all snapshotted first.</p><span class="cmds">init · doctor · restore</span></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= BRIDGE ================= -->
+  <section class="block" id="bridge">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">The bridge</span><span class="secsub">src/bridge.rs · plain SSH over LAN or Tailscale</span></div>
+      <h2 class="h2">Two operating systems. One machine.</h2>
+      <p class="lede">Your code lives on Windows. macOS builds, iOS simulators and long agent runs happen on the Mac. Git over SSH moves the code and leaves <code>target/</code> and <code>node_modules/</code> behind. Uncommitted edits on the Mac are protected by default.</p>
+      <div class="bridge">
+        <div class="machine win">
+          <span class="label">You · driving</span>
+          <h3>Windows<br>workstation</h3>
+          <span class="path">D:\projects\my-app</span>
+          <ul><li>You keep coding on main</li><li>Your terminal stays free</li><li>localhost:3000 just works</li></ul>
+        </div>
+        <div class="lanes" aria-label="What crosses the bridge">
+          <div class="lane"><span class="lane-label">sync → git + ssh</span><i class="pkt cy"></i><i class="pkt cy" style="animation-delay:-1.3s"></i></div>
+          <div class="lane"><span class="lane-label">exec → native arm64</span><i class="pkt" style="animation-delay:-.6s"></i><i class="pkt" style="animation-delay:-1.9s"></i></div>
+          <div class="lane rtl"><span class="lane-label">← ports 3000 · 5173 · 8080</span><i class="pkt y"></i><i class="pkt y" style="animation-delay:-1.3s"></i></div>
+          <div class="lane rtl"><span class="lane-label">← pull otto/&lt;task-id&gt;</span><i class="pkt m" style="animation-delay:-.9s"></i></div>
+        </div>
+        <div class="machine mac">
+          <span class="label">otto-mac · M1 · lid closed</span>
+          <h3>Headless<br>MacBook</h3>
+          <span class="path">~/otto-workspaces/my-app</span>
+          <ul><li>.otto-worktrees/&lt;task-id&gt;</li><li>tmux: otto-&lt;task-id&gt;</li><li>branch: otto/&lt;task-id&gt;</li></ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FARM ================= -->
+  <section class="block" id="farm">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">The farm</span><span class="secsub">src/worktree.rs · src/harness.rs · try it, this is a simulation</span></div>
+      <h2 class="h2">Delegate. Walk away. Pull.</h2>
+      <p class="lede">Each task gets its own git worktree, branch and detached tmux session on the Mac, so agents never step on each other or on you. When one finishes, its branch is fetched straight into your Windows repo.</p>
+      <div class="farm">
+        <form class="card panel" id="farm-form" autocomplete="off">
+          <h3>New task</h3>
+          <div class="field"><span>Harness</span>
+            <div class="seg" id="harness" role="group" aria-label="Harness">
+              <button type="button" data-v="claude" aria-pressed="true">claude</button><button type="button" data-v="agy" aria-pressed="false">agy</button><button type="button" data-v="kiro" aria-pressed="false">kiro</button><button type="button" data-v="custom" aria-pressed="false">custom</button>
+            </div>
+          </div>
+          <label class="field"><span>Model</span><select id="model"></select></label>
+          <div class="field"><span>Effort</span>
+            <div class="seg" id="effort" role="group" aria-label="Effort">
+              <button type="button" data-v="low" aria-pressed="false">low</button><button type="button" data-v="medium" aria-pressed="false">med</button><button type="button" data-v="high" aria-pressed="true">high</button><button type="button" data-v="max" aria-pressed="false">max</button>
+            </div>
+          </div>
+          <label class="field"><span>Task</span><input type="text" id="task" value="Fix the token refresh race and add unit tests" maxlength="90"></label>
+          <button class="btn big" type="submit">Delegate →</button>
+          <div class="term"><div class="term-bar"><span>command</span><button type="button" class="btn sm" id="copy-farm">Copy</button></div><pre id="farm-cmd"></pre></div>
+        </form>
+        <div>
+          <div class="board">
+            <div><div class="col-head"><span>Queued</span><span id="n-queued">0</span></div><div class="col-stack" id="col-queued"></div></div>
+            <div><div class="col-head"><span>Running</span><span id="n-running">0</span></div><div class="col-stack" id="col-running"></div></div>
+            <div><div class="col-head"><span>Ready to pull</span><span id="n-done">0</span></div><div class="col-stack" id="col-done"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GUARDRAILS ================= -->
+  <section class="block" id="guardrails">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">Guardrails</span><span class="secsub">src/macos.rs · src/arbiter.rs · everything is snapshotted to .cheap-otto/state-backup.json first</span></div>
+      <h2 class="h2">A laptop on AC 24/7 needs rules.</h2>
+      <p class="lede">A fanless MacBook Air with its lid closed, charging all day, is a battery-swell and thermal problem waiting to happen. cheap-otto caps the charge, keeps a battery sleep fallback and evicts local LLM weights before RAM or heat run out. <code>cheap-otto restore</code> puts every setting back.</p>
+      <div class="guard">
+        <div class="card panel">
+          <h3>Battery ceiling</h3>
+          <div class="readout"><span class="num" id="cap-num">78%</span><span class="verdict" id="cap-verdict">Swell-safe for 24/7 AC</span></div>
+          <div class="battery" aria-hidden="true"><div class="batt-body" id="batt"></div><div class="batt-cap"></div></div>
+          <label class="field"><span>Charge ceiling (50–100%)</span><input type="range" id="cap" min="50" max="100" value="78" step="1" aria-describedby="cap-verdict"></label>
+          <div class="scale"><span>50</span><span>78 · default</span><span>100 · factory</span></div>
+          <div class="term"><div class="term-bar"><span>cheap-otto init</span><span>reversible</span></div><pre id="cap-cmd"></pre></div>
+        </div>
+        <div class="card panel">
+          <h3>Thermal &amp; RAM arbiter</h3>
+          <div class="field"><span>Thermal level</span>
+            <div class="seg" id="thermal" role="group" aria-label="Thermal level">
+              <button type="button" data-v="0" aria-pressed="true">Nominal</button><button type="button" data-v="1" aria-pressed="false">Fair</button><button type="button" data-v="2" aria-pressed="false">Serious</button><button type="button" data-v="3" aria-pressed="false">Critical</button>
+            </div>
+          </div>
+          <label class="field"><span>Free unified memory · <b id="ram-v">6144 MB</b> (floor 2048 MB)</span><input type="range" id="ram" min="512" max="12288" step="256" value="6144"></label>
+          <label class="field"><span>Local LLM idle · <b id="idle-v">60 s</b> (evict at 300 s)</span><input type="range" id="idle" min="0" max="600" step="15" value="60"></label>
+          <div class="toggles">
+            <button type="button" class="toggle" id="t-llm" aria-pressed="true"><span class="box"></span>Local LLM loaded</button>
+            <button type="button" class="toggle" id="t-ci" aria-pressed="false"><span class="box"></span>CI build running</button>
+            <button type="button" class="toggle" id="t-kill" aria-pressed="false"><span class="box"></span>Kill-switch</button>
+          </div>
+          <div class="field"><span>ArbiterPolicy::evaluate →</span><div class="actions" id="actions" aria-live="polite"></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= DOCTOR ================= -->
+  <section class="block" id="doctor">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">The doctor</span><span class="secsub">src/doctor.rs · 8-point appliance health check</span></div>
+      <h2 class="h2">Eight checks before you trust it.</h2>
+      <div class="doctor">
+        <div class="term"><div class="term-bar"><span>otto-mac · zsh</span><button type="button" class="btn sm" id="run-doctor">Run doctor</button></div><pre id="doctor-out"><span class="p">$</span> <span class="cursor"></span></pre></div>
+        <div class="card panel">
+          <h3>Score</h3>
+          <div class="score" id="score"></div>
+          <p style="margin:0;color:var(--muted);font-size:12px">Each check comes with a fix when it warns or fails. The doctor probes the local Mac, or the paired one over SSH.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= REVIEWER ================= -->
+  <section class="block" id="reviewer">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">The reviewer</span><span class="secsub">crates/code-reviewer · autonomous multi-lens PR review on the M1</span></div>
+      <h2 class="h2">Eight brains review every PR.</h2>
+      <p class="lede">Seven isolated lenses review the PR in parallel. Then a path-sharded adversarial verifier checks every <code>path:line</code> claim and strikes the false positives. Findings land as inline GitHub suggestions.</p>
+      <div style="margin-bottom:18px"><button type="button" class="btn big" id="run-wave">Run a review wave →</button></div>
+      <div class="brains" id="brains"></div>
+      <div class="facts">
+        <div class="fact"><b>120s</b><span>GraphQL poll interval</span></div>
+        <div class="fact"><b>0</b><span>AI tokens on idle ticks</span></div>
+        <div class="fact"><b>50/50</b><span>claude ⇄ agy load split</span></div>
+        <div class="fact"><b>8</b><span>PRs reviewed in parallel</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= INSTALL ================= -->
+  <section class="block" id="install">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">Install</span><span class="secsub">Rust 2024 · tested on Windows, Linux and macOS</span></div>
+      <h2 class="h2">From drawer to second machine.</h2>
+      <div class="tabs" role="tablist" id="qs-tabs"></div>
+      <div class="term"><div class="term-bar"><span id="qs-title">prepare the mac</span><button type="button" class="btn sm" id="copy-qs">Copy</button></div><pre id="qs-code"></pre></div>
+    </div>
+  </section>
+
+  <!-- ================= BRAND KIT ================= -->
+  <section class="block" id="brand">
+    <div class="wrap">
+      <div class="sechead"><span class="sectag">Brand kit</span><span class="secsub">Pixel-built SVG with no font needed. MIT, like the code.</span></div>
+      <h2 class="h2" style="text-transform:none">o=o</h2>
+      <p class="lede">otto is a palindrome: it reads the same from both ends, the way the bridge makes two machines act as one. The mark is two square o's joined by a bridge. The mascot is Otto, a pixel otter who lives in your old MacBook.</p>
+      <div class="kit">
+        <div class="card kit-tile"><div class="kit-art light"><img src="assets/otto-wordmark-ink.svg" alt="cheap-otto wordmark, ink" width="472" height="96"></div><div class="kit-foot"><span class="label">Wordmark</span><span><a class="btn sm sec" href="assets/otto-wordmark-ink.svg" download>Ink</a> <a class="btn sm sec" href="assets/otto-wordmark-white.svg" download>White</a></span></div></div>
+        <div class="card kit-tile"><div class="kit-art dark"><img src="assets/otto-mark-on-dark.svg" alt="o=o mark" width="120" height="120"></div><div class="kit-foot"><span class="label">Mark</span><span><a class="btn sm sec" href="assets/otto-mark.svg" download>Light</a> <a class="btn sm sec" href="assets/otto-mark-on-dark.svg" download>Dark</a></span></div></div>
+        <div class="card kit-tile"><div class="kit-art light"><img class="px" src="assets/otto-pixel.svg" alt="Otto the pixel otter" width="168" height="152"></div><div class="kit-foot"><span class="label">Otto</span><span><a class="btn sm sec" href="assets/otto-pixel.svg" download>Light</a> <a class="btn sm sec" href="assets/otto-pixel-on-dark.svg" download>Dark</a></span></div></div>
+      </div>
+      <div class="swatches" id="swatches"></div>
+      <div class="type-row">
+        <div class="card type-card"><span class="label">Display · Archivo Black</span><div class="big">OTTO 78%</div><span style="color:var(--muted);font-size:12px">Titles, tags and big numbers. Always uppercase.</span></div>
+        <div class="card type-card"><span class="label">Everything else · JetBrains Mono</span><div class="big mono">$ pull --merge</div><span style="color:var(--muted);font-size:12px">Body, UI and code. One family for all of it.</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <div>
+      <img class="foot-word" src="assets/otto-wordmark-ink.svg" alt="cheap-otto" width="472" height="96">
+      <div class="foot-links">
+        <a href="https://github.com/cokitron/cheap-otto">GitHub</a>
+        <a href="https://github.com/cokitron/cheap-otto/releases">Releases</a>
+        <a href="https://github.com/cokitron/cheap-otto/blob/main/crates/code-reviewer/README.md">Code reviewer</a>
+        <a href="https://github.com/cokitron/cheap-otto/issues">Issues</a>
+        <a href="https://github.com/cokitron/cheap-otto/blob/main/LICENSE">MIT license</a>
+      </div>
+    </div>
+    <img class="foot-otter px" src="assets/otto-pixel.svg" alt="" width="150" height="136">
+  </div>
+  <div class="colophon"><span>Built for MacBooks with broken screens</span><span>o=o · otto reads the same both ways</span></div>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+
+  /* ---------- theme ---------- */
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    $$('[data-theme-btn]').forEach(function (b) { b.classList.toggle('on', b.dataset.themeBtn === t); b.setAttribute('aria-pressed', b.dataset.themeBtn === t); });
+    try { localStorage.setItem('otto-theme', t); } catch (e) {}
+  }
+  $$('[data-theme-btn]').forEach(function (b) { b.addEventListener('click', function () { setTheme(b.dataset.themeBtn); }); });
+  setTheme(document.documentElement.getAttribute('data-theme') || 'night');
+
+  /* ---------- toast + copy ---------- */
+  var toastT;
+  function toast(msg) { var t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, 1400); }
+  function copy(text) {
+    var done = function () { toast('Copied'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { toast('Copy failed'); });
+    else { var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} ta.remove(); }
+  }
+
+  /* ---------- ticker ---------- */
+  var facts = ['Windows ⇄ macOS', '78% battery ceiling', '100% reversible pmset', '0 AI tokens on idle ticks', '8 review brains', 'tmux · launchd · tailscale', 'Broken screens welcome', 'cargo test on Windows, Linux, macOS', 'claude · agy · kiro · custom', 'Fanless thermal arbiter'];
+  var tk = $('#ticker');
+  var once = facts.map(function (f) { return '<span>' + esc(f) + '</span>'; }).join('');
+  tk.innerHTML = once + once;
+
+  /* ---------- hero typer ---------- */
+  var scenes = [
+    [['p', 'cheap-otto pair --host 100.101.102.103 --alias otto-mac --ports 3000,5173 --apply'], ['ok', '✓ ~/.ssh/config updated · otto-mac reachable over Tailscale'], ['ok', '✓ forwarding localhost:3000, localhost:5173']],
+    [['p', 'cheap-otto sync --execute'], ['c', '# my-app @ main → ~/otto-workspaces/my-app (target/ and node_modules/ excluded)'], ['ok', '✓ synced in 2.1s · remote edits protected']],
+    [['p', 'cheap-otto delegate --id fix-auth-race --agent claude --model sonnet --effort high --execute'], ['c', '# worktree .otto-worktrees/fix-auth-race · tmux otto-fix-auth-race'], ['w', '■ running · verify: cargo test --all-targets']],
+    [['p', 'cheap-otto pull --id fix-auth-race --execute --merge'], ['ok', '✓ fetched otto/fix-auth-race into D:\\projects\\my-app'], ['ok', '✓ merged into main · go get a coffee']]
+  ];
+  var typer = $('#typer'), stepEl = $('#typer-step');
+  function renderLines(lines, partial) {
+    return lines.map(function (l, i) {
+      var txt = (i === lines.length - 1 && partial != null) ? l[1].slice(0, partial) : l[1];
+      if (l[0] === 'p') return '<span class="p">$</span> ' + esc(txt);
+      return '<span class="' + l[0] + '">' + esc(txt) + '</span>';
+    }).join('\n');
+  }
+  function runScene(i) {
+    var sc = scenes[i]; stepEl.textContent = (i + 1) + ' / ' + scenes.length;
+    if (reduced) { typer.innerHTML = renderLines(sc); setTimeout(function () { runScene((i + 1) % scenes.length); }, 4200); return; }
+    var cmd = sc[0][1], n = 0;
+    (function type() {
+      typer.innerHTML = renderLines([sc[0]], n) + '<span class="cursor"></span>';
+      if (n < cmd.length) { n += 1 + (Math.random() < .3 ? 1 : 0); setTimeout(type, 26); return; }
+      var k = 1;
+      (function out() {
+        typer.innerHTML = renderLines(sc.slice(0, k + 1)) + (k + 1 >= sc.length ? '\n<span class="p">$</span> <span class="cursor"></span>' : '');
+        if (k + 1 < sc.length) { k++; setTimeout(out, 420); } else setTimeout(function () { runScene((i + 1) % scenes.length); }, 2600);
+      })();
+    })();
+  }
+  runScene(0);
+
+  /* ---------- farm simulator ---------- */
+  var MODELS = { claude: ['sonnet', 'opus'], agy: ['gemini-4-carbon-high'], kiro: ['default'], custom: ['(none)'] };
+  var state = { harness: 'claude', effort: 'high' };
+  function seg(id, key, onChange) {
+    $$('#' + id + ' button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        $$('#' + id + ' button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); });
+        state[key] = b.dataset.v; if (onChange) onChange(); renderCmd();
+      });
+    });
+  }
+  function fillModels() { $('#model').innerHTML = MODELS[state.harness].map(function (m) { return '<option>' + m + '</option>'; }).join(''); }
+  function slug(s) { return (s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').split('-').slice(0, 3).join('-')) || 'task'; }
+  function farmCmd() {
+    var id = slug($('#task').value), m = $('#model').value;
+    var parts = ['cheap-otto delegate', '--id ' + id, '--agent ' + state.harness];
+    if (m !== '(none)' && m !== 'default') parts.push('--model ' + m);
+    parts.push('--effort ' + state.effort, '--task "' + $('#task').value.replace(/"/g, "'") + '"', '--execute');
+    return { id: id, text: parts.join(' \\\n  ') };
+  }
+  function renderCmd() { var c = farmCmd(); $('#farm-cmd').innerHTML = '<span class="p">$</span> ' + esc(c.text); }
+  seg('harness', 'harness', fillModels); seg('effort', 'effort');
+  fillModels(); renderCmd();
+  $('#model').addEventListener('change', renderCmd); $('#task').addEventListener('input', renderCmd);
+  $('#copy-farm').addEventListener('click', function () { copy(farmCmd().text.replace(/ \\\n {2}/g, ' ')); });
+
+  var tickets = [], uid = 0;
+  function counts() {
+    ['queued', 'running', 'done'].forEach(function (s) {
+      var list = tickets.filter(function (t) { return t.s === s; });
+      $('#n-' + s).textContent = list.length;
+      var col = $('#col-' + s);
+      if (!list.length) col.innerHTML = '<div class="col-empty">' + (s === 'queued' ? 'Nothing queued' : s === 'running' ? 'No agents working' : 'Nothing to pull yet') + '</div>';
+    });
+  }
+  function ticketHTML(t) {
+    var meta = 'otto/' + esc(t.id) + ' · ' + esc(t.h) + ' · ' + esc(t.e);
+    var body;
+    if (t.s === 'queued') body = '<div class="row"><span class="status"><i class="sq idle"></i>Queued</span></div>';
+    else if (t.s === 'running') {
+      var bars = ''; for (var i = 0; i < 10; i++) bars += '<i class="' + (i < t.p ? 'f' : '') + '"></i>';
+      body = '<div class="bar" aria-label="' + (t.p * 10) + '% done">' + bars + '</div><div class="row"><span class="status"><i class="sq run"></i>Running ' + (t.p * 10) + '%</span><img class="mini-otter px" src="assets/otto-pixel.svg" alt=""></div>';
+    } else if (t.merged) body = '<div class="row"><span class="inv m">Merged into main</span></div>';
+    else body = '<div class="row"><span class="status"><i class="sq"></i>Tests pass</span><button type="button" class="btn sm mint" data-pull="' + t.n + '">Pull →</button></div>';
+    return '<div class="ticket" data-n="' + t.n + '"><div class="ticket-meta">' + meta + '</div><div class="ticket-title">' + esc(t.task) + '</div>' + body + '</div>';
+  }
+  function render() {
+    ['queued', 'running', 'done'].forEach(function (s) {
+      $('#col-' + s).innerHTML = tickets.filter(function (t) { return t.s === s; }).map(ticketHTML).join('');
+    });
+    counts();
+  }
+  function schedule() {
+    var running = tickets.filter(function (t) { return t.s === 'running'; }).length;
+    tickets.forEach(function (t) { if (t.s === 'queued' && running < 3) { t.s = 'running'; t.p = 0; running++; } });
+  }
+  function tick() {
+    var changed = false;
+    tickets.forEach(function (t) {
+      if (t.s === 'running') { t.p += Math.random() < .55 ? 1 : 0; changed = true; if (t.p >= 10) { t.s = 'done'; } }
+    });
+    schedule();
+    if (changed) render();
+  }
+  setInterval(tick, reduced ? 1400 : 650);
+  function addTicket(h, e, task, id, s, p) {
+    var base = id, k = 2; while (tickets.some(function (t) { return t.id === id; })) { id = base + '-' + k++; }
+    tickets.push({ n: ++uid, h: h, e: e, task: task, id: id, s: s || 'queued', p: p || 0 });
+    if (tickets.length > 9) tickets.splice(tickets.findIndex(function (t) { return t.s === 'done'; }), 1);
+  }
+  addTicket('agy', 'high', 'Audit public modules for missing error-path tests', 'edge-audit', 'running', 6);
+  addTicket('claude', 'medium', 'Add a schedule ledger summary to runs', 'runs-summary', 'done', 10);
+  render();
+  $('#farm-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var c = farmCmd();
+    addTicket(state.harness, state.effort, $('#task').value || 'Untitled task', c.id);
+    schedule(); render(); toast('Delegated to otto-mac');
+  });
+  $('#col-done').addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-pull]'); if (!b) return;
+    var t = tickets.find(function (x) { return x.n === +b.dataset.pull; }); if (!t) return;
+    t.merged = true; render();
+    $('#farm-cmd').innerHTML = '<span class="p">$</span> ' + esc('cheap-otto pull --id ' + t.id + ' --execute --merge') + '\n<span class="ok">' + esc('✓ fetched otto/' + t.id + ' · merged into main') + '</span>';
+  });
+
+  /* ---------- battery ---------- */
+  var batt = $('#batt'); batt.innerHTML = new Array(11).join('<i></i>');
+  function renderCap() {
+    var v = +$('#cap').value, cells = $$('#batt i'), f = Math.round(v / 10);
+    cells.forEach(function (c, i) { c.classList.toggle('f', i < f); });
+    var tone = v <= 80 ? '' : v <= 90 ? 'amber' : 'coral';
+    batt.className = 'batt-body ' + tone;
+    $('#cap-num').textContent = v + '%';
+    var vd = $('#cap-verdict');
+    vd.className = 'verdict ' + tone;
+    vd.textContent = v <= 80 ? 'Swell-safe for 24/7 AC' : v <= 90 ? 'Fine on a desk, risky 24/7' : 'Factory-full on AC: swell risk';
+    $('#cap-cmd').innerHTML = '<span class="p">$</span> ' + esc('cheap-otto init --battery-cap ' + v + ' --apply') + '\n' +
+      '<span class="c"># snapshot → .cheap-otto/state-backup.json, then:</span>\n' +
+      esc('sudo pmset -c sleep 0 displaysleep 1 autorestart 1 womp 1 tcpkeepalive 1') + '\n' +
+      esc('sudo pmset -a disablesleep 1') + '\n' +
+      esc('sudo pmset -b sleep 5 displaysleep 1') + '  <span class="c"># 5-min fallback if unplugged</span>\n' +
+      '<span class="ok">' + esc('✓ ceiling ' + v + '% · undo with: cheap-otto restore') + '</span>';
+  }
+  $('#cap').addEventListener('input', renderCap); renderCap();
+
+  /* ---------- arbiter (mirrors ArbiterPolicy::evaluate in src/arbiter.rs) ---------- */
+  var arb = { thermal: 0 };
+  var LEVELS = ['Nominal', 'Fair', 'Serious', 'Critical'];
+  $$('#thermal button').forEach(function (b) { b.addEventListener('click', function () { $$('#thermal button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); }); arb.thermal = +b.dataset.v; renderArb(); }); });
+  ['t-llm', 't-ci', 't-kill'].forEach(function (id) { $('#' + id).addEventListener('click', function () { var b = $('#' + id); b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'); renderArb(); }); });
+  $('#ram').addEventListener('input', renderArb); $('#idle').addEventListener('input', renderArb);
+  function on(id) { return $('#' + id).getAttribute('aria-pressed') === 'true'; }
+  function evaluate(s) {
+    var MIN = 2048, IDLE = 300, a = [];
+    var has = function () { return a.some(function (x) { return x.k === 'EvictLocalLlm'; }); };
+    if (s.kill) { a.push({ k: 'PauseBackgroundQueues', r: 'mobile kill-switch engaged by operator' }); if (s.llm) a.push({ k: 'EvictLocalLlm', r: 'mobile kill-switch engaged' }); return a; }
+    if (s.thermal >= 2) { a.push({ k: 'PauseBackgroundQueues', r: 'fanless thermal guard triggered (' + LEVELS[s.thermal] + '); cooling down' }); if (s.llm) a.push({ k: 'EvictLocalLlm', r: 'thermal pressure relief' }); return a; }
+    if (s.ci && s.llm) a.push({ k: 'EvictLocalLlm', r: 'CI build started; freeing unified RAM headroom' });
+    if (s.ram < MIN && s.llm && !has()) a.push({ k: 'EvictLocalLlm', r: 'available unified memory (' + s.ram + ' MB) below safety floor (' + MIN + ' MB)' });
+    if (s.llm && s.idle >= IDLE && !has()) a.push({ k: 'EvictLocalLlm', r: 'local LLM idle for ' + s.idle + 's (threshold: ' + IDLE + 's)' });
+    if (!a.length) a.push({ k: 'AllowAllWorkloads', r: 'resume normal scheduling across all workloads' });
+    return a;
+  }
+  function renderArb() {
+    var s = { thermal: arb.thermal, ram: +$('#ram').value, idle: +$('#idle').value, llm: on('t-llm'), ci: on('t-ci'), kill: on('t-kill') };
+    $('#ram-v').textContent = s.ram + ' MB'; $('#idle-v').textContent = s.idle + ' s';
+    var cls = { AllowAllWorkloads: 'allow', EvictLocalLlm: 'evict', PauseBackgroundQueues: 'pause' };
+    $('#actions').innerHTML = evaluate(s).map(function (x) { return '<div class="action ' + cls[x.k] + '"><i class="sq"></i><b>' + x.k + '</b><small>' + esc(x.r) + '</small></div>'; }).join('');
+  }
+  renderArb();
+
+  /* ---------- doctor ---------- */
+  var CHECKS = [
+    ['pass', 'AC Power Connected', 'on AC · 78% ceiling'],
+    ['pass', 'Clamshell Lid-Sleep Disabled', 'disablesleep 1'],
+    ['pass', 'Battery Swell Protection', 'ceiling 78% (50..=100)'],
+    ['pass', 'Passive Thermal Headroom', 'Nominal'],
+    ['pass', 'Tailscale Private Mesh', '100.101.102.103'],
+    ['warn', 'Container Engine (OrbStack)', 'not found · brew install orbstack'],
+    ['pass', 'NVMe Storage Headroom', '142 GB free'],
+    ['pass', 'Local AI Gateway', 'idle · evicts after 300s']
+  ];
+  function scoreGrid(n) {
+    $('#score').innerHTML = CHECKS.map(function (c, i) { return '<i class="' + (i < n ? c[0] : '') + '" title="' + esc(c[1]) + '">' + (i < n ? (c[0] === 'pass' ? '✓' : '!') : (i + 1)) + '</i>'; }).join('');
+  }
+  scoreGrid(0);
+  var running = false;
+  $('#run-doctor').addEventListener('click', function () {
+    if (running) return; running = true;
+    var out = $('#doctor-out'), lines = ['<span class="p">$</span> cheap-otto doctor', '<span class="c"># probing otto-mac over ssh…</span>'];
+    out.innerHTML = lines.join('\n'); scoreGrid(0);
+    var i = 0;
+    (function next() {
+      if (i < CHECKS.length) {
+        var c = CHECKS[i];
+        var tag = c[0] === 'pass' ? '<span class="ok">[PASS]</span>' : '<span class="w">[WARN]</span>';
+        lines.push(tag + ' ' + esc(c[1]) + ' <span class="c">· ' + esc(c[2]) + '</span>');
+        out.innerHTML = lines.join('\n'); i++; scoreGrid(i);
+        setTimeout(next, reduced ? 60 : 260);
+      } else {
+        lines.push('', '<span class="ok">7 passed</span> · <span class="w">1 warning</span> · <span class="ok">0 failed</span> → appliance ready', '<span class="p">$</span> <span class="cursor"></span>');
+        out.innerHTML = lines.join('\n'); running = false;
+      }
+    })();
+  });
+
+  /* ---------- reviewer wave ---------- */
+  var BRAINS = ['intent-traceability', 'correctness-domain', 'security-boundaries', 'data-migrations-ops', 'testing-proof', 'ux-a11y-frontend', 'docs-contracts', 'adversarial-verifier'];
+  $('#brains').innerHTML = BRAINS.map(function (b, i) {
+    return '<div class="brain' + (i === 7 ? ' verifier' : '') + '" id="brain-' + i + '"><span class="n">0' + (i + 1) + '</span><span class="t">' + b.replace(/-/g, ' ') + '</span><span class="s">idle</span></div>';
+  }).join('');
+  var waving = false;
+  $('#run-wave').addEventListener('click', function () {
+    if (waving) return; waving = true;
+    var els = BRAINS.map(function (_, i) { return $('#brain-' + i); });
+    els.forEach(function (e) { e.classList.remove('run', 'done'); $('.s', e).textContent = 'queued'; });
+    for (var i = 0; i < 7; i++) { els[i].classList.add('run'); $('.s', els[i]).textContent = 'reviewing'; }
+    var left = 7;
+    for (var j = 0; j < 7; j++) (function (j) {
+      setTimeout(function () {
+        els[j].classList.remove('run'); els[j].classList.add('done');
+        $('.s', els[j]).textContent = j === 2 ? '1 finding' : j === 4 ? '2 findings' : 'clean';
+        if (--left === 0) {
+          els[7].classList.add('run'); $('.s', els[7]).textContent = 'verifying 3 claims';
+          setTimeout(function () { els[7].classList.remove('run'); els[7].classList.add('done'); $('.s', els[7]).textContent = '2 confirmed · 1 struck'; waving = false; }, reduced ? 200 : 1600);
+        }
+      }, reduced ? 150 : 500 + Math.random() * 1800);
+    })(j);
+  });
+
+  /* ---------- quickstart ---------- */
+  var QS = [
+    ['Get it', 'clone and build', ['<span class="c"># prebuilt binaries for Windows, macOS (arm64) and Linux are on the Releases page</span>', 'git clone https://github.com/cokitron/cheap-otto', 'cd cheap-otto', 'cargo build --release']],
+    ['Prep the Mac', 'prepare the mac', ['<span class="c"># snapshot pmset to .cheap-otto/state-backup.json, then apply clamshell + 78% ceiling</span>', 'cargo run -- init --battery-cap 78 --apply', 'cargo run -- doctor']],
+    ['Pair', 'pair windows ⇄ mac', ['cargo run -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --apply', 'cargo run -- sync --execute', 'cargo run -- exec --cmd "cargo test --all-targets" --execute']],
+    ['Delegate', 'delegate + pull', ['cheap-otto harnesses --remote', 'cheap-otto delegate --id fix-auth-race --agent claude --model sonnet --effort high --verify "cargo test --all-targets" --task "Fix the token refresh race condition and add unit tests" --execute', 'cheap-otto ask --id fix-auth-race --model opus --prompt "Summarize your root-cause fix and edge cases" --execute', 'cheap-otto pull --id fix-auth-race --execute --merge']],
+    ['Watch', 'mission control', ['<span class="c"># Mission Control on http://localhost:7420 · pixel-agents office on :7421</span>', 'cheap-otto ui --execute', 'cargo run -- attach --id fix-auth-race --execute', 'cargo run -- logs --id fix-auth-race --follow --execute']],
+    ['Schedule', 'night shift', ['cargo run -- schedule add --id main-ci --every 15m --on-change --ci "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test" --execute', 'cargo run -- schedule add --id nightly-audit --daily 02:00 --agent claude --task "Audit dependencies and add missing edge-case unit tests" --draft-pr --execute', 'cargo run -- runs --execute']],
+    ['Undo', 'put it all back', ['<span class="c"># restore factory sleep settings and unload every launchd schedule</span>', 'cargo run -- restore --unload-schedules --remote --apply']]
+  ];
+  var qsIdx = 0;
+  $('#qs-tabs').innerHTML = QS.map(function (q, i) { return '<button role="tab" aria-selected="' + (i === 0) + '" data-i="' + i + '"><span class="n">0' + (i + 1) + '</span>' + q[0] + '</button>'; }).join('');
+  function renderQS() {
+    var q = QS[qsIdx];
+    $('#qs-title').textContent = q[1];
+    $('#qs-code').innerHTML = q[2].map(function (l) { return l.indexOf('<span') === 0 ? l : '<span class="p">$</span> ' + esc(l); }).join('\n');
+    $$('#qs-tabs button').forEach(function (b) { b.setAttribute('aria-selected', +b.dataset.i === qsIdx); });
+  }
+  $('#qs-tabs').addEventListener('click', function (e) { var b = e.target.closest('button'); if (!b) return; qsIdx = +b.dataset.i; renderQS(); });
+  $('#qs-tabs').addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    qsIdx = (qsIdx + (e.key === 'ArrowRight' ? 1 : QS.length - 1)) % QS.length; renderQS(); $$('#qs-tabs button')[qsIdx].focus();
+  });
+  $('#copy-qs').addEventListener('click', function () { copy(QS[qsIdx][2].filter(function (l) { return l.indexOf('<span') !== 0; }).join('\n')); });
+  renderQS();
+
+  /* ---------- swatches ---------- */
+  var SW = [['Signal yellow', '#F7D842'], ['Ink', '#0a0a0a'], ['Night', '#080808'], ['Paper', '#f4f1e8'], ['Mint', '#4ADE80'], ['Coral', '#F07A74'], ['Amber', '#DE9E1E'], ['Cyan', '#38BDF8'], ['Card', '#161616'], ['Muted', '#8e8e8e'], ['Otter fur', '#9a6a3c'], ['Otter muzzle', '#f1dfc0']];
+  $('#swatches').innerHTML = SW.map(function (s) { return '<button type="button" class="swatch" data-hex="' + s[1] + '"><div class="chip" style="background:' + s[1] + '"></div><div class="meta"><b>' + s[0] + '</b><span>' + s[1] + '</span></div></button>'; }).join('');
+  $('#swatches').addEventListener('click', function (e) { var b = e.target.closest('[data-hex]'); if (b) copy(b.dataset.hex); });
+})();
+</script>
+</body>
+</html>

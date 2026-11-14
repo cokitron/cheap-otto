@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="cheap-otto mark" shape-rendering="crispEdges">
+<title>cheap-otto mark</title>
+<rect x="12" y="12" width="104" height="104" fill="#ffffff"/>
+<rect x="4" y="4" width="104" height="104" fill="#F7D842" stroke="#0a0a0a" stroke-width="8"/>
+<g fill="none" stroke="#0a0a0a" stroke-width="10">
+<rect x="20" y="35" width="24" height="42"/>
+<rect x="68" y="35" width="24" height="42"/>
+</g>
+<g fill="#0a0a0a">
+<rect x="49" y="46" width="14" height="7"/>
+<rect x="49" y="59" width="14" height="7"/>
+</g>
+</svg>
