@@ -1,4 +1,21 @@
-# cheap-otto 🦀💻
+<p align="center">
+  <a href="https://cokitron.github.io/cheap-otto/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/readme-hero-dark.png">
+      <img alt="cheap-otto: put the old MacBook to work. Cross-OS dev bridge, parallel agent worktree farm, overnight code reviewer." src=".github/assets/readme-hero-light.png" width="100%">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://cokitron.github.io/cheap-otto/"><img alt="Website" src="https://img.shields.io/badge/site-cokitron.github.io%2Fcheap--otto-F7D842?style=flat-square&labelColor=0a0a0a"></a>
+  <a href="https://github.com/cokitron/cheap-otto/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cokitron/cheap-otto/ci.yml?branch=main&style=flat-square&label=ci&labelColor=0a0a0a&color=4ADE80"></a>
+  <a href="https://github.com/cokitron/cheap-otto/releases"><img alt="Release" src="https://img.shields.io/github/v/release/cokitron/cheap-otto?style=flat-square&labelColor=0a0a0a&color=F7D842"></a>
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-F7D842?style=flat-square&labelColor=0a0a0a"></a>
+  <img alt="Rust 2024" src="https://img.shields.io/badge/rust-2024-F7D842?style=flat-square&labelColor=0a0a0a">
+</p>
+
+# cheap-otto
 
 **Turn a spare MacBook (even with a broken screen) into a Cross-OS Dev Bridge & Parallel Agent Worktree Farm for your main Windows workstation—in one 100% reversible command.**
 
