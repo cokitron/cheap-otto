@@ -24,6 +24,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub const TENDER_AGENTS: &[&str] = &["01-tender-triage", "02-tender-fixer", "03-tender-verifier"];
@@ -1895,13 +1896,15 @@ pub fn execute_tender_pr_cycle(
                 runners.alt.slug(),
                 "running",
             );
+            let scoped_repair_cmd =
+                optimize_js_check_cmd_for_worktree(&wt.path, check_cmd, &status_out);
             let _ = run_repair_pass(
                 &cfg.agents,
                 runners.alt,
                 runners.lead,
                 &wt.path,
                 &app_context,
-                check_cmd,
+                &scoped_repair_cmd,
                 &log1,
             );
             if let Ok(repaired_status) = run_git(Some(&wt.path), &["status", "--porcelain"])
@@ -2536,7 +2539,7 @@ fn run_triage_agent(
                \"packet_id\": \"pkt-1\",\n\
                \"owned_files\": [\"path/to/file.rs\"],\n\
                \"feedback_ids\": [\"exact feedback_id\"],\n\
-               \"instructions\": \"Detailed code change instructions for owned_files\"\n\
+               \"instructions\": \"Detailed code change instructions for owned_files (do NOT instruct fixers to run full-repo suites like npm run check or npm test; Code Tender runs the unified check gate after all packets finish)\"\n\
              }}\n\
            ]\n\
          }}\n\n\
@@ -2589,9 +2592,7 @@ fn run_parallel_fixer_packets(
     let max_workers = cfg.tender.max_parallel_fixers_per_pr.clamp(1, 8);
     let item_lookup: BTreeMap<&str, &TenderFeedbackItem> =
         items.iter().map(|i| (i.feedback_id.as_str(), i)).collect();
-    let check_hint = effective_check_cmd.unwrap_or(
-        "(no check command detected; run relevant language test/typecheck tool if present)",
-    );
+    let _ = effective_check_cmd;
 
     for wave_start in (0..packets.len()).step_by(max_workers) {
         let wave_end = (wave_start + max_workers).min(packets.len());
@@ -2643,8 +2644,10 @@ fn run_parallel_fixer_packets(
                             "{hdr_ref}\n\n\
                              {kb_ref}\n\n\
                              {app_ctx_ref}\n\n\
-                             Local Verification Command for this Repo: `{check_hint}`\n\
-                             After applying your changes in `{workdir_str}`, run the targeted local tests/typecheck directly via Bash before returning JSON (do NOT run `git commit` or `git push`).\n\n\
+                             Parallel Packet Verification Rules:\n\
+                             - Work inside `{workdir_str}` and edit ONLY your Exclusive Owned Files.\n\
+                             - If you run a quick sanity test via Bash, run ONLY a single-file test on your owned test file (e.g. `npx vitest run <owned_test_file>`); NEVER run full-workspace commands such as `npm run check`, `npm test`, `npm run lint`, or `npm run typecheck` inside a parallel packet — Code Tender automatically runs the unified check gate after all packets complete.\n\
+                             - Do NOT run `git commit` or `git push`.\n\n\
                              Assigned Packet: `{pkt_id}`\n\
                              Exclusive Owned Files (edit ONLY these files): {owned_json}\n\n\
                              Fix Plan:\n{plan}\n\n\
@@ -3698,6 +3701,25 @@ fn invoke_tender_json_resilient<T: serde::de::DeserializeOwned>(
     )
 }
 
+static CLAUDE_QUOTA_EXHAUSTED: AtomicBool = AtomicBool::new(false);
+static AGY_QUOTA_EXHAUSTED: AtomicBool = AtomicBool::new(false);
+
+fn runner_quota_flag(runner: CliRunner) -> &'static AtomicBool {
+    match runner {
+        CliRunner::Claude => &CLAUDE_QUOTA_EXHAUSTED,
+        CliRunner::Agy => &AGY_QUOTA_EXHAUSTED,
+    }
+}
+
+pub(crate) fn is_quota_exhausted_error(err: &BrainError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("resource_exhausted")
+        || lower.contains("individual quota reached")
+        || lower.contains("exceeded your current quota")
+        || lower.contains("hit your limit")
+        || lower.contains("out of extra usage")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn invoke_tender_json_validated<T, F>(
     agents_cfg: &AgentsConfig,
@@ -3725,41 +3747,76 @@ where
         Ok(parsed)
     };
 
+    let (first_runner, second_runner) = if fallback != preferred
+        && runner_quota_flag(preferred).load(Ordering::Relaxed)
+        && !runner_quota_flag(fallback).load(Ordering::Relaxed)
+    {
+        eprintln!(
+            "[TENDER-QUOTA-SKIP] `{}` skipping quota-exhausted `{}` -> running directly on `{}`",
+            stage_name,
+            preferred.slug(),
+            fallback.slug()
+        );
+        (fallback, fallback)
+    } else {
+        (preferred, fallback)
+    };
+
     let tool = if allow_write_tools { "Edit" } else { "Grep" };
     let sess_pref = format!(
         "ct-{}-{}-{}",
         stage_name,
-        preferred.slug(),
+        first_runner.slug(),
         std::process::id()
     );
     notify_pixel_hook(&sess_pref, "PreToolUse", Some(tool), workdir);
-    let first = invoke_tender_cli(agents_cfg, preferred, workdir, prompt, allow_write_tools)
+    let first = invoke_tender_cli(agents_cfg, first_runner, workdir, prompt, allow_write_tools)
         .and_then(|raw| parse_and_check(&raw));
     notify_pixel_hook(&sess_pref, "Stop", None, workdir);
     match first {
         Ok(v) => Ok(v),
-        Err(err) if fallback != preferred => {
-            eprintln!(
-                "[TENDER-FAILOVER] `{}` failed on `{}` ({}); retrying on `{}`...",
-                stage_name,
-                preferred.slug(),
-                err,
-                fallback.slug()
-            );
-            let sess_alt = format!(
-                "ct-{}-{}-{}",
-                stage_name,
-                fallback.slug(),
-                std::process::id()
-            );
-            notify_pixel_hook(&sess_alt, "PreToolUse", Some(tool), workdir);
-            let raw_res =
-                invoke_tender_cli(agents_cfg, fallback, workdir, prompt, allow_write_tools);
-            notify_pixel_hook(&sess_alt, "Stop", None, workdir);
-            let raw = raw_res?;
-            parse_and_check(&raw)
+        Err(err) => {
+            if is_quota_exhausted_error(&err) {
+                runner_quota_flag(first_runner).store(true, Ordering::Relaxed);
+            }
+            let retry_runner = if second_runner != first_runner
+                && !runner_quota_flag(second_runner).load(Ordering::Relaxed)
+            {
+                Some(second_runner)
+            } else if !runner_quota_flag(first_runner).load(Ordering::Relaxed) {
+                Some(first_runner)
+            } else {
+                None
+            };
+            if let Some(next_runner) = retry_runner {
+                eprintln!(
+                    "[TENDER-FAILOVER] `{}` failed on `{}` ({}); retrying on `{}`...",
+                    stage_name,
+                    first_runner.slug(),
+                    err,
+                    next_runner.slug()
+                );
+                let sess_alt = format!(
+                    "ct-{}-{}-{}",
+                    stage_name,
+                    next_runner.slug(),
+                    std::process::id()
+                );
+                notify_pixel_hook(&sess_alt, "PreToolUse", Some(tool), workdir);
+                let raw_res =
+                    invoke_tender_cli(agents_cfg, next_runner, workdir, prompt, allow_write_tools);
+                notify_pixel_hook(&sess_alt, "Stop", None, workdir);
+                if let Err(ref err2) = raw_res
+                    && is_quota_exhausted_error(err2)
+                {
+                    runner_quota_flag(next_runner).store(true, Ordering::Relaxed);
+                }
+                let raw = raw_res?;
+                parse_and_check(&raw)
+            } else {
+                Err(err)
+            }
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -4212,5 +4269,21 @@ gdocs_bin = "gdocs"
         );
         assert!(tpr.handled_items[0].resolved_thread);
         assert_eq!(tpr.last_status, TenderRunStatus::RepliedOnly);
+    }
+
+    #[test]
+    fn quota_exhausted_errors_are_detected() {
+        let agy_err = BrainError::RunnerFailed {
+            runner: "agy".to_string(),
+            details: "exit Some(3): RESOURCE_EXHAUSTED (code 429): Individual quota reached."
+                .to_string(),
+        };
+        assert!(is_quota_exhausted_error(&agy_err));
+
+        let timeout_err = BrainError::RunnerFailed {
+            runner: "claude".to_string(),
+            details: "claude tender timed out after 720s".to_string(),
+        };
+        assert!(!is_quota_exhausted_error(&timeout_err));
     }
 }
