@@ -17,17 +17,24 @@
 ## 2. Repository Structure & Module Map
 
 ```text
-cheapotto/
-├── Cargo.toml                        # Rust 2024 edition crate manifest (cheap-otto)
+cheap-otto/
+├── Cargo.toml                        # Unified workspace (`cheap-otto` + `crates/code-reviewer`)
+├── cubic.yaml                        # Schema-validated Cubic AI code review configuration
+├── CONTRIBUTING.md                   # PR-only main, Conventional Commits & verification rules
+├── SECURITY.md                       # Threat model & private vulnerability reporting policy
 ├── CLAUDE.md                         # Primary instructions for Claude Code & AI agents
 ├── AGENTS.md                         # Cross-agent rules entry point (Antigravity / Codex / Cursor)
+├── .ai/                              # Architecture & security context loaded by Cubic AI agents
 ├── .claude/
 │   └── rules/
 │       ├── 01-rust-idioms-and-edition-2024.md
 │       ├── 02-security-and-appliance-safety.md
 │       ├── 03-architecture-and-testing.md
 │       ├── 04-clippy-formatting-and-docs.md
-│       └── 05-crate-ecosystem-and-cli-patterns.md
+│       ├── 05-crate-ecosystem-and-cli-patterns.md
+│       └── 06-git-workflow-and-governance.md
+├── crates/
+│   └── code-reviewer/                # Autonomous Multi-Lens CI Reviewer & Code Tender crate
 ├── scripts/
 │   └── bootstrap-macos.sh            # Idempotent macOS SSH bootstrapper
 └── src/
@@ -90,3 +97,4 @@ Detailed rules live in `.claude/rules/` and are loaded automatically:
 - **[03-architecture-and-testing.md](.claude/rules/03-architecture-and-testing.md):** Functional Core / Imperative Shell separation, cross-platform testability, and `Result`-returning unit tests covering happy paths, boundary conditions, and error variants.
 - **[04-clippy-formatting-and-docs.md](.claude/rules/04-clippy-formatting-and-docs.md):** Clippy pedantic discipline, rustdoc standards, and pre-flight verification workflow.
 - **[05-crate-ecosystem-and-cli-patterns.md](.claude/rules/05-crate-ecosystem-and-cli-patterns.md):** Approved crate stack (`clap`, `serde`, `serde_json`, `thiserror`), CLI design conventions, and additive schema evolution.
+- **[06-git-workflow-and-governance.md](.claude/rules/06-git-workflow-and-governance.md):** Strictly PR-only `main`, short-lived prefixed branches (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`), Conventional Commits/PR titles, squash-merge policy, Cubic AI review rules (`cubic.yaml`), and Code Tender Stage-1 author allowlist (`tender_allowed_authors`) + fork isolation.

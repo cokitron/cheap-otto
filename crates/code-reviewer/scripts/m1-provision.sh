@@ -4,12 +4,13 @@
 set -eu
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-REPO_ROOT="${REPO_ROOT:-$HOME/otto-workspaces/code-reviewer}"
+REPO_ROOT="${REPO_ROOT:-$HOME/otto-workspaces/cheap-otto/crates/code-reviewer}"
 
 echo "[m1-provision] Ensuring directory layout..."
 mkdir -p \
   "$HOME/.local/bin" \
   "$HOME/.code-reviewer/tokens" \
+  "$HOME/.code-reviewer/kb" \
   "$HOME/.cheap-otto/bin" \
   "$HOME/.cheap-otto/logs/code-reviewer" \
   "$HOME/.cheap-otto/runs/code-reviewer" \
@@ -17,7 +18,7 @@ mkdir -p \
   "$HOME/.claude/skills" \
   "$HOME/.claude/rules" \
   "$HOME/.gemini/antigravity/skills"
-chmod 700 "$HOME/.code-reviewer" "$HOME/.code-reviewer/tokens"
+chmod 700 "$HOME/.code-reviewer" "$HOME/.code-reviewer/tokens" "$HOME/.code-reviewer/kb"
 
 # 1. Symlink Antigravity Google Workspace plugin CLIs (`gdrive`, `gdocs`, `gsheets`, `gslides`) into ~/.local/bin
 for tool in gdrive gdocs gsheets gslides; do
@@ -112,34 +113,42 @@ if [ "$THERM" -ge 2 ] 2>/dev/null; then
   exit 0
 fi
 
-# 2. Resolve Base Git Commit (origin/main -> otto-sync -> HEAD)
-if [ ! -d "$HOME/otto-workspaces/code-reviewer/.git" ]; then
-  echo "Base repository $HOME/otto-workspaces/code-reviewer not initialized yet." >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log"
+# 2. Resolve canonical unified repository (`~/otto-workspaces/cheap-otto` preferred; fallback `~/otto-workspaces/code-reviewer`)
+if [ -d "$HOME/otto-workspaces/cheap-otto/.git" ]; then
+  BASE_REPO="$HOME/otto-workspaces/cheap-otto"
+  CR_WS="$BASE_REPO/crates/code-reviewer"
+elif [ -d "$HOME/otto-workspaces/code-reviewer/.git" ]; then
+  BASE_REPO="$HOME/otto-workspaces/code-reviewer"
+  CR_WS="$BASE_REPO"
+else
+  echo "Base repository $HOME/otto-workspaces/cheap-otto not initialized yet." >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log"
   exit 1
 fi
-if git -C "$HOME/otto-workspaces/code-reviewer" remote get-url origin >/dev/null 2>&1; then
-  git -C "$HOME/otto-workspaces/code-reviewer" fetch origin "main" --quiet 2>/dev/null || true
+if git -C "$BASE_REPO" remote get-url origin >/dev/null 2>&1; then
+  git -C "$BASE_REPO" fetch origin "main" --quiet 2>/dev/null || true
 fi
 TARGET_REF="HEAD"
-if git -C "$HOME/otto-workspaces/code-reviewer" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
+if git -C "$BASE_REPO" rev-parse --verify "refs/remotes/origin/main" >/dev/null 2>&1; then
   TARGET_REF="refs/remotes/origin/main"
-elif git -C "$HOME/otto-workspaces/code-reviewer" rev-parse --verify "refs/heads/otto-sync" >/dev/null 2>&1; then
+elif git -C "$BASE_REPO" rev-parse --verify "refs/heads/otto-sync" >/dev/null 2>&1; then
   TARGET_REF="refs/heads/otto-sync"
 fi
-TARGET_SHA=$(git -C "$HOME/otto-workspaces/code-reviewer" rev-parse --short=12 "$TARGET_REF" 2>/dev/null || echo "unknown")
+TARGET_SHA=$(git -C "$BASE_REPO" rev-parse --short=12 "$TARGET_REF" 2>/dev/null || echo "unknown")
 
-# 3. Prepare Isolated Scheduled Worktree Cleanly (reset existing worktree without branch-in-use error)
+# 3. Prepare Isolated Scheduled Worktree Cleanly (self-heals if BASE_REPO moved from legacy path)
 WT_DIR="$HOME/.cheap-otto/scheduled-worktrees/code-reviewer/pr-poller"
-if [ -e "$WT_DIR/.git" ]; then
+if [ -e "$WT_DIR/.git" ] && git -C "$WT_DIR" rev-parse --git-common-dir 2>/dev/null | grep -Fq "$BASE_REPO"; then
   git -C "$WT_DIR" reset --hard "$TARGET_REF" --quiet 2>/dev/null || true
 else
-  git -C "$HOME/otto-workspaces/code-reviewer" worktree add --force -B "otto/sched-pr-poller" "$WT_DIR" "$TARGET_REF" >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log" 2>&1
+  rm -rf "$WT_DIR"
+  git -C "$BASE_REPO" worktree prune 2>/dev/null || true
+  git -C "$BASE_REPO" worktree add --force -B "otto/sched-pr-poller" "$WT_DIR" "$TARGET_REF" >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log" 2>&1
 fi
 
 # 4. Pure Rust GraphQL Poll (0 AI tokens on idle polls; detached async workers survive via AbandonProcessGroup + process_group(0))
 cd "$WT_DIR"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-"$HOME/.cargo/bin/code-reviewer" --workspace "$HOME/otto-workspaces/code-reviewer" poll >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log" 2>&1
+"$HOME/.cargo/bin/code-reviewer" --workspace "$CR_WS" poll >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log" 2>&1
 RC=$?
 printf '\n[OTTO_STATUS exit=%s]\n' "$RC" >> "$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log"
 END_TS=$(date +%s)
@@ -237,9 +246,8 @@ cat > "$UI_PLIST_PATH" <<UI_PLIST_EOF
 </plist>
 UI_PLIST_EOF
 
-if ! launchctl print "gui/$UID_NUM/com.cheapotto.code-reviewer.ui" >/dev/null 2>&1; then
-  launchctl bootstrap "gui/$UID_NUM" "$UI_PLIST_PATH" 2>/dev/null || true
-fi
+launchctl bootout "gui/$UID_NUM/com.cheapotto.code-reviewer.ui" 2>/dev/null || true
+launchctl bootstrap "gui/$UID_NUM" "$UI_PLIST_PATH" 2>/dev/null || true
 launchctl kickstart -k "gui/$UID_NUM/com.cheapotto.code-reviewer.ui" 2>/dev/null || true
 sleep 1
 if ! nc -z 127.0.0.1 7430 2>/dev/null; then
@@ -282,7 +290,12 @@ WT_DIR="$HOME/.cheap-otto/scheduled-worktrees/code-reviewer/pr-poller"
 if [ -d "$WT_DIR" ]; then
   cd "$WT_DIR"
 fi
-"$HOME/.cargo/bin/code-reviewer" --workspace "$HOME/otto-workspaces/code-reviewer" tend-poll >> "$HOME/.cheap-otto/logs/code-reviewer/sched-code-tender.log" 2>&1
+if [ -d "$HOME/otto-workspaces/cheap-otto/crates/code-reviewer/brains" ]; then
+  CR_WS="$HOME/otto-workspaces/cheap-otto/crates/code-reviewer"
+else
+  CR_WS="$HOME/otto-workspaces/code-reviewer"
+fi
+"$HOME/.cargo/bin/code-reviewer" --workspace "$CR_WS" tend-poll >> "$HOME/.cheap-otto/logs/code-reviewer/sched-code-tender.log" 2>&1
 RC=$?
 END_TS=$(date +%s)
 DUR=$((END_TS - START_TS))

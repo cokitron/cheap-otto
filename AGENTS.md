@@ -8,3 +8,4 @@ This file defines the workspace rules for AI coding agents (Antigravity, Claude 
 @[Architecture & Testing](.claude/rules/03-architecture-and-testing.md)
 @[Clippy, Formatting & Docs](.claude/rules/04-clippy-formatting-and-docs.md)
 @[Crate Ecosystem & CLI Patterns](.claude/rules/05-crate-ecosystem-and-cli-patterns.md)
+@[Git Workflow & OSS Governance](.claude/rules/06-git-workflow-and-governance.md)

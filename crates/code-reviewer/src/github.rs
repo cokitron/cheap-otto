@@ -3,7 +3,7 @@
 //! Executes `gh` subprocesses with per-account `GH_TOKEN` isolation (`~/.code-reviewer/tokens/<user>.token`)
 //! so `primary` and `secondary` accounts can operate side by side without mutating global `gh` state.
 
-use crate::config::{WorkspaceConfig, expand_tilde, validate_repo_slug};
+use crate::config::{WatchedRepoConfig, WorkspaceConfig, expand_tilde, validate_repo_slug};
 use crate::state::{
     BOT_COMMENT_MARKER, BOT_TENDER_MARKER, BOT_TENDER_NEEDS_HUMAN_MARKER,
     GitHubInlineCommentPayload, HumanReplyItem, OpenPrSnapshot, TenderFeedbackItem,
@@ -89,6 +89,63 @@ pub struct RepoPollBatch {
     pub merged_prs: Vec<MergedPrEvent>,
 }
 
+/// Lightweight Stage-1 Pull Request header fetched during author-gated Code Tender polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenderOpenPrHeader {
+    pub pr_number: u64,
+    pub title: String,
+    pub author: String,
+    pub is_draft: bool,
+    pub is_fork: bool,
+}
+
+/// Result of a two-stage author- and fork-filtered Code Tender repository poll.
+#[derive(Debug, Clone)]
+pub struct TenderRepoPollOutcome {
+    pub snapshots: Vec<TenderPrSnapshot>,
+    pub skipped_authors: Vec<(u64, String)>,
+    pub skipped_forks: Vec<u64>,
+}
+
+/// Filters Stage-1 open PR headers at poll time so Code Tender NEVER fetches review threads,
+/// comments, or dispatches runs for external contributors' PRs or cross-repository forks.
+///
+/// When `repo_cfg.tender_allowed_authors` is explicitly configured (e.g. `["cokitron"]`),
+/// even `explicit_watched_prs` cannot bypass the per-repository author allowlist.
+pub fn partition_tender_open_pr_headers(
+    cfg: &WorkspaceConfig,
+    repo_cfg: &WatchedRepoConfig,
+    headers: &[TenderOpenPrHeader],
+    explicit_watched_prs: &[u64],
+) -> (Vec<u64>, Vec<(u64, String)>, Vec<u64>) {
+    let mut eligible = Vec::new();
+    let mut skipped_authors = Vec::new();
+    let mut skipped_forks = Vec::new();
+    let strict_repo_allowlist = !repo_cfg.tender_allowed_authors.is_empty();
+
+    for h in headers {
+        if h.pr_number == 0 {
+            continue;
+        }
+        if h.is_fork {
+            skipped_forks.push(h.pr_number);
+            continue;
+        }
+        let author_allowed = cfg.is_tender_author_allowed(repo_cfg, &h.author);
+        let watched_override = !strict_repo_allowlist
+            && explicit_watched_prs.contains(&h.pr_number)
+            && !h.author.trim().is_empty()
+            && !h.author.trim().eq_ignore_ascii_case("unknown");
+        if !author_allowed && !watched_override {
+            skipped_authors.push((h.pr_number, h.author.clone()));
+            continue;
+        }
+        eligible.push(h.pr_number);
+    }
+
+    (eligible, skipped_authors, skipped_forks)
+}
+
 pub struct GitHubClient {
     tokens_dir: PathBuf,
 }
@@ -151,6 +208,7 @@ query($owner: String!, $name: String!) {
         body
         url
         isDraft
+        isCrossRepository
         baseRefName
         headRefName
         headRefOid
@@ -387,83 +445,143 @@ query($owner: String!, $name: String!) {
         self.create_issue_comment(account, repo_full_name, pr_number, body)
     }
 
-    /// Polls open Pull Requests and all review summaries, inline review threads, and comments
-    /// for Code Tender in a single 1-point GraphQL request (0 AI tokens).
-    pub fn poll_tender_repository(
+    /// Two-stage author- and fork-filtered Code Tender poller (0 AI tokens):
+    /// 1. Stage 1 queries lightweight open PR headers (`number`, `title`, `isDraft`, `isCrossRepository`, `author`).
+    /// 2. Immediately rejects cross-repository forks (`isCrossRepository == true`) and PRs whose author
+    ///    is outside `repo_cfg.tender_allowed_authors` / `cfg.tender.allowed_authors`.
+    /// 3. If zero owned PRs are open, returns immediately without querying any review threads or comments.
+    /// 4. Otherwise Stage 2 fetches full reviews, comments, and `reviewThreads` ONLY for the eligible owned PR numbers.
+    pub fn poll_tender_repository_for_repo(
         &self,
         account: &str,
-        repo_full_name: &str,
-    ) -> Result<Vec<TenderPrSnapshot>, GitHubError> {
-        let (owner, name) = validate_repo_slug(repo_full_name)
-            .map_err(|_| GitHubError::InvalidRepo(repo_full_name.to_string()))?;
+        cfg: &WorkspaceConfig,
+        repo_cfg: &WatchedRepoConfig,
+        explicit_watched_prs: &[u64],
+    ) -> Result<TenderRepoPollOutcome, GitHubError> {
+        let (owner, name) = validate_repo_slug(&repo_cfg.full_name)
+            .map_err(|_| GitHubError::InvalidRepo(repo_cfg.full_name.clone()))?;
 
-        let query = r#"
+        let stage1_query = r#"
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
-    openPrs: pullRequests(states: [OPEN], first: 25, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    openPrs: pullRequests(states: [OPEN], first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
         number
         title
         isDraft
         isCrossRepository
-        baseRefName
-        headRefName
-        headRefOid
         author { login }
-        reviews(last: 20) {
-          nodes {
-            id
-            state
-            body
-            submittedAt
-            author { login }
-            comments { totalCount }
-          }
-        }
-        comments(last: 25) {
-          nodes {
-            databaseId
-            author { login }
-            body
-            createdAt
-          }
-        }
-        reviewThreads(last: 40) {
-          nodes {
-            id
-            isResolved
-            path
-            line
-            originalLine
-            comments(last: 15) {
-              nodes {
-                databaseId
-                author { login }
-                body
-                createdAt
-              }
-            }
-          }
-        }
       }
     }
   }
 }
 "#;
-        let payload = serde_json::json!({
-            "query": query,
+        let stage1_payload = serde_json::json!({
+            "query": stage1_query,
             "variables": {
                 "owner": owner,
                 "name": name,
             }
         });
-        let raw = self.run_gh(
+        let stage1_raw = self.run_gh(
             account,
             &["api", "graphql", "--input", "-"],
-            Some(&serde_json::to_vec(&payload)?),
+            Some(&serde_json::to_vec(&stage1_payload)?),
         )?;
-        let root: Value = serde_json::from_str(&raw)?;
-        parse_graphql_tender_response(&root)
+        let stage1_root: Value = serde_json::from_str(&stage1_raw)?;
+        let headers = parse_graphql_tender_headers(&stage1_root);
+        let (eligible_nums, skipped_authors, skipped_forks) =
+            partition_tender_open_pr_headers(cfg, repo_cfg, &headers, explicit_watched_prs);
+
+        if eligible_nums.is_empty() {
+            return Ok(TenderRepoPollOutcome {
+                snapshots: Vec::new(),
+                skipped_authors,
+                skipped_forks,
+            });
+        }
+
+        let mut snapshots = Vec::with_capacity(eligible_nums.len());
+        for chunk in eligible_nums.chunks(25) {
+            let mut aliased_fields = String::new();
+            for &num in chunk {
+                aliased_fields.push_str(&format!(
+                    "    pr_{num}: pullRequest(number: {num}) {{ ...TenderPrFields }}\n"
+                ));
+            }
+            let stage2_query = format!(
+                "query($owner: String!, $name: String!) {{\n\
+                   repository(owner: $owner, name: $name) {{\n\
+                 {aliased_fields}\
+                   }}\n\
+                 }}\n\
+                 fragment TenderPrFields on PullRequest {{\n\
+                   number\n\
+                   title\n\
+                   isDraft\n\
+                   isCrossRepository\n\
+                   baseRefName\n\
+                   headRefName\n\
+                   headRefOid\n\
+                   author {{ login }}\n\
+                   reviews(last: 20) {{\n\
+                     nodes {{\n\
+                       id\n\
+                       state\n\
+                       body\n\
+                       submittedAt\n\
+                       author {{ login }}\n\
+                       comments {{ totalCount }}\n\
+                     }}\n\
+                   }}\n\
+                   comments(last: 25) {{\n\
+                     nodes {{\n\
+                       databaseId\n\
+                       author {{ login }}\n\
+                       body\n\
+                       createdAt\n\
+                     }}\n\
+                   }}\n\
+                   reviewThreads(last: 40) {{\n\
+                     nodes {{\n\
+                       id\n\
+                       isResolved\n\
+                       path\n\
+                       line\n\
+                       originalLine\n\
+                       comments(last: 15) {{\n\
+                         nodes {{\n\
+                           databaseId\n\
+                           author {{ login }}\n\
+                           body\n\
+                           createdAt\n\
+                         }}\n\
+                       }}\n\
+                     }}\n\
+                   }}\n\
+                 }}\n"
+            );
+            let stage2_payload = serde_json::json!({
+                "query": stage2_query,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                }
+            });
+            let stage2_raw = self.run_gh(
+                account,
+                &["api", "graphql", "--input", "-"],
+                Some(&serde_json::to_vec(&stage2_payload)?),
+            )?;
+            let stage2_root: Value = serde_json::from_str(&stage2_raw)?;
+            snapshots.extend(parse_aliased_tender_prs_response(&stage2_root, chunk));
+        }
+
+        Ok(TenderRepoPollOutcome {
+            snapshots,
+            skipped_authors,
+            skipped_forks,
+        })
     }
 
     /// Posts an inline reply to a specific Pull Request review comment thread.
@@ -609,6 +727,7 @@ fn parse_graphql_poll_response(root: &Value) -> Result<RepoPollBatch, GitHubErro
             let title = pr["title"].as_str().unwrap_or("").to_string();
             let body = pr["body"].as_str().unwrap_or("").to_string();
             let is_draft = pr["isDraft"].as_bool().unwrap_or(false);
+            let is_fork = pr["isCrossRepository"].as_bool().unwrap_or(false);
             let base_ref = pr["baseRefName"].as_str().unwrap_or("main").to_string();
             let head_ref = pr["headRefName"].as_str().unwrap_or("").to_string();
             let head_sha = pr["headRefOid"].as_str().unwrap_or("").to_string();
@@ -675,6 +794,7 @@ fn parse_graphql_poll_response(root: &Value) -> Result<RepoPollBatch, GitHubErro
                     title,
                     author,
                     is_draft,
+                    is_fork,
                     base_ref,
                     head_ref,
                     head_sha,
@@ -732,215 +852,259 @@ fn parse_linked_issues(nodes_val: &Value) -> Vec<LinkedIssue> {
     out
 }
 
-fn parse_graphql_tender_response(root: &Value) -> Result<Vec<TenderPrSnapshot>, GitHubError> {
+fn parse_graphql_tender_headers(root: &Value) -> Vec<TenderOpenPrHeader> {
     let mut out = Vec::new();
     let Some(nodes) = root["data"]["repository"]["openPrs"]["nodes"].as_array() else {
-        return Ok(out);
+        return out;
     };
-
     for pr in nodes {
         let pr_number = pr["number"].as_u64().unwrap_or(0);
         if pr_number == 0 {
             continue;
         }
-        let pr_author = pr["author"]["login"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
-        let mut feedback_items = Vec::new();
-
-        if let Some(reviews) = pr["reviews"]["nodes"].as_array() {
-            for r in reviews {
-                let rev_id = r["id"].as_str().unwrap_or("");
-                let submitted_at = r["submittedAt"].as_str().unwrap_or("").to_string();
-                let body = r["body"].as_str().unwrap_or("").to_string();
-                if submitted_at.is_empty() || body.trim().is_empty() {
-                    continue;
-                }
-                let inline_comment_count = r["comments"]["totalCount"].as_u64().unwrap_or(0) as u32;
-                feedback_items.push(TenderFeedbackItem {
-                    feedback_id: format!("review:{}", rev_id),
-                    thread_node_id: None,
-                    reply_comment_id: None,
-                    kind: TenderFeedbackKind::ReviewSummary,
-                    author: r["author"]["login"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    created_at: submitted_at,
-                    path: None,
-                    line: None,
-                    review_state: r["state"].as_str().map(ToString::to_string),
-                    is_resolved: false,
-                    inline_comment_count,
-                    answered_by_tender: false,
-                    answered_by_pr_author: false,
-                    latest_author_reply: None,
-                    body,
-                });
-            }
-        }
-
-        if let Some(comments) = pr["comments"]["nodes"].as_array() {
-            for c in comments {
-                let db_id = c["databaseId"].as_u64().unwrap_or(0);
-                let created_at = c["createdAt"].as_str().unwrap_or("").to_string();
-                let body = c["body"].as_str().unwrap_or("").to_string();
-                if created_at.is_empty() || body.trim().is_empty() {
-                    continue;
-                }
-                feedback_items.push(TenderFeedbackItem {
-                    feedback_id: format!("comment:{}", db_id),
-                    thread_node_id: None,
-                    reply_comment_id: Some(db_id),
-                    kind: TenderFeedbackKind::IssueComment,
-                    author: c["author"]["login"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    created_at,
-                    path: None,
-                    line: None,
-                    review_state: None,
-                    is_resolved: false,
-                    inline_comment_count: 0,
-                    answered_by_tender: false,
-                    answered_by_pr_author: false,
-                    latest_author_reply: None,
-                    body,
-                });
-            }
-        }
-
-        if let Some(threads) = pr["reviewThreads"]["nodes"].as_array() {
-            for t in threads {
-                let thread_id = t["id"].as_str().map(ToString::to_string);
-                let is_resolved = t["isResolved"].as_bool().unwrap_or(false);
-                let path = t["path"].as_str().map(ToString::to_string);
-                let line = t["line"]
-                    .as_u64()
-                    .or_else(|| t["originalLine"].as_u64())
-                    .map(|n| n as u32);
-                let Some(t_comments) = t["comments"]["nodes"].as_array() else {
-                    continue;
-                };
-                let valid_comments: Vec<&Value> = t_comments
-                    .iter()
-                    .filter(|c| !c["createdAt"].as_str().unwrap_or("").is_empty())
-                    .collect();
-                let Some(&first_c) = valid_comments.first() else {
-                    continue;
-                };
-                let root_db_id = first_c["databaseId"].as_u64().unwrap_or(0);
-
-                // Inspect the latest comment in the thread to detect if Code Tender or the PR author already answered it.
-                // A `NeedsHuman` bot note (`BOT_TENDER_NEEDS_HUMAN_MARKER` / "Leaving this thread open") leaves the thread
-                // awaiting input and must NOT count as answered by either Code Tender or the PR author.
-                let last_c = *valid_comments.last().unwrap_or(&first_c);
-                let last_author = last_c["author"]["login"].as_str().unwrap_or("unknown");
-                let last_body = last_c["body"].as_str().unwrap_or("");
-                let is_tender_comment = last_body.contains(BOT_TENDER_MARKER);
-                let is_tender_needs_human = last_body.contains(BOT_TENDER_NEEDS_HUMAN_MARKER)
-                    || (is_tender_comment && last_body.contains("Leaving this thread open"));
-                let answered_by_tender = is_tender_comment && !is_tender_needs_human;
-                let answered_by_pr_author = !is_tender_comment
-                    && !last_body.contains(BOT_COMMENT_MARKER)
-                    && last_author.eq_ignore_ascii_case(&pr_author);
-                let latest_author_reply = if answered_by_pr_author {
-                    Some(last_body.to_string())
-                } else {
-                    None
-                };
-
-                // Collect external reviewer comments (including single-account BOT_COMMENT_MARKER self-reviews).
-                let reviewer_comments: Vec<&Value> = valid_comments
-                    .iter()
-                    .copied()
-                    .filter(|c| {
-                        let c_author = c["author"]["login"].as_str().unwrap_or("unknown");
-                        let c_body = c["body"].as_str().unwrap_or("");
-                        !c_body.contains(BOT_TENDER_MARKER)
-                            && (!c_author.eq_ignore_ascii_case(&pr_author)
-                                || c_body.contains(BOT_COMMENT_MARKER))
-                    })
-                    .collect();
-                let Some(&first_rev) = reviewer_comments.first() else {
-                    continue;
-                };
-                let reviewer_author = first_rev["author"]["login"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
-                let latest_reviewer_at = reviewer_comments
-                    .last()
-                    .and_then(|c| c["createdAt"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                let combined_body = if valid_comments.len() == 1 {
-                    first_rev["body"].as_str().unwrap_or("").to_string()
-                } else {
-                    valid_comments
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, c)| {
-                            let ca = c["author"]["login"].as_str().unwrap_or("unknown");
-                            let cb = c["body"].as_str().unwrap_or("");
-                            if idx == 0 {
-                                cb.to_string()
-                            } else {
-                                format!("---\n**Thread reply (@{ca}):**\n{cb}")
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                };
-
-                let feedback_id = if root_db_id > 0 {
-                    format!("thread-comment:{}", root_db_id)
-                } else {
-                    format!("thread:{}", thread_id.as_deref().unwrap_or("unknown"))
-                };
-
-                feedback_items.push(TenderFeedbackItem {
-                    feedback_id,
-                    thread_node_id: thread_id,
-                    reply_comment_id: if root_db_id > 0 {
-                        Some(root_db_id)
-                    } else {
-                        None
-                    },
-                    kind: TenderFeedbackKind::ReviewThreadComment,
-                    author: reviewer_author,
-                    created_at: latest_reviewer_at,
-                    path,
-                    line,
-                    review_state: None,
-                    is_resolved,
-                    inline_comment_count: 0,
-                    answered_by_tender,
-                    answered_by_pr_author,
-                    latest_author_reply,
-                    body: combined_body,
-                });
-            }
-        }
-
-        feedback_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        out.push(TenderPrSnapshot {
+        out.push(TenderOpenPrHeader {
             pr_number,
             title: pr["title"].as_str().unwrap_or("").to_string(),
-            author: pr_author,
+            author: pr["author"]["login"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
             is_draft: pr["isDraft"].as_bool().unwrap_or(false),
             is_fork: pr["isCrossRepository"].as_bool().unwrap_or(false),
-            base_ref: pr["baseRefName"].as_str().unwrap_or("main").to_string(),
-            head_ref: pr["headRefName"].as_str().unwrap_or("").to_string(),
-            head_sha: pr["headRefOid"].as_str().unwrap_or("").to_string(),
-            feedback_items,
         });
     }
+    out
+}
 
+fn parse_aliased_tender_prs_response(root: &Value, pr_numbers: &[u64]) -> Vec<TenderPrSnapshot> {
+    let repo_node = &root["data"]["repository"];
+    let mut out = Vec::new();
+    for &num in pr_numbers {
+        let alias = format!("pr_{num}");
+        if let Some(pr_val) = repo_node.get(&alias)
+            && !pr_val.is_null()
+            && let Some(snap) = parse_single_tender_pr_node(pr_val)
+        {
+            out.push(snap);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn parse_graphql_tender_response(root: &Value) -> Result<Vec<TenderPrSnapshot>, GitHubError> {
+    let mut out = Vec::new();
+    let Some(nodes) = root["data"]["repository"]["openPrs"]["nodes"].as_array() else {
+        return Ok(out);
+    };
+    for pr in nodes {
+        if let Some(snap) = parse_single_tender_pr_node(pr) {
+            out.push(snap);
+        }
+    }
     Ok(out)
+}
+
+fn parse_single_tender_pr_node(pr: &Value) -> Option<TenderPrSnapshot> {
+    let pr_number = pr["number"].as_u64().unwrap_or(0);
+    if pr_number == 0 {
+        return None;
+    }
+    let pr_author = pr["author"]["login"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let mut feedback_items = Vec::new();
+
+    if let Some(reviews) = pr["reviews"]["nodes"].as_array() {
+        for r in reviews {
+            let rev_id = r["id"].as_str().unwrap_or("");
+            let submitted_at = r["submittedAt"].as_str().unwrap_or("").to_string();
+            let body = r["body"].as_str().unwrap_or("").to_string();
+            if submitted_at.is_empty() || body.trim().is_empty() {
+                continue;
+            }
+            let inline_comment_count = r["comments"]["totalCount"].as_u64().unwrap_or(0) as u32;
+            feedback_items.push(TenderFeedbackItem {
+                feedback_id: format!("review:{}", rev_id),
+                thread_node_id: None,
+                reply_comment_id: None,
+                kind: TenderFeedbackKind::ReviewSummary,
+                author: r["author"]["login"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                created_at: submitted_at,
+                path: None,
+                line: None,
+                review_state: r["state"].as_str().map(ToString::to_string),
+                is_resolved: false,
+                inline_comment_count,
+                answered_by_tender: false,
+                answered_by_pr_author: false,
+                latest_author_reply: None,
+                body,
+            });
+        }
+    }
+
+    if let Some(comments) = pr["comments"]["nodes"].as_array() {
+        for c in comments {
+            let db_id = c["databaseId"].as_u64().unwrap_or(0);
+            let created_at = c["createdAt"].as_str().unwrap_or("").to_string();
+            let body = c["body"].as_str().unwrap_or("").to_string();
+            if created_at.is_empty() || body.trim().is_empty() {
+                continue;
+            }
+            feedback_items.push(TenderFeedbackItem {
+                feedback_id: format!("comment:{}", db_id),
+                thread_node_id: None,
+                reply_comment_id: Some(db_id),
+                kind: TenderFeedbackKind::IssueComment,
+                author: c["author"]["login"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string(),
+                created_at,
+                path: None,
+                line: None,
+                review_state: None,
+                is_resolved: false,
+                inline_comment_count: 0,
+                answered_by_tender: false,
+                answered_by_pr_author: false,
+                latest_author_reply: None,
+                body,
+            });
+        }
+    }
+
+    if let Some(threads) = pr["reviewThreads"]["nodes"].as_array() {
+        for t in threads {
+            let thread_id = t["id"].as_str().map(ToString::to_string);
+            let is_resolved = t["isResolved"].as_bool().unwrap_or(false);
+            let path = t["path"].as_str().map(ToString::to_string);
+            let line = t["line"]
+                .as_u64()
+                .or_else(|| t["originalLine"].as_u64())
+                .map(|n| n as u32);
+            let Some(t_comments) = t["comments"]["nodes"].as_array() else {
+                continue;
+            };
+            let valid_comments: Vec<&Value> = t_comments
+                .iter()
+                .filter(|c| !c["createdAt"].as_str().unwrap_or("").is_empty())
+                .collect();
+            let Some(&first_c) = valid_comments.first() else {
+                continue;
+            };
+            let root_db_id = first_c["databaseId"].as_u64().unwrap_or(0);
+
+            // Inspect the latest comment in the thread to detect if Code Tender or the PR author already answered it.
+            // A `NeedsHuman` bot note (`BOT_TENDER_NEEDS_HUMAN_MARKER` / "Leaving this thread open") leaves the thread
+            // awaiting input and must NOT count as answered by either Code Tender or the PR author.
+            let last_c = *valid_comments.last().unwrap_or(&first_c);
+            let last_author = last_c["author"]["login"].as_str().unwrap_or("unknown");
+            let last_body = last_c["body"].as_str().unwrap_or("");
+            let is_tender_comment = last_body.contains(BOT_TENDER_MARKER);
+            let is_tender_needs_human = last_body.contains(BOT_TENDER_NEEDS_HUMAN_MARKER)
+                || (is_tender_comment && last_body.contains("Leaving this thread open"));
+            let answered_by_tender = is_tender_comment && !is_tender_needs_human;
+            let answered_by_pr_author = !is_tender_comment
+                && !last_body.contains(BOT_COMMENT_MARKER)
+                && last_author.eq_ignore_ascii_case(&pr_author);
+            let latest_author_reply = if answered_by_pr_author {
+                Some(last_body.to_string())
+            } else {
+                None
+            };
+
+            // Collect external reviewer comments (including single-account BOT_COMMENT_MARKER self-reviews).
+            let reviewer_comments: Vec<&Value> = valid_comments
+                .iter()
+                .copied()
+                .filter(|c| {
+                    let c_author = c["author"]["login"].as_str().unwrap_or("unknown");
+                    let c_body = c["body"].as_str().unwrap_or("");
+                    !c_body.contains(BOT_TENDER_MARKER)
+                        && (!c_author.eq_ignore_ascii_case(&pr_author)
+                            || c_body.contains(BOT_COMMENT_MARKER))
+                })
+                .collect();
+            let Some(&first_rev) = reviewer_comments.first() else {
+                continue;
+            };
+            let reviewer_author = first_rev["author"]["login"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let latest_reviewer_at = reviewer_comments
+                .last()
+                .and_then(|c| c["createdAt"].as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let combined_body = if valid_comments.len() == 1 {
+                first_rev["body"].as_str().unwrap_or("").to_string()
+            } else {
+                valid_comments
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, c)| {
+                        let ca = c["author"]["login"].as_str().unwrap_or("unknown");
+                        let cb = c["body"].as_str().unwrap_or("");
+                        if idx == 0 {
+                            cb.to_string()
+                        } else {
+                            format!("---\n**Thread reply (@{ca}):**\n{cb}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
+
+            let feedback_id = if root_db_id > 0 {
+                format!("thread-comment:{}", root_db_id)
+            } else {
+                format!("thread:{}", thread_id.as_deref().unwrap_or("unknown"))
+            };
+
+            feedback_items.push(TenderFeedbackItem {
+                feedback_id,
+                thread_node_id: thread_id,
+                reply_comment_id: if root_db_id > 0 {
+                    Some(root_db_id)
+                } else {
+                    None
+                },
+                kind: TenderFeedbackKind::ReviewThreadComment,
+                author: reviewer_author,
+                created_at: latest_reviewer_at,
+                path,
+                line,
+                review_state: None,
+                is_resolved,
+                inline_comment_count: 0,
+                answered_by_tender,
+                answered_by_pr_author,
+                latest_author_reply,
+                body: combined_body,
+            });
+        }
+    }
+
+    feedback_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Some(TenderPrSnapshot {
+        pr_number,
+        title: pr["title"].as_str().unwrap_or("").to_string(),
+        author: pr_author,
+        is_draft: pr["isDraft"].as_bool().unwrap_or(false),
+        is_fork: pr["isCrossRepository"].as_bool().unwrap_or(false),
+        base_ref: pr["baseRefName"].as_str().unwrap_or("main").to_string(),
+        head_ref: pr["headRefName"].as_str().unwrap_or("").to_string(),
+        head_sha: pr["headRefOid"].as_str().unwrap_or("").to_string(),
+        feedback_items,
+    })
 }
 
 #[cfg(test)]
@@ -1095,5 +1259,126 @@ mod tests {
         let fb = &parsed[0].feedback_items[0];
         assert!(!fb.answered_by_tender);
         assert!(!fb.answered_by_pr_author);
+    }
+
+    #[test]
+    fn stage1_tender_poller_filters_out_non_owner_prs_and_forks_before_fetching_threads() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "cokitron"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+
+        let repo_cfg = WatchedRepoConfig {
+            full_name: "cokitron/cheap-otto".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Forced,
+            forced_account: Some("cokitron".to_string()),
+            review_event_policy: ReviewEventPolicy::CommentOnly,
+            gdrive_folder_id: None,
+            local_repo_path: Some("~/otto-workspaces/cheap-otto".to_string()),
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: vec!["cokitron".to_string()],
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: true,
+        };
+
+        let stage1_json = serde_json::json!({
+            "data": {
+                "repository": {
+                    "openPrs": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "title": "chore: oss git strategy",
+                                "isDraft": false,
+                                "isCrossRepository": false,
+                                "author": { "login": "cokitron" }
+                            },
+                            {
+                                "number": 11,
+                                "title": "feat: external pr",
+                                "isDraft": false,
+                                "isCrossRepository": false,
+                                "author": { "login": "some-other-dev" }
+                            },
+                            {
+                                "number": 12,
+                                "title": "feat: other local account",
+                                "isDraft": false,
+                                "isCrossRepository": false,
+                                "author": { "login": "alice-dev" }
+                            },
+                            {
+                                "number": 13,
+                                "title": "feat: spoofed fork pr",
+                                "isDraft": false,
+                                "isCrossRepository": true,
+                                "author": { "login": "cokitron" }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let headers = parse_graphql_tender_headers(&stage1_json);
+        assert_eq!(headers.len(), 4);
+
+        // Even if someone passed `#11` or `#12` in `explicit_watched_prs`, strict `tender_allowed_authors = ["cokitron"]` blocks them!
+        let (eligible, skipped_authors, skipped_forks) =
+            partition_tender_open_pr_headers(&cfg, &repo_cfg, &headers, &[11, 12]);
+        assert_eq!(eligible, vec![10]);
+        assert_eq!(
+            skipped_authors,
+            vec![
+                (11, "some-other-dev".to_string()),
+                (12, "alice-dev".to_string())
+            ]
+        );
+        assert_eq!(skipped_forks, vec![13]);
+
+        // Verify Stage-2 aliased response parsing for matched PR #10.
+        let stage2_json = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pr_10": {
+                        "number": 10,
+                        "title": "chore: oss git strategy",
+                        "isDraft": false,
+                        "isCrossRepository": false,
+                        "baseRefName": "main",
+                        "headRefName": "chore/oss-git-strategy-and-cubic",
+                        "headRefOid": "4acacac999",
+                        "author": { "login": "cokitron" },
+                        "reviews": { "nodes": [] },
+                        "comments": { "nodes": [] },
+                        "reviewThreads": { "nodes": [] }
+                    }
+                }
+            }
+        });
+        let snaps = parse_aliased_tender_prs_response(&stage2_json, &eligible);
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].pr_number, 10);
+        assert_eq!(snaps[0].author, "cokitron");
     }
 }

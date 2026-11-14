@@ -8,7 +8,8 @@ use crate::brains::{
 };
 use crate::config::{
     AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
-    home_dir, normalize_repo_input, repo_fs_slug,
+    home_dir, merge_kb_markdown, normalize_repo_input, repo_fs_slug, runtime_kb_root,
+    strip_committed_kb_lines,
 };
 use crate::github::GitHubClient;
 use crate::state::{
@@ -833,44 +834,6 @@ pub fn load_repo_app_context(workdir: &Path, local_checkout: Option<&Path>) -> S
     }
 }
 
-/// Ensures `tender-agents/kb/*.md` and per-agent `kb/lessons.md` exist with non-destructive defaults.
-pub fn ensure_tender_kb_scaffold(workspace_root: &Path) {
-    let shared_dir = workspace_root.join("tender-agents").join("kb");
-    let _ = fs::create_dir_all(&shared_dir);
-    let defaults = [
-        (
-            "patterns-fixed.md",
-            "# Code Tender KB — Verified Fix Patterns\n\n- `[*]` Always pair behavior fixes with a targeted regression test covering the failure mode.\n",
-        ),
-        (
-            "check-recipes.md",
-            "# Code Tender KB — Local Verification & Check Recipes\n\n- `[*]` Run the project's typechecker, linter, and tests locally before finalizing edits.\n",
-        ),
-        (
-            "do-not-repeat.md",
-            "# Code Tender KB — Anti-Regression & Do-Not-Repeat Rules\n\n- `[*]` Never guess contracts from the diff alone—verify full definitions in the local app checkout.\n",
-        ),
-    ];
-    for (name, content) in defaults {
-        let path = shared_dir.join(name);
-        if !path.exists() {
-            let _ = fs::write(path, content);
-        }
-    }
-
-    for agent_id in TENDER_AGENTS {
-        let agent_kb = workspace_root
-            .join("tender-agents")
-            .join(agent_id)
-            .join("kb");
-        let _ = fs::create_dir_all(&agent_kb);
-        let lessons = agent_kb.join("lessons.md");
-        if !lessons.exists() {
-            let _ = fs::write(lessons, format!("# `{}` Agent Lessons\n\n", agent_id));
-        }
-    }
-}
-
 fn filter_kb_for_repo(raw: &str, repo_full_name: &str) -> String {
     let repo_tag = format!("[{}]", repo_full_name.to_ascii_lowercase());
     let kept: Vec<&str> = raw
@@ -891,40 +854,102 @@ fn filter_kb_for_repo(raw: &str, repo_full_name: &str) -> String {
     kept.join("\n")
 }
 
-/// Loads Code Tender's dedicated Knowledge Base (`patterns-fixed`, `check-recipes`, `do-not-repeat` + agent lessons).
+pub fn read_merged_tender_kb_file(
+    workspace_root: &Path,
+    committed_rel: &str,
+    overlay_rel: &str,
+) -> String {
+    let base_raw = fs::read_to_string(workspace_root.join(committed_rel)).unwrap_or_default();
+    let overlay_raw =
+        fs::read_to_string(runtime_kb_root(workspace_root).join(overlay_rel)).unwrap_or_default();
+    merge_kb_markdown(&base_raw, &overlay_raw)
+}
+
+pub fn load_tender_agent_lessons(workspace_root: &Path, agent_id: &str) -> String {
+    read_merged_tender_kb_file(
+        workspace_root,
+        &format!("tender-agents/{agent_id}/kb/lessons.md"),
+        &format!("tender/{agent_id}/lessons.md"),
+    )
+}
+
+pub fn save_tender_agent_lessons(
+    workspace_root: &Path,
+    agent_id: &str,
+    content: &str,
+) -> Result<(), String> {
+    if !TENDER_AGENTS.contains(&agent_id) {
+        return Err(format!("unknown tender agent `{}`", agent_id));
+    }
+    let committed_path = workspace_root
+        .join("tender-agents")
+        .join(agent_id)
+        .join("kb/lessons.md");
+    let base_raw = fs::read_to_string(committed_path).unwrap_or_default();
+    let stripped = strip_committed_kb_lines(&base_raw, content);
+    let overlay_path = runtime_kb_root(workspace_root)
+        .join("tender")
+        .join(agent_id)
+        .join("lessons.md");
+    if let Some(parent) = overlay_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(overlay_path, stripped).map_err(|e| e.to_string())
+}
+
+/// Loads Code Tender's dedicated Knowledge Base (`patterns-fixed`, `check-recipes`, `do-not-repeat` + agent lessons),
+/// merging committed universal rules with the private runtime KB overlay in `<state_dir>/kb/tender/`.
 pub fn load_tender_kb_bundle(
     workspace_root: &Path,
     agent_id: &str,
     repo_full_name: &str,
 ) -> String {
-    ensure_tender_kb_scaffold(workspace_root);
-    let root = workspace_root.join("tender-agents");
     let sections = [
-        ("Verified Fix Patterns", root.join("kb/patterns-fixed.md")),
-        ("Local Check Recipes", root.join("kb/check-recipes.md")),
-        ("Do-Not-Repeat Guardrails", root.join("kb/do-not-repeat.md")),
+        (
+            "Verified Fix Patterns",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/patterns-fixed.md",
+                "tender/kb/patterns-fixed.md",
+            ),
+        ),
+        (
+            "Local Check Recipes",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/check-recipes.md",
+                "tender/kb/check-recipes.md",
+            ),
+        ),
+        (
+            "Do-Not-Repeat Guardrails",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/do-not-repeat.md",
+                "tender/kb/do-not-repeat.md",
+            ),
+        ),
         (
             "Agent-Specific Lessons",
-            root.join(agent_id).join("kb/lessons.md"),
+            load_tender_agent_lessons(workspace_root, agent_id),
         ),
     ];
 
     let mut out = String::new();
-    for (title, path) in sections {
-        if let Ok(raw) = fs::read_to_string(&path) {
-            let filtered = filter_kb_for_repo(&raw, repo_full_name);
-            if !filtered.trim().is_empty() {
-                out.push_str(&format!(
-                    "### {title}\n{}\n\n",
-                    truncate_chars(filtered.trim(), 3_000)
-                ));
-            }
+    for (title, raw) in sections {
+        let filtered = filter_kb_for_repo(&raw, repo_full_name);
+        if !filtered.trim().is_empty() {
+            out.push_str(&format!(
+                "### {title}\n{}\n\n",
+                truncate_chars(filtered.trim(), 3_000)
+            ));
         }
     }
     out
 }
 
-/// Appends a deduplicated rule line into Code Tender's KB (`patterns-fixed`, `check-recipes`, `do-not-repeat`, or `agent-lesson`).
+/// Appends a deduplicated rule line into Code Tender's private runtime KB overlay
+/// (`patterns-fixed`, `check-recipes`, `do-not-repeat`, or `agent-lesson`).
 /// Returns `Ok(true)` if newly added, `Ok(false)` if an identical rule already existed.
 pub fn append_tender_kb_entry(
     workspace_root: &Path,
@@ -936,31 +961,33 @@ pub fn append_tender_kb_entry(
     if clean_rule.is_empty() {
         return Ok(false);
     }
-    ensure_tender_kb_scaffold(workspace_root);
 
-    let path = match target {
-        "patterns-fixed" | "patterns_fixed" => {
-            workspace_root.join("tender-agents/kb/patterns-fixed.md")
-        }
-        "check-recipes" | "check_recipes" => {
-            workspace_root.join("tender-agents/kb/check-recipes.md")
-        }
-        "do-not-repeat" | "do_not_repeat" => {
-            workspace_root.join("tender-agents/kb/do-not-repeat.md")
-        }
+    let (committed_rel, overlay_rel) = match target {
+        "patterns-fixed" | "patterns_fixed" => (
+            "tender-agents/kb/patterns-fixed.md".to_string(),
+            "tender/kb/patterns-fixed.md".to_string(),
+        ),
+        "check-recipes" | "check_recipes" => (
+            "tender-agents/kb/check-recipes.md".to_string(),
+            "tender/kb/check-recipes.md".to_string(),
+        ),
+        "do-not-repeat" | "do_not_repeat" => (
+            "tender-agents/kb/do-not-repeat.md".to_string(),
+            "tender/kb/do-not-repeat.md".to_string(),
+        ),
         "agent-lesson" | "agent_lesson" => {
             let agent = target_agent
                 .filter(|a| TENDER_AGENTS.contains(a))
                 .unwrap_or("02-tender-fixer");
-            workspace_root
-                .join("tender-agents")
-                .join(agent)
-                .join("kb/lessons.md")
+            (
+                format!("tender-agents/{agent}/kb/lessons.md"),
+                format!("tender/{agent}/lessons.md"),
+            )
         }
         other => return Err(format!("unknown tender KB target `{}`", other)),
     };
 
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_merged_tender_kb_file(workspace_root, &committed_rel, &overlay_rel);
     let norm_new = clean_rule.to_ascii_lowercase();
     let norm_new_stripped = norm_new.trim_start_matches("- ").trim();
     if existing.lines().any(|line| {
@@ -979,10 +1006,14 @@ pub fn append_tender_kb_entry(
     } else {
         format!("- {}", clean_rule)
     };
+    let overlay_path = runtime_kb_root(workspace_root).join(overlay_rel);
+    if let Some(parent) = overlay_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(&overlay_path)
         .map_err(|e| e.to_string())?;
     use std::io::Write as _;
     writeln!(file, "{}", formatted).map_err(|e| e.to_string())?;
@@ -990,11 +1021,21 @@ pub fn append_tender_kb_entry(
 }
 
 pub fn load_tender_kb_payload(workspace_root: &Path) -> serde_json::Value {
-    ensure_tender_kb_scaffold(workspace_root);
-    let root = workspace_root.join("tender-agents");
-    let patterns_fixed = fs::read_to_string(root.join("kb/patterns-fixed.md")).unwrap_or_default();
-    let check_recipes = fs::read_to_string(root.join("kb/check-recipes.md")).unwrap_or_default();
-    let do_not_repeat = fs::read_to_string(root.join("kb/do-not-repeat.md")).unwrap_or_default();
+    let patterns_fixed = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/patterns-fixed.md",
+        "tender/kb/patterns-fixed.md",
+    );
+    let check_recipes = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/check-recipes.md",
+        "tender/kb/check-recipes.md",
+    );
+    let do_not_repeat = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/do-not-repeat.md",
+        "tender/kb/do-not-repeat.md",
+    );
     serde_json::json!({
         "patterns_fixed": patterns_fixed,
         "check_recipes": check_recipes,
@@ -1007,14 +1048,28 @@ pub fn save_tender_kb_file(
     file_key: &str,
     content: &str,
 ) -> Result<(), String> {
-    ensure_tender_kb_scaffold(workspace_root);
-    let rel = match file_key {
-        "patterns-fixed" => "tender-agents/kb/patterns-fixed.md",
-        "check-recipes" => "tender-agents/kb/check-recipes.md",
-        "do-not-repeat" => "tender-agents/kb/do-not-repeat.md",
+    let (committed_rel, overlay_rel) = match file_key {
+        "patterns-fixed" => (
+            "tender-agents/kb/patterns-fixed.md",
+            "tender/kb/patterns-fixed.md",
+        ),
+        "check-recipes" => (
+            "tender-agents/kb/check-recipes.md",
+            "tender/kb/check-recipes.md",
+        ),
+        "do-not-repeat" => (
+            "tender-agents/kb/do-not-repeat.md",
+            "tender/kb/do-not-repeat.md",
+        ),
         _ => return Err(format!("invalid tender KB key `{}`", file_key)),
     };
-    fs::write(workspace_root.join(rel), content).map_err(|e| e.to_string())
+    let base_raw = fs::read_to_string(workspace_root.join(committed_rel)).unwrap_or_default();
+    let stripped = strip_committed_kb_lines(&base_raw, content);
+    let overlay_path = runtime_kb_root(workspace_root).join(overlay_rel);
+    if let Some(parent) = overlay_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(overlay_path, stripped).map_err(|e| e.to_string())
 }
 
 /// Synchronizes open PR snapshots from GitHub into `store.tender_pull_requests`:
@@ -1170,12 +1225,17 @@ fn prune_non_actionable_handled_items(tpr: &mut TenderPrState, has_inline_thread
             if sum_trim == "</details>" || author_lc.contains("codex") {
                 return false;
             }
-            if author_lc.contains("cubic")
-                && (has_inline_threads
-                    || h.summary.contains("No issues found")
-                    || h.summary.contains("All reported issues were addressed"))
-            {
-                return false;
+            if author_lc.contains("cubic") {
+                let sum_lc = sum_trim.to_ascii_lowercase();
+                if has_inline_threads
+                    || sum_lc.contains("no issues found")
+                    || sum_lc.contains("0 issues found")
+                    || sum_lc.contains("no actionable issues")
+                    || sum_lc.contains("all reported issues were addressed")
+                    || sum_lc.contains("all issues were addressed")
+                {
+                    return false;
+                }
             }
         }
         true
@@ -1680,10 +1740,28 @@ fn concise_ui_snippet(raw: &str, max_chars: usize) -> String {
     }
 }
 
+pub fn load_tender_agent_notes(workspace_root: &Path, agent_id: &str) -> String {
+    let base_notes = fs::read_to_string(
+        workspace_root
+            .join("tender-agents")
+            .join(agent_id)
+            .join("notes.md"),
+    )
+    .unwrap_or_default();
+    let overlay_notes = fs::read_to_string(
+        runtime_kb_root(workspace_root)
+            .join("tender")
+            .join(agent_id)
+            .join("notes.md"),
+    )
+    .unwrap_or_default();
+    merge_kb_markdown(&base_notes, &overlay_notes)
+}
+
 pub fn load_tender_agent_prompt(workspace_root: &Path, agent_id: &str) -> String {
     let dir = workspace_root.join("tender-agents").join(agent_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
-    let notes = fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+    let notes = load_tender_agent_notes(workspace_root, agent_id);
     if notes.trim().is_empty() {
         prompt
     } else {
@@ -1700,13 +1778,17 @@ pub fn save_tender_agent_notes(
     if !TENDER_AGENTS.contains(&agent_id) {
         return Err(format!("unknown tender agent `{}`", agent_id));
     }
-    let dir = workspace_root.join("tender-agents").join(agent_id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     if let Some(p) = prompt {
+        let dir = workspace_root.join("tender-agents").join(agent_id);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         fs::write(dir.join("PROMPT.md"), p).map_err(|e| e.to_string())?;
     }
     if let Some(n) = notes {
-        fs::write(dir.join("notes.md"), n).map_err(|e| e.to_string())?;
+        let overlay_dir = runtime_kb_root(workspace_root)
+            .join("tender")
+            .join(agent_id);
+        fs::create_dir_all(&overlay_dir).map_err(|e| e.to_string())?;
+        fs::write(overlay_dir.join("notes.md"), n).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -4124,6 +4206,9 @@ gdocs_bin = "gdocs"
             local_check_cmd: None,
             enabled: false,
             tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
         };
 
         let snaps = vec![

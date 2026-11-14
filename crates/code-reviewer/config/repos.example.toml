@@ -49,3 +49,22 @@ local_repo_path = "~/apps/web-app"
 local_check_cmd = "npm run check"
 enabled = false
 tender_enabled = true
+tender_allowed_authors = []
+review_allowed_authors = []
+skip_fork_prs = true
+
+# Example open-source repository reviewed externally by Cubic AI while Code Tender
+# strictly handles only the maintainer's own Pull Requests (`tender_allowed_authors`):
+# [[repos]]
+# full_name = "cokitron/cheap-otto"
+# default_branch = "main"
+# language = "en"
+# account_policy = "forced"
+# forced_account = "cokitron"
+# review_event_policy = "comment_only"
+# local_repo_path = "~/otto-workspaces/cheap-otto"
+# local_check_cmd = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets"
+# enabled = false
+# tender_enabled = true
+# tender_allowed_authors = ["cokitron"]
+# skip_fork_prs = true

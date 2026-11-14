@@ -2,7 +2,7 @@
 
 use crate::brains::{
     ADVERSARIAL_BRAIN, SPECIALIST_BRAINS, append_kb_entry, is_runner_authenticated,
-    read_pixel_server_auth,
+    load_brain_kb_section, read_pixel_server_auth,
 };
 use crate::config::{
     AccountPolicy, CliRunner, ReviewEventPolicy, TenderDeliveryMode, WatchedRepoConfig,
@@ -11,6 +11,7 @@ use crate::config::{
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
+use crate::m1::remote_shell_path_expr;
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
     TenderTriggerDecision, TrackedPrState, evaluate_tender_trigger,
@@ -18,7 +19,8 @@ use crate::state::{
 use crate::tender::{
     TENDER_AGENTS, append_tender_kb_entry, approve_and_push_staged_patch, browse_m1_directories,
     detect_local_repo_checkout, infer_local_check_cmd, inspect_local_git_repo,
-    load_tender_kb_payload, respond_and_resolve_tender_item, save_tender_agent_notes,
+    load_tender_agent_lessons, load_tender_agent_notes, load_tender_kb_payload,
+    respond_and_resolve_tender_item, save_tender_agent_lessons, save_tender_agent_notes,
     save_tender_kb_file, sync_watched_prs_from_snapshots_with_gh,
 };
 use crate::ui_html::DASHBOARD_HTML;
@@ -103,7 +105,7 @@ pub fn open_tunneled_ui(
                sleep 1\n\
              fi\n",
             port = port,
-            repo = remote_repo.replace('"', "\\\""),
+            repo = remote_shell_path_expr(remote_repo),
         );
         let _ = crate::m1::run_ssh_script(host, &ensure_remote);
 
@@ -321,16 +323,7 @@ fn dispatch_api(
                 req.notes.as_deref(),
             )?;
             if let Some(lessons) = req.lessons {
-                if !TENDER_AGENTS.contains(&req.agent.as_str()) {
-                    return Err(format!("unknown tender agent `{}`", req.agent));
-                }
-                let kb_dir = ctx
-                    .workspace
-                    .join("tender-agents")
-                    .join(&req.agent)
-                    .join("kb");
-                fs::create_dir_all(&kb_dir).map_err(|e| e.to_string())?;
-                fs::write(kb_dir.join("lessons.md"), lessons).map_err(|e| e.to_string())?;
+                save_tender_agent_lessons(&ctx.workspace, &req.agent, &lessons)?;
             }
             Ok(json!({ "ok": true }))
         }
@@ -549,18 +542,39 @@ fn dispatch_api(
             let mut open_prs = Vec::new();
             let mut errors = Vec::new();
 
+            let initial_ledger = LedgerStore::load_or_default(&state_dir).unwrap_or_default();
             for repo_cfg in &cfg.repos {
                 if let Some(ref rf) = repo_filter
                     && !repo_cfg.full_name.eq_ignore_ascii_case(rf)
                 {
                     continue;
                 }
+                let explicit_watched_prs: Vec<u64> = if repo_cfg.tender_allowed_authors.is_empty() {
+                    initial_ledger
+                        .tender_pull_requests
+                        .values()
+                        .filter(|t| {
+                            t.repo.eq_ignore_ascii_case(&repo_cfg.full_name)
+                                && t.watched
+                                && t.is_open
+                        })
+                        .map(|t| t.pr_number)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let poll_account = repo_cfg
                     .forced_account
                     .as_deref()
                     .unwrap_or(&cfg.accounts.primary);
-                match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
-                    Ok(snaps) => {
+                match gh.poll_tender_repository_for_repo(
+                    poll_account,
+                    &cfg,
+                    repo_cfg,
+                    &explicit_watched_prs,
+                ) {
+                    Ok(outcome) => {
+                        let snaps = outcome.snapshots;
                         let _ = sync_watched_prs_from_snapshots_with_gh(
                             &cfg,
                             repo_cfg,
@@ -690,6 +704,9 @@ fn dispatch_api(
                     local_check_cmd: inferred_check_cmd,
                     enabled: false,
                     tender_enabled: false,
+                    tender_allowed_authors: Vec::new(),
+                    review_allowed_authors: Vec::new(),
+                    skip_fork_prs: true,
                 })
                 .map_err(|e| e.to_string())?;
                 cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
@@ -707,8 +724,36 @@ fn dispatch_api(
                 .forced_account
                 .as_deref()
                 .unwrap_or(&cfg.accounts.primary);
-            let matched_snap = match gh.poll_tender_repository(poll_account, &repo_cfg.full_name) {
-                Ok(snaps) => {
+            let explicit_for_watch: Vec<u64> = if repo_cfg.tender_allowed_authors.is_empty() {
+                vec![pr_num]
+            } else {
+                Vec::new()
+            };
+            let matched_snap = match gh.poll_tender_repository_for_repo(
+                poll_account,
+                &cfg,
+                &repo_cfg,
+                &explicit_for_watch,
+            ) {
+                Ok(outcome) => {
+                    if outcome.skipped_forks.contains(&pr_num) {
+                        return Err(format!(
+                            "cannot watch {}#{}: cross-repository fork PRs are blocked from Code Tender",
+                            repo_cfg.full_name, pr_num
+                        ));
+                    }
+                    if let Some((_, blocked_author)) =
+                        outcome.skipped_authors.iter().find(|(n, _)| *n == pr_num)
+                    {
+                        return Err(format!(
+                            "cannot watch {}#{}: author `{}` is not in `tender_allowed_authors` ({:?})",
+                            repo_cfg.full_name,
+                            pr_num,
+                            blocked_author,
+                            repo_cfg.tender_allowed_authors
+                        ));
+                    }
+                    let snaps = outcome.snapshots;
                     let _ = sync_watched_prs_from_snapshots_with_gh(
                         &cfg,
                         &repo_cfg,
@@ -1018,6 +1063,12 @@ fn dispatch_api(
                 enabled: Option<bool>,
                 #[serde(default)]
                 tender_enabled: Option<bool>,
+                #[serde(default)]
+                tender_allowed_authors: Vec<String>,
+                #[serde(default)]
+                review_allowed_authors: Vec<String>,
+                #[serde(default)]
+                skip_fork_prs: Option<bool>,
             }
             let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
             let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
@@ -1042,6 +1093,19 @@ fn dispatch_api(
                 local_check_cmd: req.local_check_cmd.filter(|s| !s.trim().is_empty()),
                 enabled: req.enabled.unwrap_or(true),
                 tender_enabled: req.tender_enabled.unwrap_or(true),
+                tender_allowed_authors: req
+                    .tender_allowed_authors
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                review_allowed_authors: req
+                    .review_allowed_authors
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                skip_fork_prs: req.skip_fork_prs.unwrap_or(true),
             })
             .map_err(|e| e.to_string())?;
             cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;
@@ -1403,9 +1467,9 @@ fn build_brain_payload(workspace: &Path, brain_id: &str) -> Result<Value, String
     }
     let dir = workspace.join("brains").join(brain_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
-    let lessons = fs::read_to_string(dir.join("kb/lessons.md")).unwrap_or_default();
-    let fps = fs::read_to_string(dir.join("kb/false-positives.md")).unwrap_or_default();
-    let exemplars = fs::read_to_string(dir.join("kb/exemplars.md")).unwrap_or_default();
+    let lessons = load_brain_kb_section(workspace, brain_id, "lessons.md");
+    let fps = load_brain_kb_section(workspace, brain_id, "false-positives.md");
+    let exemplars = load_brain_kb_section(workspace, brain_id, "exemplars.md");
     Ok(json!({
         "id": brain_id,
         "prompt": prompt,
@@ -1438,8 +1502,8 @@ fn build_tender_agent_payload(workspace: &Path, agent_id: &str) -> Result<Value,
     }
     let dir = workspace.join("tender-agents").join(agent_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
-    let notes = fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
-    let lessons = fs::read_to_string(dir.join("kb/lessons.md")).unwrap_or_default();
+    let notes = load_tender_agent_notes(workspace, agent_id);
+    let lessons = load_tender_agent_lessons(workspace, agent_id);
     Ok(json!({
         "id": agent_id,
         "prompt": prompt,
