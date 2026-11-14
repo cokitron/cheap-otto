@@ -1044,6 +1044,9 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                 {
                     tpr.is_open = false;
                     tpr.open_feedback_count = 0;
+                    tpr.staged_patch = None;
+                    tpr.staged_commit_message = None;
+                    tpr.pending_items.clear();
                     prune_non_actionable_handled_items(tpr, false);
                 }
             }
@@ -1676,6 +1679,7 @@ pub fn execute_tender_pr_cycle(
 
     // Ground the isolated worktree with the user's local app checkout (linked dependencies, build cache, CLAUDE.md/README/manifests).
     let local_checkout = resolve_local_checkout_dir(repo_cfg);
+    install_worktree_js_deps_if_lockfile_diverged(local_checkout.as_deref(), &wt.path);
     let mut cargo_target_dir: Option<PathBuf> = None;
     if let Some(ref lc) = local_checkout {
         let linked_deps = link_local_dependencies_into_worktree(lc, &wt.path);
@@ -3144,6 +3148,74 @@ fn build_workdir_path(workdir: &Path) -> std::ffi::OsString {
     let mut path_parts: Vec<PathBuf> = local_bins.into_iter().filter(|p| p.is_dir()).collect();
     path_parts.extend(std::env::split_paths(&existing_path));
     std::env::join_paths(path_parts).unwrap_or(existing_path)
+}
+
+/// If the PR branch's `package-lock.json` or `pnpm-lock.yaml` differs from `local_checkout`
+/// (e.g. a newly merged workspace package or dependency like `postgres` was added since the local
+/// checkout was last updated), installs clean dependencies inside the PR worktree before linking.
+fn install_worktree_js_deps_if_lockfile_diverged(local_checkout: Option<&Path>, workdir: &Path) {
+    if workdir.join("node_modules").exists() {
+        return;
+    }
+
+    let npm_lock = workdir.join("package-lock.json");
+    let pnpm_lock = workdir.join("pnpm-lock.yaml");
+    let install_cmd = if npm_lock.is_file() {
+        let same_as_local = local_checkout.is_some_and(|lc| {
+            lc.join("node_modules").is_dir()
+                && fs::read(&npm_lock)
+                    .ok()
+                    .zip(fs::read(lc.join("package-lock.json")).ok())
+                    .is_some_and(|(a, b)| a == b)
+        });
+        if same_as_local {
+            return;
+        }
+        "npm ci --ignore-scripts --prefer-offline --no-audit --no-fund"
+    } else if pnpm_lock.is_file() {
+        let same_as_local = local_checkout.is_some_and(|lc| {
+            lc.join("node_modules").is_dir()
+                && fs::read(&pnpm_lock)
+                    .ok()
+                    .zip(fs::read(lc.join("pnpm-lock.yaml")).ok())
+                    .is_some_and(|(a, b)| a == b)
+        });
+        if same_as_local {
+            return;
+        }
+        "pnpm install --frozen-lockfile --ignore-scripts"
+    } else {
+        return;
+    };
+
+    eprintln!(
+        "[tender] PR lockfile differs from local checkout — running `{}` in `{}`...",
+        install_cmd,
+        workdir.display()
+    );
+    let merged_path = build_workdir_path(workdir);
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", install_cmd]);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", install_cmd]);
+        c
+    };
+    cmd.current_dir(workdir)
+        .env("CI", "1")
+        .env("PATH", merged_path)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN");
+    let _ = run_command_with_timeout(cmd, Duration::from_secs(300), "worktree-js-deps");
+    #[cfg(unix)]
+    if workdir.join("node_modules").exists() {
+        exclude_linked_path_in_worktree(workdir, "node_modules");
+    }
 }
 
 fn run_local_check_gate(

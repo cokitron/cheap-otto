@@ -2187,10 +2187,11 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         if (TENDER_PR_FILTER === 'all') return meta.category !== 'inactive';
         return meta.category === TENDER_PR_FILTER;
       });
-      const displayList = filtered.length ? filtered : (TENDER_PR_FILTER === 'all' ? decorated : []);
+      const displayList = filtered;
+      const autoWatchedRepos = (STATE?.repos || []).filter(r => r.tender_enabled).map(r => r.full_name);
 
       document.getElementById('tender-pr-count-badge').textContent = displayList.length;
-      if ((!SELECTED_TENDER_PR_KEY || !allPrs.some(x => x.key === SELECTED_TENDER_PR_KEY)) && displayList.length) {
+      if ((!SELECTED_TENDER_PR_KEY || !displayList.some(x => x.p.key === SELECTED_TENDER_PR_KEY)) && displayList.length) {
         SELECTED_TENDER_PR_KEY = displayList[0].p.key;
       }
 
@@ -2204,16 +2205,23 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
           <div style="font-size:12.5px;margin-top:4px;line-height:1.35;">${esc(p.title)}</div>
           <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">${esc(meta.sub)}</div>
         </div>
-      `).join('') || `<div style="color:var(--muted);padding:10px 0;font-size:13px;">No pulls in this view yet. Click <b>Pick Open PR</b> or paste a PR URL above to start watching.</div>`;
+      `).join('') || `<div style="color:var(--muted);padding:10px 0;font-size:13px;">${autoWatchedRepos.length ? `Watching <b>${esc(autoWatchedRepos.join(', '))}</b> — 0 open PRs right now.` : `No active pulls in this filter.`} ${counts.inactive > 0 ? `<div style="margin-top:6px;"><button class="secondary" style="padding:4px 9px;font-size:11.5px;" onclick="setTenderPrFilter('inactive')">View ${counts.inactive} Merged / Closed PR${counts.inactive === 1 ? '' : 's'}</button></div>` : ''}</div>`;
 
-      const selectedEntry = decorated.find(d => d.p.key === SELECTED_TENDER_PR_KEY);
+      const selectedEntry = displayList.find(d => d.p.key === SELECTED_TENDER_PR_KEY);
       const box = document.getElementById('tender-pr-detail-box');
       if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('tender-inline-reply') && box.dataset.prKey === SELECTED_TENDER_PR_KEY) {
         return;
       }
       box.dataset.prKey = SELECTED_TENDER_PR_KEY || '';
       if (!selectedEntry) {
-        box.innerHTML = `<div style="color:var(--muted);padding:16px 0;">Select a Pull Request on the left, or click <b>Pick Open PR</b> above to watch an open pull request.</div>`;
+        box.innerHTML = autoWatchedRepos.length ? `
+          <div class="status-banner watching" style="margin-top:0;">
+            <strong style="color:#6ee7b7;">👀 Watching ${esc(autoWatchedRepos.join(', '))} for Pull Requests</strong>
+            <div style="font-size:13px;color:var(--muted);margin-top:6px;line-height:1.5;">
+              Polled every 2 minutes on your headless M1 (0 AI tokens while idle). Currently <b>0 open pull requests</b> on GitHub — as soon as a new PR opens and receives review comments, Code Tender will automatically watch it, fix comments in your local repo context, run checks, and push.
+            </div>
+            ${counts.inactive > 0 ? `<div style="margin-top:10px;"><button class="secondary" onclick="setTenderPrFilter('inactive')">Inspect ${counts.inactive} Previously Merged / Closed PRs</button></div>` : ''}
+          </div>` : `<div style="color:var(--muted);padding:16px 0;">Select a Pull Request on the left, or click <b>Pick Open PR</b> above to watch an open pull request.</div>`;
         return;
       }
 
@@ -2264,7 +2272,13 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 
       // Single Clear Contextual Status / Action Banner
       let statusBannerHtml = '';
-      if (running) {
+      if (!isOpen) {
+        statusBannerHtml = `
+          <div class="status-banner">
+            <strong>✓ Pull Request Merged / Closed</strong>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:4px;">This pull request is closed on GitHub. Historical tended comments and replies are preserved below.</div>
+          </div>`;
+      } else if (running) {
         statusBannerHtml = `
           <div class="status-banner watching">
             <strong>⚡ Actively Tending This Pull Request</strong>
