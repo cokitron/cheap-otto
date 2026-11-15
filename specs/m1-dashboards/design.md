@@ -200,8 +200,13 @@ fi
 install_service() {
   id="$1"; label="$2"; port="$3"
   plist="$AGENTS_DIR/$label.plist"
-  tmp="$plist.tmp.$$"
-  cat > "$tmp"
+  tmp="$plist.tmp.$"
+  # This function is called as an `if` condition, and POSIX turns `set -e` off inside a condition,
+  # so every step that can fail is checked here and reported with a cause.
+  if ! cat > "$tmp"; then
+    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    FAILED=1; rm -f "$tmp"; return 1
+  fi
   # [R1.5] Unchanged and loaded: leave it alone.
   if [ -f "$plist" ] && cmp -s "$tmp" "$plist" && launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
     rm -f "$tmp"
@@ -244,8 +249,14 @@ install_service() {
       return 1
     fi
   fi
-  mv "$tmp" "$plist"
-  launchctl bootstrap "gui/$UID_NUM" "$plist"
+  if ! mv "$tmp" "$plist"; then
+    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    FAILED=1; rm -f "$tmp"; return 1
+  fi
+  if ! launchctl bootstrap "gui/$UID_NUM" "$plist"; then
+    echo "dashboard=$id listening=0 cause=bootstrap-failed log=$LOG_DIR/$id.log"
+    FAILED=1; return 1
+  fi
   echo "dashboard=$id action=installed"
 }
 
@@ -265,8 +276,10 @@ wait_port() {
 
 # --- mission-control ---
 if [ -x "$HOME/.cargo/bin/cheap-otto" ]; then
-  # install_service returns non-zero only when the port could not be freed. Calling it in an `if`
-  # keeps `set -e` from aborting the other services, and skips wait_port for a service that did not start.
+  # install_service returns non-zero when the service could not be installed: port held, plist not
+  # written, or bootstrap failed. Calling it in an `if` lets the other services proceed and skips
+  # wait_port for a service that did not start. It also disables `set -e` inside the function, which
+  # is why install_service checks each step itself.
   if install_service mission-control com.cheapotto.dashboards.mission-control 7420 <<PLIST
 …template from 3.2…
 PLIST
@@ -304,7 +317,7 @@ if [ "$FAILED" -ne 0 ]; then exit 4; fi
     node -e 'const fs=require("fs"),p=process.env.HOME+"/.pixel-agents/config.json";let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};c.standalone=Object.assign({},c.standalone,{watchAllSessions:true});c.hooksConsent=Object.assign({},c.hooksConsent,{claude:"granted"});fs.writeFileSync(p,JSON.stringify(c,null,2));'
   fi"#;
   ```
-- Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when a managed service never listens or its port cannot be freed (other services are still attempted), non-zero from `set -e` if `launchctl bootstrap` fails. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].
+- Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when a managed service could not be installed or never listens (port held, plist not written, bootstrap failed, or not listening after 10 s); the other services are still attempted. Nothing in `install_service` relies on `set -e`, because it is off inside an `if` condition. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].
 
 **Transports** [R4.4]:
 
@@ -515,6 +528,7 @@ All changes remain synchronous and avoid adding async runtimes, HTTP clients, or
 | `pixel-agents` not installed | Pixel Office skipped with a reason; other services installed. [R1.6] |
 | Service never listens | Install script prints `listening=0`, still attempts the other services, and exits 4; `ui` stops before the tunnel and browser and points at `~/.cheap-otto/logs/dashboards/<id>.log`. [R1.10, R3.10] |
 | Port still held after `kill -9` | Install script prints `dashboard=<id> listening=0 cause=port-held pid=<pid> last_exit=<…> log=<path>`, skips that service without bootstrapping or probing its port, and exits 4. [R1.9, R1.10] |
+| LaunchAgent cannot be written or bootstrapped | Install script prints `dashboard=<id> listening=0 cause=plist-write-failed` or `cause=bootstrap-failed` with the log path, does not print `action=installed`, continues with the other services, and exits 4. [R1.10] |
 | Workstation port held by a foreign process | Error naming the ports and the command to find the holder; nothing is killed. [R3.5] |
 | Tunnel exits early or times out | Error with the SSH test command (a timeout also names the ports that did not answer); a live child is terminated; `tunnel.json` removed; no browser. [R3.6] |
 | Mac unreachable | `execute_command_spec` returns the SSH failure; nothing else runs. |
