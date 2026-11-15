@@ -275,13 +275,14 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T3.1 `GET /api/dashboards`
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #19
 - **Covers:** R6.1
 - **Depends on:** T0.1, T1.1
 - **Files:** `src/server.rs`
 - **Steps:**
-  1. Add the route to `build_router` and a handler that returns the JSON in design 3.9. The `serve` startup in `src/server.rs` calls `DashboardSet::with_ports(config.port, config.pixel_port, REVIEWER_PORT)` before binding and returns its error, so an invalid port configuration never starts a server. Keep the resulting set in the app state; the handler returns HTTP 500 with `{"error":"<message>"}` on `Err` and never falls back to `standard()`.
+  1. Add the route to `build_router` and a handler that returns the JSON in design 3.9. The `serve` startup in `src/server.rs` calls `DashboardSet::with_ports(config.port, config.pixel_port, REVIEWER_PORT)` once the listener has resolved `--port 0`, and returns its error before it creates any directory or serves a request, so an invalid port configuration never starts a server. Keep the resulting set in the app state; the handler returns HTTP 500 with `{"error":"<message>"}` on `Err` and never falls back to `standard()`.
   2. Probe each port with `tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(("127.0.0.1", port)))`.
   3. `current` is true for Mission Control.
   4. Add the route to the module's `//!` header list.
@@ -294,7 +295,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T3.2 Links between dashboards in Mission Control
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #20
 - **Covers:** R6.2, R6.4
 - **Depends on:** T3.1
@@ -395,7 +397,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.6 Shared ports, and a link back to Mission Control
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #26
 - **Covers:** R2.5, R6.3
 - **Depends on:** T0.1, T1.1
