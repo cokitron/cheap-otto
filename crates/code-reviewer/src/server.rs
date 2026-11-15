@@ -105,6 +105,29 @@ pub fn run_ui_server(
 /// How long `code-reviewer ui` waits for its fallback tunnel to answer before giving up.
 const FALLBACK_TUNNEL_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Rejects an `--host` value that `ssh` could read as an option or that carries shell syntax.
+///
+/// The host is handed to `ssh` as an argument, where a leading `-` (`-oProxyCommand=...`) would run
+/// a local command. Only ssh aliases, `user@host` names and IP addresses need to pass, so the
+/// allowlist is ASCII alphanumerics plus `.`, `_`, `-` and `@`.
+fn validate_ssh_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("ssh host must not be empty".to_string());
+    }
+    if host.starts_with('-') {
+        return Err(format!("ssh host `{host}` must not start with `-`"));
+    }
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
+    {
+        return Err(format!(
+            "ssh host `{host}` may contain only ASCII letters, digits, `.`, `_`, `-` and `@`"
+        ));
+    }
+    Ok(())
+}
+
 /// Starts or reuses an SSH local port-forward (`127.0.0.1:<port> -> <host>:127.0.0.1:<port>`)
 /// and opens the Internal CI Dashboard in the user's default browser.
 ///
@@ -117,6 +140,7 @@ pub fn open_tunneled_ui(
     port: u16,
     no_open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_ssh_host(host)?;
     let local_addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
     let url = format!("http://{}", local_addr);
 
@@ -168,6 +192,8 @@ fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
     .map(String::from)
     .collect();
     args.push(format!("127.0.0.1:{port}:127.0.0.1:{port}"));
+    // `--` ends option parsing so the host can never be read as an ssh flag.
+    args.push("--".to_string());
     args.push(host.to_string());
     args
 }
@@ -1877,6 +1903,10 @@ mod tests {
         }
         assert_eq!(args.first().map(String::as_str), Some("-N"));
         assert_eq!(args.last().map(String::as_str), Some("otto-mac"));
+        assert_eq!(
+            args.get(args.len().saturating_sub(2)).map(String::as_str),
+            Some("--")
+        );
 
         let custom = reviewer_fallback_tunnel_args("otto-mac", 8430);
         assert!(custom.contains(&"127.0.0.1:8430:127.0.0.1:8430".to_string()));
@@ -1891,6 +1921,45 @@ mod tests {
             .collect();
         assert!(removed.contains(&"GH_TOKEN".to_string()));
         assert!(removed.contains(&"GITHUB_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn ssh_host_validation_accepts_aliases_and_addresses() {
+        for host in [
+            "otto-mac",
+            "user@otto-mac",
+            "otto-mac.example.test",
+            "192.0.2.10",
+        ] {
+            assert_eq!(validate_ssh_host(host), Ok(()), "{host} should pass");
+        }
+    }
+
+    #[test]
+    fn ssh_host_validation_rejects_option_and_shell_injection() {
+        for host in [
+            "-oProxyCommand=touch /tmp/x",
+            "-F/tmp/cfg",
+            "",
+            "a;b",
+            "a$(id)",
+            "a'b",
+            "a b",
+        ] {
+            assert!(validate_ssh_host(host).is_err(), "{host:?} should fail");
+        }
+    }
+
+    #[test]
+    fn open_tunneled_ui_rejects_an_option_looking_host_before_any_ssh() {
+        let result = open_tunneled_ui(
+            Path::new("."),
+            "-oProxyCommand=touch /tmp/x",
+            "~/otto-workspaces/cheap-otto",
+            7430,
+            true,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
