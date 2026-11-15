@@ -1,6 +1,6 @@
 # m1-dashboards: every dashboard served from the Mac, one tunnel
 
-**Status:** planned. No implementation task has started except the prerequisite (T0.1).
+**Status:** planned. The prerequisite (T0.1, the origin guard) is implemented in #31 and merged into PR #4's branch, but it is not on `main` yet. No other task has started.
 
 **Tracking issue:** #6 (tasks are #7 to #30, label `m1-dashboards`, milestone "M1 dashboards").
 
@@ -63,8 +63,8 @@ Tasks on different branches of this tree can be done in parallel by different ag
 ## Coordination with other open work
 
 - **Governance (#2, merged)** moved the Mac checkout default to `~/otto-workspaces/cheap-otto`, made `m1 sync` install both binaries, and edited `crates/code-reviewer/src/m1.rs`, `crates/code-reviewer/scripts/m1-provision.sh`, `crates/code-reviewer/src/server.rs` and `src/main.rs`. Line references in `design.md` section 1 may have moved; search by function name. T4.1 shrank to making that deploy step testable.
-- **The origin guard (T0.1, #31, merged into the rules branch)** edits both `server.rs` files and adds `request_guard.rs` to each crate. T3.1, T4.3, T4.4 and T4.6 build on it: router tests must send a loopback `Host` header.
-- **Merging needs** the checks in rule 10: the three-OS Rust gate, the governance job, the Cubic review, and every review thread resolved.
+- **The origin guard (T0.1)** is implemented in #31, which is merged into `claude/project-rules` (PR #4), not into `main`. `tasks.md` keeps T0.1 unticked until #4 merges, and T3.1, T4.3, T4.4 and T4.6 wait for that. It edits both `server.rs` files and adds a `request_guard.rs` to each crate. For tests that follow: Mission Control accepts a loopback `Host` header, or the HTTP/2 or absolute-form request authority when `Host` is absent; the reviewer's parser reads only the `Host` header, so its tests must always send one.
+- **Merging needs** what rule 10 lists: the three-OS Rust gate, the governance job, the Cubic review, every review thread resolved, and the branch up to date with `main`.
 
 ## Decisions waiting on the owner
 
@@ -79,4 +79,4 @@ All four have defaults, so no task is blocked. See `design.md` section 9.
 
 Add one line per merged PR, newest first.
 
-- _nothing merged yet_
+- _nothing merged into `main` yet_ (T0.1 is waiting in #4)

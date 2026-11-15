@@ -26,12 +26,12 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 - **Issue:** #7
 - **Covers:** R7.1
 - **Depends on:** nothing
-- **Status:** implemented in PR #31 (stacked on #4), waiting for review and merge.
+- **Status:** implemented in #31, which is merged into `claude/project-rules` (PR #4). It is **not on `main` yet**: this task is done when #4 merges, and until then the box stays unticked and the tasks that depend on T0.1 wait.
 - **Goal:** `cheap-otto serve` and `code-reviewer serve` reject state-changing requests from a foreign `Origin` and any request with a non-loopback `Host`; `CorsLayer::permissive()` is gone.
 - **Acceptance:**
-  - The PR titled `fix(security): reject cross-origin requests to local control servers` is merged.
+  - #4, which carries #31, is merged into `main`.
   - `grep -n "CorsLayer::permissive" src/server.rs` prints nothing.
-- **Why it comes first:** T3.1, T4.3, T4.4 and T4.6 edit the same two `server.rs` files. Start them after this merges.
+- **Why it comes first:** T3.1, T4.3, T4.4 and T4.6 edit the same two `server.rs` files. Start them after #4 is on `main`.
 
 ## Phase 1: core planners (root crate, pure code)
 
@@ -112,7 +112,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
     - `install_script_skips_pixel_office_when_binary_missing`: contains `reason=pixel-agents-not-installed`.
     - `install_script_frees_ports_by_listener_not_by_name`: contains `lsof -nP -iTCP:` and no `pkill`.
     - `install_script_never_binds_non_loopback`: no `0.0.0.0`.
-    - `install_script_waits_for_port_release_before_bootstrap`: contains `kill -9` and `error=port-held`, and the `lsof` wait loop appears before `launchctl bootstrap`.
+    - `install_script_waits_for_port_release_before_bootstrap`: contains `kill -9` and `cause=port-held`, and the `lsof` wait loop appears before `launchctl bootstrap`.
+    - `install_script_reports_port_held_with_diagnostics_and_skips_wait`: the port-held line contains `listening=0`, `cause=port-held`, `last_exit=` and `log=$LOG_DIR/`; that branch ends in `return 1`; and each `install_service` call is the condition of an `if` whose body is the `wait_port` call.
     - `install_script_exits_four_when_a_service_never_listens`: contains `FAILED=1` and `exit 4`.
     - `install_script_reports_cause_log_and_last_exit_when_a_service_never_listens`: the failure line contains `listening=0`, `cause=not-listening-after-10s`, `last_exit=` and `log=$LOG_DIR/`, and both `wait_port` calls pass the service label.
     - `install_script_escapes_xml_values_for_plists`: contains `sed -e 's/&/\&amp;/g'`.
@@ -167,11 +168,12 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`
 - **Steps:**
-  1. Add `build_tunnel_spec`, `TunnelRecord` (with `ssh_port`), `TunnelDecision`, `recorded_tunnel_covers(record: Option<&TunnelRecord>, ssh_alive: bool, set: &DashboardSet, peer: &PeerNode) -> bool`, `decide_tunnel(local_ports, recorded_tunnel_covers)`, `TunnelFailure` and `describe_tunnel_failure` as in design 3.5.
+  1. Add `build_tunnel_spec`, `TunnelRecord` (with `ssh_port`), `TunnelDecision`, `recorded_tunnel_covers(record: Option<&TunnelRecord>, ssh_alive: bool, set: &DashboardSet, peer: &PeerNode) -> bool`, `decide_tunnel(local_ports, recorded_tunnel_covers)`, `TunnelFailure`, `describe_tunnel_failure` and `command_line_is_recorded_tunnel` as in design 3.5.
   2. Argument order: `-N`, the five `-o` options (the four below plus `-o ConnectTimeout=10`), `-p <ssh_port>`, one `-L 127.0.0.1:P:127.0.0.1:P` per port in set order, then `user@host` last.
   3. `decide_tunnel`: all true and `recorded_tunnel_covers` → `AlreadyUp`; all true without a covering record → `Conflict` with every port in `held` and an empty `missing`; all false or an empty slice → `Start`; otherwise `Conflict` with `held` (true) and `missing` (false) in input order.
   4. `recorded_tunnel_covers`: true only when the record exists, `ssh_alive` is true, the record's `destination` equals `peer.ssh_destination()`, its `ssh_port` equals `peer.ssh_port`, and its ports include every port in the set.
   5. `describe_tunnel_failure`: one message for both failure kinds. It always lists the unanswered ports and ends with the SSH test command.
+  6. `command_line_is_recorded_tunnel`: true only when the command line contains `ssh`, the record's `destination`, and `127.0.0.1:<port>:127.0.0.1:<port>` for every recorded port.
 - **Tests:**
   - `tunnel_spec_forwards_every_port_on_loopback_with_safe_options`: three `-L` args, each starting and continuing with `127.0.0.1:`; contains `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `BatchMode=yes`, `ConnectTimeout=10`; the last arg is `user@host`.
   - `decides_already_up_start_and_conflict`
@@ -179,6 +181,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   - `recorded_tunnel_must_be_alive_ssh_and_cover_every_port`: no record, a dead or non-ssh pid, and a record missing one port are all false; a live ssh record covering all ports is true.
   - `recorded_tunnel_for_another_peer_or_ssh_port_does_not_cover`: a live ssh record that covers every port but has another `destination`, or the same destination with another `ssh_port`, is false.
   - `tunnel_failure_message_names_unanswered_ports_for_exit_and_timeout`: for both `ExitedEarly` and `TimedOut`, the message contains every unanswered port and the SSH test command.
+  - `command_line_must_match_recorded_destination_and_forwards`: the recorded tunnel's own command line is true; an unrelated `ssh user@other-host`, the right host with one forward missing, an empty string and a non-ssh process are all false.
   - `tunnel_record_round_trips_as_json`
 - **Acceptance:** `cargo test -p cheap-otto --lib dashboards::tests` passes.
 
@@ -235,9 +238,9 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
   1. Add `load_tunnel_record(state_dir) -> Option<TunnelRecord>`, `save_tunnel_record`, `remove_tunnel_record` for `<state_dir>/tunnel.json` (pretty JSON, like the other registries).
-  2. Add `is_ssh_process_alive(pid: u32) -> bool` and `terminate_process(pid: u32)` using the commands in the table in design 3.5, spawned with discrete args.
+  2. Add `process_command_line(pid: u32) -> Option<String>`, `recorded_tunnel_is_running(record: &TunnelRecord) -> bool` (the command line passed to `command_line_is_recorded_tunnel`) and `terminate_process(pid: u32)`, using the commands in the table in design 3.5, spawned with discrete args. Never terminate a recorded pid that `recorded_tunnel_is_running` rejects: remove the stale `tunnel.json` instead.
   3. Add `ensure_dashboard_tunnel(state_dir, peer, set)` implementing the four steps in design 3.5. It computes `recorded_tunnel_covers` from `tunnel.json` and `is_ssh_process_alive`; when every port answers but no live ssh record covers them, it starts nothing and returns an error naming the ports and the holder-finding command (R3.2). A live recorded tunnel to a different destination or SSH port is stopped and replaced (R3.5). When the child exits early or the poll times out (terminate the child first in that case), remove `tunnel.json` and return the message from `describe_tunnel_failure`, which names the unanswered ports in both cases (R3.6). `save_tunnel_record` stores `peer.ssh_destination()` and `peer.ssh_port`.
-  4. Add `DashboardCommands::Tunnel { stop: bool, execute: bool, … }`. Without `--execute`: print the ssh command and the recorded tunnel if any (read from `tunnel.json`); do not probe ports. With `--execute`: call `ensure_dashboard_tunnel`. With `--stop --execute`: terminate the recorded pid if it is a live ssh process and remove `tunnel.json`; if there is no record, print `No recorded tunnel.` and exit 0.
+  4. Add `DashboardCommands::Tunnel { stop: bool, execute: bool, … }`. Without `--execute`: print the ssh command and the recorded tunnel if any (read from `tunnel.json`); do not probe ports. With `--execute`: call `ensure_dashboard_tunnel`. With `--stop --execute`: terminate the recorded pid only if `recorded_tunnel_is_running` accepts it, and remove `tunnel.json` either way; if there is no record, print `No recorded tunnel.` and exit 0.
 - **Tests** in `tests/cli_integration.rs` (dry runs open no socket):
   - `dashboards_tunnel_dry_run_prints_one_ssh_command_with_three_forwards`: stdout has exactly three occurrences of `-L 127.0.0.1:`; no `tunnel.json` is written.
   - `dashboards_tunnel_stop_without_record_is_a_no_op`: `tunnel --stop --execute` exits 0 and prints `No recorded tunnel.`
@@ -315,7 +318,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
   2. Do not add install lines: since #2 the script already runs `cargo install --path . --locked --force` and then `cargo install --path crates/code-reviewer --locked --force`. This task only makes that testable.
   3. Update the doc comment on `sync_everything_to_m1`: step 2 of its list still says only `~/.cargo/bin/code-reviewer` is installed.
 - **Tests** in `crates/code-reviewer/src/m1.rs`:
-  - `remote_build_script_installs_both_binaries_before_provisioning`: the script contains `cargo install --path . --locked --force` and `cargo install --path crates/code-reviewer --locked --force`, and both appear before `m1-provision.sh`.
+  - `remote_build_script_installs_both_binaries_before_provisioning`: the script contains `cargo install --path . --locked --force` and `cargo install --path crates/code-reviewer --locked --force`, **in that order** (root crate first), and both appear before `m1-provision.sh`.
 - **Acceptance:** `cargo test -p code-reviewer m1::tests` passes. Do not run `m1 sync`.
 
 ### T4.2 Provisioning installs the dashboard services

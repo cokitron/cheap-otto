@@ -233,11 +233,15 @@ install_service() {
     done
     held=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
     if [ -n "$held" ]; then
-      # [R1.9] Return 0 so `set -e` does not abort the other services.
-      echo "dashboard=$id error=port-held pid=$held"
+      # [R1.9, R1.10] The port cannot be freed. Say why, where the log is and what launchd last saw,
+      # and return non-zero so the caller skips wait_port: the foreign listener would answer the
+      # port probe and this service would be reported as listening.
+      held=$(printf '%s' "$held" | tr '\n' ',')
+      last_exit=$(launchctl print "gui/$UID_NUM/$label" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+      echo "dashboard=$id listening=0 cause=port-held pid=$held last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
       FAILED=1
       rm -f "$tmp"
-      return 0
+      return 1
     fi
   fi
   mv "$tmp" "$plist"
@@ -261,10 +265,14 @@ wait_port() {
 
 # --- mission-control ---
 if [ -x "$HOME/.cargo/bin/cheap-otto" ]; then
-  install_service mission-control com.cheapotto.dashboards.mission-control 7420 <<PLIST
+  # install_service returns non-zero only when the port could not be freed. Calling it in an `if`
+  # keeps `set -e` from aborting the other services, and skips wait_port for a service that did not start.
+  if install_service mission-control com.cheapotto.dashboards.mission-control 7420 <<PLIST
 …template from 3.2…
 PLIST
-  wait_port mission-control com.cheapotto.dashboards.mission-control 7420
+  then
+    wait_port mission-control com.cheapotto.dashboards.mission-control 7420
+  fi
 else
   echo "dashboard=mission-control action=skipped reason=cheap-otto-not-installed"
 fi
@@ -274,10 +282,12 @@ PIXEL_BIN=$(command -v pixel-agents 2>/dev/null || true)
 if [ -n "$PIXEL_BIN" ]; then
   PIXEL_BIN_XML=$(xml_escape "$PIXEL_BIN")
   …pixel-agents config snippet, see below…
-  install_service pixel-office com.cheapotto.dashboards.pixel-office 7421 <<PLIST
+  if install_service pixel-office com.cheapotto.dashboards.pixel-office 7421 <<PLIST
 …template…
 PLIST
-  wait_port pixel-office com.cheapotto.dashboards.pixel-office 7421
+  then
+    wait_port pixel-office com.cheapotto.dashboards.pixel-office 7421
+  fi
 else
   echo "dashboard=pixel-office action=skipped reason=pixel-agents-not-installed"
 fi
@@ -373,6 +383,10 @@ pub fn decide_tunnel(local_ports: &[(u16, bool)], recorded_tunnel_covers: bool) 
 pub enum TunnelFailure { ExitedEarly { status: String }, TimedOut { waited_secs: u64 } }
 /// Always names the ports that did not answer and the command that tests SSH by hand.
 pub fn describe_tunnel_failure(failure: &TunnelFailure, unanswered: &[u16], ssh_test_command: &str) -> String
+
+/// True only when `command_line` is an ssh invocation that names the record's destination and carries
+/// `127.0.0.1:<port>:127.0.0.1:<port>` for every recorded port. Guards against a recycled pid.
+pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord) -> bool
 ```
 
 - The tunnel forwards every port in the set, whether or not that service is installed on the Mac. An SSH forward listens locally even when nothing answers remotely, so every port answering locally is evidence that a tunnel is up only when the recorded tunnel is a live ssh process that covers the ports. Three unrelated listeners must not be mistaken for the tunnel: with all ports answering and no such record, `decide_tunnel` returns `Conflict { held: <every port>, missing: [] }`. [R3.1, R3.2]
@@ -384,17 +398,19 @@ The imperative part lives in `src/main.rs` as `ensure_dashboard_tunnel(state_dir
 
 1. Probe each port with `is_local_port_open`, load `tunnel.json`, compute `recorded_tunnel_covers`, and call `decide_tunnel`.
 2. `AlreadyUp`: print it and return.
-3. `Conflict`: load `tunnel.json`. If its pid is alive **and is an ssh process**, terminate it, wait up to 2 s for the ports to close, and continue to step 4. Otherwise start nothing and return an error naming `held` (every port, when all of them answer without a recorded tunnel) and printing how to find the holder: `netstat -ano | findstr :<port>` on Windows, `lsof -nP -iTCP:<port> -sTCP:LISTEN` elsewhere. [R3.5]
+3. `Conflict`: load `tunnel.json`. If `recorded_tunnel_is_running(record)` is true (the pid is alive **and its command line is the recorded tunnel's**, see below), terminate it, wait up to 2 s for the ports to close, and continue to step 4. Otherwise start nothing and return an error naming `held` (every port, when all of them answer without a recorded tunnel) and printing how to find the holder: `netstat -ano | findstr :<port>` on Windows, `lsof -nP -iTCP:<port> -sTCP:LISTEN` elsewhere. [R3.5]
 4. `Start`: spawn the `CommandSpec` with null stdio, write `tunnel.json` with `child.id()`, then poll for up to 5 s. If every port answers, succeed. Both failure paths delete `tunnel.json` and return the message from `describe_tunnel_failure`, which names the ports that did not answer and the SSH test command (`ssh -p <port> <user@host> true`): if `child.try_wait()` reports an exit, that is `TunnelFailure::ExitedEarly`; if the deadline passes with the child still alive, call `terminate_process(child.id())` first, then report `TunnelFailure::TimedOut`. [R3.6]
 
 Process helpers, also in `src/main.rs` (the reviewer's `state.rs` has the same idea around line 430):
 
 | Helper | Windows | Elsewhere |
 | --- | --- | --- |
-| `is_ssh_process_alive(pid) -> bool` | `tasklist /FI "PID eq <pid>" /NH` output contains `ssh` | `ps -p <pid> -o comm=` output contains `ssh` |
+| `process_command_line(pid) -> Option<String>` | `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=<pid>').CommandLine"` | `ps -p <pid> -o args=` |
 | `terminate_process(pid)` | `taskkill /PID <pid> /F` | `kill <pid>` |
 
-Checking the image name guards against a recycled pid.
+`recorded_tunnel_is_running(record) -> bool` is `process_command_line(record.pid)` passed to the pure `command_line_is_recorded_tunnel`. That is the `ssh_alive` input of `recorded_tunnel_covers`. `<pid>` is a `u32`, so nothing operator-supplied reaches these commands.
+
+An image name is not enough: after a reboot the recorded pid can belong to an unrelated ssh session, and killing it would drop someone's shell. The command line must carry the recorded destination and every recorded forward. A record that cannot be verified (process gone, command line unreadable or different) is stale: remove `tunnel.json` and signal nothing. If ports are still held after that, it is the foreign-holder error in step 3. [R3.5]
 
 ### 3.6 CLI
 
