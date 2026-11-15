@@ -114,6 +114,26 @@ pub struct TenderRepoPollOutcome {
 /// Upper bound on Stage-1 pages (100 PRs each) so a pathological repo cannot stall a poll.
 const TENDER_STAGE1_MAX_PAGES: usize = 10;
 
+/// Stage-1 paged open-PR header query. Ordered by `CREATED_AT` because the `after` cursor needs a
+/// sort key that does not change on update; `UPDATED_AT` lets a PR updated mid-scan jump ahead of
+/// the cursor and get skipped while `open_list_complete` still reports `true`.
+const TENDER_STAGE1_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    openPrs: pullRequests(states: [OPEN], first: 100, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        isDraft
+        isCrossRepository
+        author { login }
+      }
+    }
+  }
+}
+"#;
+
 /// Filters Stage-1 open PR headers at poll time so Code Tender NEVER fetches review threads,
 /// comments, or dispatches runs for external contributors' PRs or cross-repository forks.
 ///
@@ -468,28 +488,12 @@ query($owner: String!, $name: String!) {
         let (owner, name) = validate_repo_slug(&repo_cfg.full_name)
             .map_err(|_| GitHubError::InvalidRepo(repo_cfg.full_name.clone()))?;
 
-        let stage1_query = r#"
-query($owner: String!, $name: String!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    openPrs: pullRequests(states: [OPEN], first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        number
-        title
-        isDraft
-        isCrossRepository
-        author { login }
-      }
-    }
-  }
-}
-"#;
         let mut headers: Vec<TenderOpenPrHeader> = Vec::new();
         let mut after: Option<String> = None;
         let mut open_list_complete = false;
         for _ in 0..TENDER_STAGE1_MAX_PAGES {
             let stage1_payload = serde_json::json!({
-                "query": stage1_query,
+                "query": TENDER_STAGE1_QUERY,
                 "variables": {
                     "owner": owner,
                     "name": name,
@@ -1160,6 +1164,12 @@ fn parse_single_tender_pr_node(pr: &Value) -> Option<TenderPrSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage1_query_pages_on_stable_created_at_order() {
+        assert!(TENDER_STAGE1_QUERY.contains("CREATED_AT"));
+        assert!(!TENDER_STAGE1_QUERY.contains("UPDATED_AT"));
+    }
 
     #[test]
     fn parses_graphql_tender_threads_and_detects_author_replies() {

@@ -946,7 +946,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_private_kb_file_locks_down_new_and_existing_overlays() -> std::io::Result<()> {
+    fn write_private_kb_file_tightens_existing_overlay_permissions() -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
         let root = std::env::temp_dir().join(format!("otto_private_kb_{}", std::process::id()));
@@ -963,6 +963,25 @@ mod tests {
         write_private_kb_file(&file, "more\n", true)?;
 
         assert_eq!(fs::read_to_string(&file)?, "new\nmore\n");
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_kb_file_creates_new_overlay_with_private_permissions() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("otto_private_kb_new_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("tender").join("agent");
+        let file = dir.join("notes.md");
+
+        write_private_kb_file(&file, "fresh\n", false)?;
+
+        assert_eq!(fs::read_to_string(&file)?, "fresh\n");
         assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
         assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
         let _ = fs::remove_dir_all(&root);

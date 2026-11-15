@@ -1200,11 +1200,18 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                 existing.base_ref = snap.base_ref.clone();
                 existing.head_sha = Some(snap.head_sha.clone());
                 // Open-but-ineligible PRs (draft, fork, disallowed author) must not keep a
-                // staged patch that could still be approved or pushed.
+                // staged patch that could still be approved or pushed. An explicitly watched PR
+                // stays eligible when no per-repo allowlist is set, mirroring
+                // `partition_tender_open_pr_headers` (blank/"unknown" authors never qualify).
+                let author = snap.author.trim();
+                let watched_override = existing.watched
+                    && repo_cfg.tender_allowed_authors.is_empty()
+                    && !author.is_empty()
+                    && !author.eq_ignore_ascii_case("unknown");
                 let eligible = repo_cfg.tender_enabled
                     && !snap.is_draft
                     && !snap.is_fork
-                    && cfg.is_tender_author_allowed(repo_cfg, &snap.author);
+                    && (cfg.is_tender_author_allowed(repo_cfg, &snap.author) || watched_override);
                 if eligible {
                     existing.open_feedback_count = actionable_count;
                 } else {
@@ -3419,9 +3426,8 @@ fn install_worktree_js_deps_if_lockfile_diverged(local_checkout: Option<&Path>, 
     };
     cmd.current_dir(workdir)
         .env("CI", "1")
-        .env("PATH", merged_path)
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN");
+        .env("PATH", merged_path);
+    crate::brains::strip_github_credentials(&mut cmd);
     let _ = run_command_with_timeout(cmd, Duration::from_secs(300), "worktree-js-deps");
     #[cfg(unix)]
     if workdir.join("node_modules").exists() {
@@ -3662,9 +3668,8 @@ fn run_local_check_gate(
         .env("PATH", merged_path)
         .env("CI", "1")
         .env("VITEST_MAX_WORKERS", "2")
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
     if let Some(target_dir) = cargo_target_dir {
         cmd.env("CARGO_TARGET_DIR", target_dir);
     }
@@ -3755,9 +3760,8 @@ fn invoke_tender_cli(
     // Security invariant: strip GitHub auth tokens from child LLM agent processes so prompt injection can never read them.
     cmd.current_dir(workdir)
         .env("PATH", build_workdir_path(workdir))
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
 
     let output = run_command_with_timeout(
         cmd,
@@ -4472,6 +4476,123 @@ gdocs_bin = "gdocs"
         assert!(tpr.staged_commit_message.is_none());
         assert!(tpr.pending_items.is_empty());
         assert_eq!(tpr.open_feedback_count, 0);
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn sync_watched_override_keeps_staged_state_only_without_allowlist() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_watched_override_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = |allowed: &[&str]| WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: allowed.iter().map(ToString::to_string).collect(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
+        };
+        let snap = |is_draft: bool, is_fork: bool| TenderPrSnapshot {
+            pr_number: 30,
+            title: "External change".to_string(),
+            author: "outside-dev".to_string(),
+            is_draft,
+            is_fork,
+            base_ref: "main".to_string(),
+            head_ref: "feat/external".to_string(),
+            head_sha: "ccc3333".to_string(),
+            feedback_items: Vec::new(),
+        };
+        // Seeds an explicitly watched PR (as `tender watch` would) carrying staged state.
+        let seed_watched_staged = || {
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                let mut tpr = TenderPrState::new(
+                    "acme/web",
+                    30,
+                    "External change",
+                    "outside-dev",
+                    "main",
+                    "feat/external",
+                );
+                tpr.watched = true;
+                tpr.is_open = true;
+                tpr.staged_patch = Some("diff --git a/x b/x".to_string());
+                tpr.staged_commit_message = Some("fix: x".to_string());
+                tpr.open_feedback_count = 1;
+                store
+                    .tender_pull_requests
+                    .insert("acme/web#30".to_string(), tpr);
+            })
+            .unwrap();
+        };
+        let staged_patch_kept = || {
+            LedgerStore::load_or_default(&state_dir)
+                .unwrap()
+                .tender_pull_requests["acme/web#30"]
+                .staged_patch
+                .is_some()
+        };
+
+        // Watched, no allowlist: the override keeps the staged patch.
+        seed_watched_staged();
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg(&[]), &state_dir, &[snap(false, false)])
+            .unwrap();
+        assert!(staged_patch_kept());
+
+        // Watched, but an allowlist excludes the author: the override is rejected.
+        seed_watched_staged();
+        sync_watched_prs_from_snapshots(
+            &cfg,
+            &repo_cfg(&["alice-dev"]),
+            &state_dir,
+            &[snap(false, false)],
+        )
+        .unwrap();
+        assert!(!staged_patch_kept());
+
+        // Watched drafts and forks are cleared even without an allowlist.
+        for (is_draft, is_fork) in [(true, false), (false, true)] {
+            seed_watched_staged();
+            sync_watched_prs_from_snapshots(
+                &cfg,
+                &repo_cfg(&[]),
+                &state_dir,
+                &[snap(is_draft, is_fork)],
+            )
+            .unwrap();
+            assert!(!staged_patch_kept());
+        }
 
         let _ = fs::remove_dir_all(&state_dir);
     }

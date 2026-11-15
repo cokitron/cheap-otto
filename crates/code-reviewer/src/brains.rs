@@ -821,7 +821,7 @@ fn kb_line_body(line: &str) -> String {
 }
 
 /// Removes inherited GitHub credentials so LLM CLIs (and their tools) never hold repo-scoped tokens.
-fn strip_github_credentials(cmd: &mut Command) {
+pub(crate) fn strip_github_credentials(cmd: &mut Command) {
     cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
 }
 

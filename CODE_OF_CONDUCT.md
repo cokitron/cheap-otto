@@ -27,7 +27,7 @@ Examples of unacceptable behavior include:
 
 Project maintainers are responsible for clarifying and enforcing our standards of acceptable behavior and will take appropriate and fair corrective action in response to any behavior that they deem inappropriate, threatening, offensive, or harmful.
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately to the repository maintainer (`@cokitron`) via GitHub's private reporting channel (for example, a private security advisory at https://github.com/cokitron/cheap-otto/security/advisories/new). All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately to the repository maintainer (`@cokitron`) using the contact method listed on their GitHub profile. Please do not use the repository's security advisory form for conduct reports; it is reserved for vulnerabilities (see `SECURITY.md`). All complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution
 
