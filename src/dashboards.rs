@@ -791,9 +791,22 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
             )
         })
         .collect();
-    let remote = format!("/bin/sh -c {}", posix_single_quote(&script));
-    let spec = CommandSpec::new(
-        "Install dashboard services on MacBook",
+    let spec = remote_sh_spec("Install dashboard services on MacBook", peer, &script);
+    DashboardPlan {
+        set: set.clone(),
+        script,
+        display_steps,
+        spec,
+    }
+}
+
+/// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> /bin/sh -c '<script>'`.
+///
+/// The Mac's login shell is zsh, so the script runs under `/bin/sh` and travels as one
+/// [`posix_single_quote`]d argument; the local process gets discrete args.
+fn remote_sh_spec(description: &str, peer: &PeerNode, script: &str) -> CommandSpec {
+    CommandSpec::new(
+        description,
         "ssh",
         [
             "-o".to_string(),
@@ -803,15 +816,68 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
             "-p".to_string(),
             peer.ssh_port.to_string(),
             peer.ssh_destination(),
-            remote,
+            format!("/bin/sh -c {}", posix_single_quote(script)),
         ],
-    );
+    )
+}
+
+/// Renders the POSIX `sh` script that unloads and deletes every LaunchAgent cheap-otto manages
+/// and prints `dashboard=<id> action=removed` for each. [R8.2]
+///
+/// Only [`DashboardSet::managed`] services are touched, so the Reviewer's provisioner-owned
+/// LaunchAgent survives. Unloading something that is not loaded is not an error, so the script
+/// can run any number of times. Labels come from the registry, so nothing here needs quoting.
+#[must_use = "the uninstall script should be run on the Mac or printed"]
+pub fn render_uninstall_script(set: &DashboardSet) -> String {
+    let mut script =
+        String::from("set -eu\nUID_NUM=$(id -u)\nAGENTS_DIR=\"$HOME/Library/LaunchAgents\"\n");
+    for service in set.managed() {
+        let (id, label) = (service.id.slug(), &service.launchd_label);
+        script.push_str(&format!(
+            "launchctl bootout \"gui/$UID_NUM/{label}\" 2>/dev/null || true\n\
+             rm -f \"$AGENTS_DIR/{label}.plist\"\n\
+             echo \"dashboard={id} action=removed\"\n"
+        ));
+    }
+    script
+}
+
+/// Builds the plan that removes the managed dashboard LaunchAgents over SSH. [R8.2]
+///
+/// `display_steps` has one `Unload and delete LaunchAgent <label>` line per managed service.
+#[must_use = "the uninstall plan should be printed or executed"]
+pub fn build_uninstall_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan {
+    let script = render_uninstall_script(set);
+    let display_steps = set
+        .managed()
+        .map(|service| format!("Unload and delete LaunchAgent {}", service.launchd_label))
+        .collect();
+    let spec = remote_sh_spec("Remove dashboard services from MacBook", peer, &script);
     DashboardPlan {
         set: set.clone(),
         script,
         display_steps,
         spec,
     }
+}
+
+/// Builds `launchctl kickstart -k "gui/$(id -u)/<label>"` over SSH, which restarts the service
+/// whether or not it is running. Works for all three dashboards, the Reviewer included.
+///
+/// Returns `None` only when `id` is not in `set`.
+#[must_use = "the restart command should be printed or executed"]
+pub fn build_restart_spec(
+    peer: &PeerNode,
+    set: &DashboardSet,
+    id: DashboardId,
+) -> Option<CommandSpec> {
+    let service = set.get(id)?;
+    let script = format!(
+        "launchctl kickstart -k \"gui/$(id -u)/{}\"",
+        service.launchd_label
+    );
+    let description = format!("Restart {} on MacBook", service.display_name);
+    Some(remote_sh_spec(&description, peer, &script))
 }
 
 // Status (design 3.4): a read-only probe run on the Mac, a tolerant parser for what it prints,
@@ -1029,7 +1095,8 @@ pub struct DashboardDiagnosis {
 }
 
 /// The dashboard's log on the Mac, as the operator would type it.
-fn dashboard_log_path(id: DashboardId) -> String {
+#[must_use = "returns the log path to show the operator"]
+pub fn dashboard_log_path(id: DashboardId) -> String {
     match id {
         DashboardId::MissionControl | DashboardId::PixelOffice => {
             format!("~/.cheap-otto/logs/dashboards/{}.log", id.slug())
@@ -2219,5 +2286,50 @@ host cheap_otto_bin=1 pixel_agents_bin=0 gui_session=1 autologin_user=-
         let rows = render_status_rows(&probe(""), &set, &[]);
         let missing = "Reviewer (7430): no status from the Mac, tunnelled=-; reason: the probe printed no line for it; log: ~/.cheap-otto/logs/code-reviewer/ui-server.log";
         assert_eq!(rows.get(2).map(String::as_str), Some(missing));
+    }
+
+    // --- Uninstall and restart (T1.5) ---
+
+    #[test]
+    fn uninstall_script_removes_only_managed_agents() -> Result<(), crate::bridge::BridgeError> {
+        let set = DashboardSet::standard();
+        let script = render_uninstall_script(&set);
+        for id in ["mission-control", "pixel-office"] {
+            let label = format!("com.cheapotto.dashboards.{id}");
+            assert!(script.contains(&format!("launchctl bootout \"gui/$UID_NUM/{label}\"")));
+            assert!(script.contains(&format!("rm -f \"$AGENTS_DIR/{label}.plist\"")));
+            assert!(script.contains(&format!("dashboard={id} action=removed")));
+        }
+        assert!(!script.contains(REVIEWER_LAUNCHD_LABEL));
+        let plan = build_uninstall_plan(&tunnel_peer()?, &set);
+        assert_eq!(plan.spec.program, "ssh");
+        let remote = plan.spec.args.last();
+        assert!(remote.is_some_and(|remote| remote.starts_with("/bin/sh -c '")));
+        assert_eq!(plan.display_steps.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn restart_spec_kickstarts_requested_label() -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        for service in set.services() {
+            let spec = build_restart_spec(&peer, &set, service.id);
+            let remote = spec.as_ref().and_then(|spec| spec.args.last());
+            let wanted = format!("kickstart -k \"gui/$(id -u)/{}\"", service.launchd_label);
+            assert!(
+                remote.is_some_and(|remote| remote.contains(&wanted)),
+                "{remote:?}"
+            );
+        }
+        let reviewer = build_restart_spec(&peer, &set, DashboardId::Reviewer);
+        assert!(reviewer.is_some_and(|spec| {
+            spec.program == "ssh"
+                && spec
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("com.cheapotto.code-reviewer.ui"))
+        }));
+        Ok(())
     }
 }

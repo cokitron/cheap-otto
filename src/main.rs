@@ -8,9 +8,12 @@ use cheap_otto::arbiter::{ArbiterPolicy, ArbiterSnapshot};
 use cheap_otto::bridge::{PeerNode, merge_ssh_config_block};
 use cheap_otto::command::CommandSpec;
 use cheap_otto::dashboards::{
-    DashboardSet, MISSION_CONTROL_PORT, PIXEL_OFFICE_PORT, REVIEWER_PORT, TunnelDecision,
-    TunnelFailure, TunnelRecord, build_tunnel_spec, command_line_is_recorded_tunnel, decide_tunnel,
-    describe_tunnel_failure, recorded_tunnel_covers,
+    DashboardDiagnosis, DashboardId, DashboardSet, DashboardStatusReport, MISSION_CONTROL_PORT,
+    PIXEL_OFFICE_PORT, REVIEWER_PORT, ServiceManager, TunnelDecision, TunnelFailure, TunnelRecord,
+    build_install_plan, build_restart_spec, build_status_spec, build_tunnel_spec,
+    build_uninstall_plan, command_line_is_recorded_tunnel, dashboard_log_path, decide_tunnel,
+    describe_tunnel_failure, explain_unavailable, parse_status_output, recorded_tunnel_covers,
+    render_install_script, render_status_rows,
 };
 use cheap_otto::doctor::{
     CheckStatus, ProbeSource, RawTelemetrySnapshot, SystemProbeInput, parse_active_otto_sessions,
@@ -485,6 +488,69 @@ enum DashboardCommands {
         #[arg(long, visible_alias = "apply")]
         execute: bool,
     },
+    /// Print the dashboard registry: id, name, port and LaunchAgent label of each dashboard
+    List {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Print only a JSON array of the dashboards
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install or update the dashboard LaunchAgents cheap-otto manages (Mission Control, Pixel Office)
+    Install {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Run the install on the Mac over SSH; without this only the plan is printed
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Print the install script and nothing else, so it can be read or piped to `sh` on the Mac
+    InstallScript {
+        #[command(flatten)]
+        common: DashboardArgs,
+    },
+    /// Report which dashboards are loaded, listening on the Mac and tunnelled here, and why not
+    Status {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Print only one JSON object (`{"dashboards":[…],"host":…}`); notes go to stderr
+        #[arg(long)]
+        json: bool,
+        /// Run the read-only probe over SSH and check the local ports; without this only the probe is printed
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Restart one dashboard's LaunchAgent with `launchctl kickstart -k`
+    Restart {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Dashboard to restart: mission-control, pixel-office or reviewer
+        #[arg(long, value_parser = DashboardId::parse)]
+        id: DashboardId,
+        /// Restart it on the Mac over SSH; without this only the command is printed
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+    /// Unload and delete the dashboard LaunchAgents cheap-otto manages (never the Reviewer's)
+    Uninstall {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Remove them on the Mac over SSH; without this only the plan is printed
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
+}
+
+impl DashboardArgs {
+    fn options(&self, json: bool, execute: bool) -> DashboardOptions<'_> {
+        DashboardOptions {
+            state_dir: self.state_dir.as_deref(),
+            port: self.port,
+            pixel_port: self.pixel_port,
+            json,
+            execute,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -862,6 +928,15 @@ struct TunnelOptions<'a> {
     port: u16,
     pixel_port: u16,
     stop: bool,
+    execute: bool,
+}
+
+/// Inputs of the `dashboards` subcommands other than `tunnel`; each uses the fields it needs.
+struct DashboardOptions<'a> {
+    state_dir: Option<&'a Path>,
+    port: u16,
+    pixel_port: u16,
+    json: bool,
     execute: bool,
 }
 
@@ -1263,6 +1338,28 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 stop,
                 execute,
             })?,
+            DashboardCommands::List { common, json } => {
+                run_dashboards_list(&common.options(json, false))?;
+            }
+            DashboardCommands::Install { common, execute } => {
+                run_dashboards_install(&common.options(false, execute))?;
+            }
+            DashboardCommands::InstallScript { common } => {
+                run_dashboards_install_script(&common.options(false, false))?;
+            }
+            DashboardCommands::Status {
+                common,
+                json,
+                execute,
+            } => run_dashboards_status(&common.options(json, execute))?,
+            DashboardCommands::Restart {
+                common,
+                id,
+                execute,
+            } => run_dashboards_restart(&common.options(false, execute), id)?,
+            DashboardCommands::Uninstall { common, execute } => {
+                run_dashboards_uninstall(&common.options(false, execute))?;
+            }
         },
     }
 
@@ -4083,6 +4180,235 @@ fn run_dashboards_tunnel(opts: &TunnelOptions<'_>) -> Result<(), Box<dyn std::er
     }
     let _lock = acquire_tunnel_lock(&state_dir)?;
     ensure_dashboard_tunnel(&state_dir, &peer, &set)
+}
+
+/// The paired peer and the dashboard set. Reads local state only: no socket, no SSH. [R8.4]
+fn dashboard_context(
+    opts: &DashboardOptions<'_>,
+) -> Result<(PeerNode, DashboardSet), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(opts.state_dir, repo_root.as_deref());
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+    let set = DashboardSet::with_ports(opts.port, opts.pixel_port, REVIEWER_PORT)?;
+    Ok((peer, set))
+}
+
+/// Prints the banner, the paired Mac and the command; with `hide_script`, the remote script is
+/// shown as `<script>` so the plan stays readable.
+fn print_dashboard_command(title: &str, peer: &PeerNode, spec: &CommandSpec, hide_script: bool) {
+    let mut shown = spec.clone();
+    if let Some(remote) = shown.args.last_mut().filter(|_| hide_script) {
+        *remote = "/bin/sh -c <script>".to_string();
+    }
+    let destination = peer.ssh_destination();
+    println!("=== cheap-otto: dashboards {title} ===");
+    println!("Paired MacBook  : {} ({destination})", peer.alias);
+    println!("Command         :\n  $ {}", shown.display_command());
+}
+
+/// Runs a remote-script plan with inherited stdio. The error names the exit status, not the
+/// whole script; the script's own output already said which dashboard failed and why.
+fn execute_remote_script(spec: &CommandSpec) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  ==> {}", spec.description);
+    let status = Command::new(&spec.program)
+        .args(&spec.args)
+        .status()
+        .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(format!("{} failed ({status})", spec.description).into())
+}
+
+fn run_dashboards_list(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let set = DashboardSet::with_ports(opts.port, opts.pixel_port, REVIEWER_PORT)?;
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(set.services())?);
+        return Ok(());
+    }
+    println!("=== cheap-otto: dashboards ===");
+    for service in set.services() {
+        let owner = match service.manager {
+            ServiceManager::CheapOtto => "installed by `cheap-otto dashboards install`",
+            ServiceManager::CodeReviewerProvisioner => "installed by `code-reviewer m1 sync`",
+        };
+        println!(
+            "{:<16} {:<16} 127.0.0.1:{:<5} {} ({owner})",
+            service.id.slug(),
+            service.display_name,
+            service.port,
+            service.launchd_label
+        );
+    }
+    Ok(())
+}
+
+fn run_dashboards_install_script(
+    opts: &DashboardOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let set = DashboardSet::with_ports(opts.port, opts.pixel_port, REVIEWER_PORT)?;
+    // The script alone, no banner, so `install-script | ssh mac sh` works.
+    print!("{}", render_install_script(&set));
+    Ok(())
+}
+
+fn run_dashboards_install(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, set) = dashboard_context(opts)?;
+    let plan = build_install_plan(&peer, &set);
+    print_dashboard_command("install", &peer, &plan.spec, true);
+    println!("Script          : `cheap-otto dashboards install-script` prints it");
+    for step in &plan.display_steps {
+        println!("  * {step}");
+    }
+    if !opts.execute {
+        println!("\nPass `--execute` to install them on the Mac.");
+        return Ok(());
+    }
+    execute_remote_script(&plan.spec)
+}
+
+fn run_dashboards_uninstall(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, set) = dashboard_context(opts)?;
+    let plan = build_uninstall_plan(&peer, &set);
+    print_dashboard_command("uninstall", &peer, &plan.spec, true);
+    for step in &plan.display_steps {
+        println!("  * {step}");
+    }
+    if !opts.execute {
+        println!(
+            "\nPass `--execute` to remove them on the Mac. The Reviewer's LaunchAgent is not touched."
+        );
+        return Ok(());
+    }
+    execute_remote_script(&plan.spec)
+}
+
+fn run_dashboards_restart(
+    opts: &DashboardOptions<'_>,
+    id: DashboardId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, set) = dashboard_context(opts)?;
+    let spec = build_restart_spec(&peer, &set, id)
+        .ok_or_else(|| format!("dashboard '{}' is not in the registry", id.slug()))?;
+    print_dashboard_command(&format!("restart {}", id.slug()), &peer, &spec, false);
+    if !opts.execute {
+        println!("\nPass `--execute` to restart it on the Mac.");
+        return Ok(());
+    }
+    execute_command_spec(&spec)
+}
+
+/// The `status --json` document. Before the probe (`probed` is `None`) every probed field and
+/// `host` are `null`; after it, `reason` and `log` are `null` only for a listening dashboard.
+fn dashboard_status_json(
+    set: &DashboardSet,
+    probed: Option<(&DashboardStatusReport, &[(DashboardId, bool)])>,
+) -> serde_json::Value {
+    let dashboards: Vec<_> = set
+        .services()
+        .iter()
+        .map(|service| {
+            let report = probed.map(|(report, _)| report);
+            let status = report.and_then(|r| r.dashboards.iter().find(|s| s.id == service.id));
+            let diagnosis = report.and_then(|report| match status {
+                Some(status) => explain_unavailable(service, status, report.host.as_ref()),
+                None => Some(DashboardDiagnosis {
+                    reason: "the probe printed no line for it".to_string(),
+                    log: dashboard_log_path(service.id),
+                }),
+            });
+            let tunnelled =
+                probed.and_then(|(_, ports)| ports.iter().find(|(id, _)| *id == service.id));
+            json!({
+                "id": service.id,
+                "display_name": service.display_name,
+                "port": service.port,
+                "launchd_label": service.launchd_label,
+                "loaded": status.map(|status| status.loaded),
+                "pid": status.and_then(|status| status.pid),
+                "listening": status.map(|status| status.listening),
+                "last_exit": status.and_then(|status| status.last_exit.clone()),
+                "tunnelled": tunnelled.map(|(_, up)| *up),
+                "reason": diagnosis.as_ref().map(|why| why.reason.clone()),
+                "log": diagnosis.map(|why| why.log),
+            })
+        })
+        .collect();
+    let host = probed.and_then(|(report, _)| report.host.as_ref());
+    json!({ "dashboards": dashboards, "host": host })
+}
+
+fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let (peer, set) = dashboard_context(opts)?;
+    let spec = build_status_spec(&peer, &set);
+    if !opts.execute {
+        // A dry run opens no socket: no local port check, no SSH. [R8.4]
+        if opts.json {
+            let report = dashboard_status_json(&set, None);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        print_dashboard_command("status", &peer, &spec, true);
+        println!(
+            "\nPass `--execute` to run this read-only probe and check which ports answer here."
+        );
+        return Ok(());
+    }
+
+    if !opts.json {
+        print_dashboard_command("status", &peer, &spec, true);
+    }
+    let tunnelled: Vec<(DashboardId, bool)> = set
+        .services()
+        .iter()
+        .map(|service| (service.id, is_local_port_open(service.port)))
+        .collect();
+    let raw = capture_spec_stdout(&spec).ok_or_else(|| {
+        format!(
+            "the status probe failed on {}; check SSH with `ssh -p {} {} true`",
+            peer.alias,
+            peer.ssh_port,
+            peer.ssh_destination()
+        )
+    })?;
+    let report = parse_status_output(&raw, &set);
+    // [R5.3] Without automatic login, a reboot leaves the Mac with no GUI session.
+    let autologin_warning = report
+        .host
+        .as_ref()
+        .filter(|host| host.autologin_user.is_none())
+        .map(|_| {
+            "warning: automatic login is off on the Mac, so after a reboot the dashboards start only once you log in to its desktop"
+        });
+
+    if opts.json {
+        if let Some(warning) = autologin_warning {
+            eprintln!("{warning}");
+        }
+        let json_report = dashboard_status_json(&set, Some((&report, &tunnelled)));
+        println!("{}", serde_json::to_string_pretty(&json_report)?);
+        return Ok(());
+    }
+
+    println!("=== cheap-otto: dashboards status ===");
+    for row in render_status_rows(&report, &set, &tunnelled) {
+        println!("  {row}");
+    }
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    match &report.host {
+        Some(host) => println!(
+            "Mac: cheap-otto installed={}, pixel-agents installed={}, GUI session={}, automatic login={}",
+            yes_no(host.cheap_otto_bin),
+            yes_no(host.pixel_agents_bin),
+            yes_no(host.gui_session),
+            host.autologin_user.as_deref().unwrap_or("off")
+        ),
+        None => println!("Mac: the probe printed no host line"),
+    }
+    if let Some(warning) = autologin_warning {
+        println!("{warning}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

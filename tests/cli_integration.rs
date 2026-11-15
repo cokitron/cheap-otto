@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cheap_otto::dashboards::REVIEWER_PORT;
+
 fn cheap_otto_bin() -> &'static str {
     env!("CARGO_BIN_EXE_cheap-otto")
 }
@@ -579,6 +581,169 @@ fn dashboards_tunnel_stop_without_record_is_a_no_op() -> Result<(), Box<dyn std:
     assert!(ok, "dashboards tunnel --stop failed: {stderr}");
     assert!(stdout.contains("No recorded tunnel."), "{stdout}");
     assert!(!state_dir.join("tunnel.json").exists());
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+/// A temp dir with a paired peer (`pair` without `--apply` writes `peer.json` only).
+fn paired_dashboard_dir(name: &str) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
+    let temp = create_isolated_temp_dir(name)?;
+    let state_str = temp.join(".cheap-otto").to_string_lossy().into_owned();
+    let (ok, _, stderr) = run_cli_in(
+        &temp,
+        &["pair", "--host", "192.168.1.42", "--out-dir", &state_str],
+    )?;
+    assert!(ok, "pair failed: {stderr}");
+    Ok((temp, state_str))
+}
+
+/// Runs `cheap-otto dashboards <args> --state-dir <state>` in `temp`.
+fn run_dashboards(
+    temp: &Path,
+    state: &str,
+    args: &[&str],
+) -> Result<(bool, String, String), Box<dyn std::error::Error>> {
+    let mut full = vec!["dashboards"];
+    full.extend_from_slice(args);
+    full.extend_from_slice(&["--state-dir", state]);
+    run_cli_in(temp, &full)
+}
+
+#[test]
+fn dashboards_list_and_install_script_are_pure() -> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("dashboards-list")?;
+
+    let (ok, stdout, stderr) = run_dashboards(&temp, &state_str, &["list", "--json"])?;
+    assert!(ok, "dashboards list --json failed: {stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_eq!(parsed.as_array().map(Vec::len), Some(3), "{stdout}");
+
+    let (ok, stdout, stderr) = run_cli_in(&temp, &["dashboards", "install-script"])?;
+    assert!(ok, "dashboards install-script failed: {stderr}");
+    assert!(stdout.starts_with("set -eu"), "{stdout}");
+    assert!(stdout.contains("com.cheapotto.dashboards.mission-control"));
+    assert!(stdout.contains("com.cheapotto.dashboards.pixel-office"));
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn dashboards_install_status_restart_uninstall_are_dry_runs_without_execute()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("dashboards-dry-runs")?;
+
+    let runs: [&[&str]; 4] = [
+        &["install"],
+        &["status"],
+        &["restart", "--id", "reviewer"],
+        &["uninstall"],
+    ];
+    for sub in runs {
+        let (ok, stdout, stderr) = run_dashboards(&temp, &state_str, sub)?;
+        assert!(ok, "dashboards {sub:?} failed: {stderr}");
+        assert!(stdout.contains("$ ssh "), "{sub:?}: {stdout}");
+        assert!(stdout.contains("@192.168.1.42"), "{sub:?}: {stdout}");
+        assert!(stdout.contains("Pass `--execute`"), "{sub:?}: {stdout}");
+    }
+    assert!(!Path::new(&state_str).join("tunnel.json").exists());
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn dashboards_status_json_stdout_is_json_only() -> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("dashboards-status-json")?;
+
+    let (ok, stdout, stderr) = run_dashboards(&temp, &state_str, &["status", "--json"])?;
+    assert!(ok, "dashboards status --json failed: {stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)?;
+    let dashboards = parsed["dashboards"].as_array().cloned().unwrap_or_default();
+    assert_eq!(dashboards.len(), 3, "{stdout}");
+    for entry in &dashboards {
+        for key in [
+            "loaded",
+            "pid",
+            "last_exit",
+            "listening",
+            "tunnelled",
+            "reason",
+            "log",
+        ] {
+            assert!(
+                entry.get(key).is_some_and(serde_json::Value::is_null),
+                "{key} should be null: {entry}"
+            );
+        }
+    }
+    assert!(
+        parsed.get("host").is_some_and(serde_json::Value::is_null),
+        "{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn dashboards_restart_rejects_unknown_id() -> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("dashboards-restart-unknown")?;
+
+    let (ok, _, stderr) = run_dashboards(&temp, &state_str, &["restart", "--id", "nope"])?;
+    assert!(!ok, "restart --id nope must fail");
+    for id in ["mission-control", "pixel-office", "reviewer"] {
+        assert!(stderr.contains(id), "stderr should name {id}: {stderr}");
+    }
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn dashboards_dry_runs_open_no_socket() -> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("dashboards-no-socket")?;
+    let mission_control = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let pixel_office = std::net::TcpListener::bind("127.0.0.1:0")?;
+    mission_control.set_nonblocking(true)?;
+    pixel_office.set_nonblocking(true)?;
+    let port = mission_control.local_addr()?.port().to_string();
+    let pixel_port = pixel_office.local_addr()?.port().to_string();
+    // The Reviewer port is fixed, so bind it on a best-effort basis: another process may own it.
+    let reviewer = std::net::TcpListener::bind(("127.0.0.1", REVIEWER_PORT)).ok();
+    if let Some(listener) = &reviewer {
+        listener.set_nonblocking(true)?;
+    }
+
+    let runs: [&[&str]; 5] = [
+        &["status"],
+        &["install"],
+        &["uninstall"],
+        &["tunnel"],
+        &["restart", "--id", "reviewer"],
+    ];
+    for sub in runs {
+        let mut args = sub.to_vec();
+        args.extend_from_slice(&["--port", &port, "--pixel-port", &pixel_port]);
+        let (ok, _, stderr) = run_dashboards(&temp, &state_str, &args)?;
+        assert!(ok, "dashboards {sub:?} failed: {stderr}");
+    }
+
+    let mut watched = vec![
+        ("Mission Control", &mission_control),
+        ("Pixel Office", &pixel_office),
+    ];
+    if let Some(listener) = &reviewer {
+        watched.push(("Reviewer", listener));
+    }
+    for (name, listener) in watched {
+        let accepted = listener.accept();
+        assert!(
+            matches!(&accepted, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "a dry run connected to the {name} port: {accepted:?}"
+        );
+    }
 
     let _ = fs::remove_dir_all(&temp);
     Ok(())

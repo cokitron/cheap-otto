@@ -29,13 +29,13 @@ The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one the
 | 3 | T4.1 testable two-binary deploy (merged in #43) | `refactor/m1-dashboards-t4-1-build-script` | nothing |
 | 4 | T4.3 part a: reviewer fallback tunnel (merged in #44) | `fix/m1-dashboards-t4-3a-fallback-tunnel` | nothing |
 | 5 | T1.2 reserved name, T1.3 LaunchAgent templates (merged in #45→#41) | `feat/m1-dashboards-t1-2-t1-3-plists` | PR 1 |
-| 6 | T1.4 install script and plan | `feat/m1-dashboards-t1-4-install-script` | PR 5 |
-| 7 | T1.6 status script, parser and diagnosis | `feat/m1-dashboards-t1-6-status` | PR 6 |
+| 6 | T1.4 install script and plan (merged in #51) | `feat/m1-dashboards-t1-4-install-script` | PR 5 |
+| 7 | T1.6 status script, parser and diagnosis (merged in #52) | `feat/m1-dashboards-t1-6-status` | PR 6 |
 | 8 | T1.7 tunnel spec, decision and record (merged in #47) | `feat/m1-dashboards-t1-7-tunnel` | PR 1 |
 | 9 | T1.5 uninstall and restart, T2.1 `dashboards` subcommands | `feat/m1-dashboards-t1-5-t2-1-subcommands` | PRs 6, 7 |
-| 10 | T2.2 tunnel management | `feat/m1-dashboards-t2-2-tunnel` | PR 8 |
+| 10 | T2.2 tunnel management (merged in #50) | `feat/m1-dashboards-t2-2-tunnel` | PR 8 |
 | 11 | T3.1 hub API, T3.2 Mission Control links, T4.6 shared ports and link back (merged in #48→#41) | `feat/m1-dashboards-t3-links` | PR 1 |
-| 12 | T4.4 Pixel Office button | `feat/m1-dashboards-t4-4-pixel-button` | PR 1 |
+| 12 | T4.4 Pixel Office button (merged in #49) | `feat/m1-dashboards-t4-4-pixel-button` | PR 1 |
 | 13 | T2.3 new `ui` | `feat/m1-dashboards-t2-3-ui` | PRs 2, 9, 10 |
 | 14 | T4.2 provisioning, T4.3 part b, T4.5 `open-ui.ps1` | `feat/m1-dashboards-t4-reviewer-alignment` | PRs 3, 4, 9, 13 |
 | 15 | T5.1 user docs, T5.2 agent docs | `docs/m1-dashboards-t5-docs` | PRs 13, 14 |
@@ -155,7 +155,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.5 Uninstall and restart plans
 
-- [ ] Done
+- [x] Done
+- PR: #54
 - **Issue:** #12
 - **Covers:** R8.2
 - **Depends on:** T1.4
@@ -244,7 +245,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.1 `dashboards` subcommands
 
-- [ ] Done
+- [x] Done
+- PR: #54
 - **Issue:** #16
 - **Covers:** R1.1, R4.4, R5.1 to R5.5, R8.2, R8.4
 - **Depends on:** T1.4, T1.5, T1.6
