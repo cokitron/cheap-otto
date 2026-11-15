@@ -22,22 +22,31 @@ pub struct M1SyncOptions<'a> {
     pub npm_pkgs: &'a str,
 }
 
+/// Builds the piped `ssh <host> sh -s` command with GitHub tokens removed from its environment.
+fn ssh_script_command(host: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ClearAllForwardings=yes",
+        host,
+        "sh",
+        "-s",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
 /// Runs a POSIX `sh -s` script on `otto-mac` over SSH stdin so PowerShell / Windows quoting
 /// and UTF-8 BOMs never corrupt multi-line commands or special characters.
 pub fn run_ssh_script(host: &str, script: &str) -> Result<String, String> {
-    let mut child = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ClearAllForwardings=yes",
-            host,
-            "sh",
-            "-s",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut child = ssh_script_command(host)
         .spawn()
         .map_err(|e| format!("failed to spawn `ssh`: {}", e))?;
 
@@ -459,6 +468,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_ssh_script_command_strips_github_credentials() {
+        let cmd = ssh_script_command("otto-mac");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ClearAllForwardings=yes",
+                "otto-mac",
+                "sh",
+                "-s"
+            ]
+        );
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(removed.contains(&"GH_TOKEN".to_string()), "{cmd:?}");
+        assert!(removed.contains(&"GITHUB_TOKEN".to_string()), "{cmd:?}");
+    }
+
+    #[test]
     fn encodes_rfc4648_base64_accurately() {
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
@@ -529,5 +568,71 @@ BREW_PKGS='gh jq' CARGO_PKGS='ripgrep' NPM_PKGS='pnpm' REPO_ROOT=\"$CR_ROOT\" /b
             remote_shell_path_expr("/Users/m/otto-workspaces/cheap-otto"),
             "/Users/m/otto-workspaces/cheap-otto"
         );
+    }
+
+    #[cfg(unix)]
+    fn run_dashboard_section(label: &str, stub: Option<&str>) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = include_str!("../scripts/m1-provision.sh");
+        let start = script.find("# 8. Dashboard services").unwrap();
+        let end = script
+            .find("echo \"[m1-provision] Provisioning complete.\"")
+            .unwrap();
+        assert!(start < end);
+        let section = &script[start..end];
+
+        let home =
+            std::env::temp_dir().join(format!("m1_provision_{label}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let bin_dir = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        if let Some(body) = stub {
+            let bin = bin_dir.join("cheap-otto");
+            std::fs::write(&bin, body).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("set -eu\n{section}"))
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_reports_dashboards_installed_when_the_install_script_succeeds() {
+        let out = run_dashboard_section("ok", Some("#!/bin/sh\necho 'exit 0'\n"));
+        assert!(out.contains("Dashboard services are installed"));
+        assert!(!out.contains("WARN"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_warns_when_the_install_script_fails() {
+        let out = run_dashboard_section("warn", Some("#!/bin/sh\necho 'exit 3'\n"));
+        assert!(out.contains("WARN: dashboard service install failed"));
+        assert!(!out.contains("Dashboard services are installed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_skips_when_install_script_generation_fails() {
+        let out = run_dashboard_section("gen_fail", Some("#!/bin/sh\necho 'exit 0'\nexit 2\n"));
+        assert!(out.contains("missing or too old for dashboard services; skipping"));
+        assert!(!out.contains("Dashboard services are installed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_skips_when_cheap_otto_is_missing() {
+        let out = run_dashboard_section("missing", None);
+        assert!(out.contains("missing or too old for dashboard services; skipping"));
+        assert!(!out.contains("Dashboard services are installed"));
     }
 }
