@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cheap_otto::dashboards::REVIEWER_PORT;
+
 fn cheap_otto_bin() -> &'static str {
     env!("CARGO_BIN_EXE_cheap-otto")
 }
@@ -661,11 +663,25 @@ fn dashboards_status_json_stdout_is_json_only() -> Result<(), Box<dyn std::error
     let dashboards = parsed["dashboards"].as_array().cloned().unwrap_or_default();
     assert_eq!(dashboards.len(), 3, "{stdout}");
     for entry in &dashboards {
-        for key in ["loaded", "pid", "listening", "tunnelled", "reason", "log"] {
-            assert!(entry[key].is_null(), "{key} should be null: {entry}");
+        for key in [
+            "loaded",
+            "pid",
+            "last_exit",
+            "listening",
+            "tunnelled",
+            "reason",
+            "log",
+        ] {
+            assert!(
+                entry.get(key).is_some_and(serde_json::Value::is_null),
+                "{key} should be null: {entry}"
+            );
         }
     }
-    assert!(parsed["host"].is_null(), "{stdout}");
+    assert!(
+        parsed.get("host").is_some_and(serde_json::Value::is_null),
+        "{stdout}"
+    );
 
     let _ = fs::remove_dir_all(&temp);
     Ok(())
@@ -688,19 +704,46 @@ fn dashboards_restart_rejects_unknown_id() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn dashboards_dry_runs_open_no_socket() -> Result<(), Box<dyn std::error::Error>> {
     let (temp, state_str) = paired_dashboard_dir("dashboards-no-socket")?;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let port = listener.local_addr()?.port().to_string();
-
-    for sub in ["status", "install", "uninstall"] {
-        let (ok, _, stderr) = run_dashboards(&temp, &state_str, &[sub, "--port", &port])?;
-        assert!(ok, "dashboards {sub} failed: {stderr}");
+    let mission_control = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let pixel_office = std::net::TcpListener::bind("127.0.0.1:0")?;
+    mission_control.set_nonblocking(true)?;
+    pixel_office.set_nonblocking(true)?;
+    let port = mission_control.local_addr()?.port().to_string();
+    let pixel_port = pixel_office.local_addr()?.port().to_string();
+    // The Reviewer port is fixed, so bind it on a best-effort basis: another process may own it.
+    let reviewer = std::net::TcpListener::bind(("127.0.0.1", REVIEWER_PORT)).ok();
+    if let Some(listener) = &reviewer {
+        listener.set_nonblocking(true)?;
     }
-    let accepted = listener.accept();
-    assert!(
-        matches!(&accepted, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
-        "a dry run connected to the Mission Control port: {accepted:?}"
-    );
+
+    let runs: [&[&str]; 5] = [
+        &["status"],
+        &["install"],
+        &["uninstall"],
+        &["tunnel"],
+        &["restart", "--id", "reviewer"],
+    ];
+    for sub in runs {
+        let mut args = sub.to_vec();
+        args.extend_from_slice(&["--port", &port, "--pixel-port", &pixel_port]);
+        let (ok, _, stderr) = run_dashboards(&temp, &state_str, &args)?;
+        assert!(ok, "dashboards {sub:?} failed: {stderr}");
+    }
+
+    let mut watched = vec![
+        ("Mission Control", &mission_control),
+        ("Pixel Office", &pixel_office),
+    ];
+    if let Some(listener) = &reviewer {
+        watched.push(("Reviewer", listener));
+    }
+    for (name, listener) in watched {
+        let accepted = listener.accept();
+        assert!(
+            matches!(&accepted, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "a dry run connected to the {name} port: {accepted:?}"
+        );
+    }
 
     let _ = fs::remove_dir_all(&temp);
     Ok(())

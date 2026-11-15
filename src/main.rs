@@ -4355,6 +4355,9 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
         return Ok(());
     }
 
+    if !opts.json {
+        print_dashboard_command("status", &peer, &spec, true);
+    }
     let tunnelled: Vec<(DashboardId, bool)> = set
         .services()
         .iter()
