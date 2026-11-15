@@ -401,6 +401,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 ### T4.4 The Pixel Office button starts the service, not an orphan
 
 - [x] Done
+- PR: #49
 - **Issue:** #24
 - **Covers:** R1.2 (keeps Pixel Office under `launchd`)
 - **Depends on:** T0.1, T1.1
