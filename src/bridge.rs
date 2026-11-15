@@ -93,7 +93,11 @@ pub struct PortTunnelPlan {
     pub ports: Vec<u16>,
     /// Human-readable `ssh -N -L ...` command.
     pub ssh_tunnel_command: String,
-    /// Rendered `~/.ssh/config` `Host` block.
+    /// Rendered `~/.ssh/config` `Host` block: connection settings only, no `LocalForward` lines.
+    ///
+    /// Forwards in the alias block would make every `ssh <alias>` (remote exec, `git push`,
+    /// `shell`) try to bind the same local ports, so concurrent connections collide. Ports are
+    /// forwarded only by the explicit tunnel in [`Self::tunnel_spec`] and [`Self::ssh_tunnel_command`].
     pub ssh_config_snippet: String,
     /// Shell-free process specification for launching the port tunnel directly.
     #[serde(default)]
@@ -456,7 +460,6 @@ impl PeerNode {
         let port_str = self.ssh_port.to_string();
         let dest = self.ssh_destination();
         let mut forward_flags = String::new();
-        let mut ssh_config_forwards = String::new();
         let mut tunnel_args = Vec::with_capacity(4 + ports.len().saturating_mul(2));
         tunnel_args.push("-N".to_string());
         tunnel_args.push("-p".to_string());
@@ -465,9 +468,6 @@ impl PeerNode {
         for &port in ports {
             let bind_expr = format!("127.0.0.1:{port}:127.0.0.1:{port}");
             forward_flags.push_str(&format!(" -L {bind_expr}"));
-            ssh_config_forwards.push_str(&format!(
-                "  LocalForward 127.0.0.1:{port} 127.0.0.1:{port}\n"
-            ));
             tunnel_args.push("-L".to_string());
             tunnel_args.push(bind_expr);
         }
@@ -475,14 +475,14 @@ impl PeerNode {
 
         let ssh_tunnel_command = format!("ssh -N -p {}{forward_flags} {dest}", self.ssh_port);
 
+        // No port forwards here: the alias block is shared by every `ssh <alias>` connection.
         let ssh_config_snippet = format!(
             "Host {}\n\
              \x20 HostName {}\n\
              \x20 User {}\n\
              \x20 Port {}\n\
              \x20 ServerAliveInterval 30\n\
-             \x20 ServerAliveCountMax 3\n\
-             {ssh_config_forwards}",
+             \x20 ServerAliveCountMax 3\n",
             self.alias, self.host, self.ssh_user, self.ssh_port
         );
 
@@ -551,12 +551,49 @@ mod tests {
                 .ssh_tunnel_command
                 .contains("-L 127.0.0.1:3000:127.0.0.1:3000")
         );
+        assert!(!tunnel.ssh_config_snippet.contains("LocalForward"));
         assert!(
             tunnel
                 .ssh_config_snippet
-                .contains("LocalForward 127.0.0.1:5173 127.0.0.1:5173")
+                .contains("HostName 100.101.102.103")
         );
-        assert!(tunnel.tunnel_spec.is_some());
+        let spec = tunnel.tunnel_spec.ok_or(BridgeError::InvalidPort(0))?;
+        assert!(
+            spec.args
+                .iter()
+                .any(|a| a == "127.0.0.1:5173:127.0.0.1:5173")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merged_block_drops_local_forwards_written_by_older_versions() -> Result<(), BridgeError> {
+        let unrelated =
+            "Host other\n  HostName 198.51.100.7\n  LocalForward 127.0.0.1:8080 127.0.0.1:8080\n";
+        let existing = format!(
+            "{unrelated}\n\
+             # --- BEGIN cheap-otto (otto-mac) ---\n\
+             Host otto-mac\n  HostName 192.0.2.10\n  User admin\n  Port 22\n\
+             \x20 LocalForward 127.0.0.1:7420 127.0.0.1:7420\n\
+             \x20 LocalForward 127.0.0.1:7421 127.0.0.1:7421\n\
+             # --- END cheap-otto (otto-mac) ---\n"
+        );
+        let peer = PeerNode::new("otto-mac", "192.0.2.10", "admin", 22)?;
+        let snippet = peer.build_port_tunnel(&[7420, 7421])?.ssh_config_snippet;
+
+        let merged = merge_ssh_config_block(&existing, "otto-mac", &snippet)?;
+
+        let begin = "# --- BEGIN cheap-otto (otto-mac) ---";
+        let end = "# --- END cheap-otto (otto-mac) ---";
+        let managed = merged
+            .split_once(begin)
+            .and_then(|(_, rest)| rest.split_once(end))
+            .map(|(block, _)| block)
+            .ok_or(BridgeError::InvalidProjectName("otto-mac".to_string()))?;
+        assert!(!managed.contains("LocalForward"));
+        assert!(managed.contains("HostName 192.0.2.10"));
+        assert!(merged.starts_with(unrelated));
+        assert_eq!(merged.matches("LocalForward").count(), 1);
         Ok(())
     }
 
