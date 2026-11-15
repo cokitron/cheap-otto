@@ -288,7 +288,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.3 Rewrite `cheap-otto ui`
 
-- [ ] Done
+- [x] Done
 - **Issue:** #18
 - **Covers:** R3.1, R3.10, R8.1
 - **Depends on:** T1.8, T2.1, T2.2

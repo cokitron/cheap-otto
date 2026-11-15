@@ -748,3 +748,35 @@ fn dashboards_dry_runs_open_no_socket() -> Result<(), Box<dyn std::error::Error>
     let _ = fs::remove_dir_all(&temp);
     Ok(())
 }
+
+#[test]
+fn ui_dry_run_plans_services_then_one_tunnel_and_no_tmux() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (temp, state_str) = paired_dashboard_dir("ui-dry-run")?;
+
+    let (ok, stdout, stderr) = run_cli_in(&temp, &["ui", "--state-dir", &state_str])?;
+    assert!(ok, "ui dry run failed: {stderr}");
+    for port in ["7420", "7421", "7430"] {
+        assert!(stdout.contains(&format!("127.0.0.1:{port}")), "{stdout}");
+    }
+    let tunnels: Vec<&str> = stdout.lines().filter(|l| l.contains("ssh -N")).collect();
+    assert_eq!(tunnels.len(), 1, "{stdout}");
+    assert_eq!(tunnels[0].matches(" -L ").count(), 3, "{stdout}");
+    assert!(!stdout.contains("tmux new-session"), "{stdout}");
+    assert!(stdout.contains("Browser         : http://localhost:7420"));
+    assert!(stdout.contains("Pass `--execute`"), "{stdout}");
+    assert!(!Path::new(&state_str).join("tunnel.json").exists());
+
+    let open = ["ui", "--open", "reviewer", "--state-dir", &state_str];
+    let (ok, stdout, stderr) = run_cli_in(&temp, &open)?;
+    assert!(ok, "ui --open reviewer failed: {stderr}");
+    assert!(stdout.contains("Browser         : http://localhost:7430"));
+
+    let bad = ["ui", "--open=x;rm", "--state-dir", &state_str];
+    let (ok, _, stderr) = run_cli_in(&temp, &bad)?;
+    assert!(!ok, "ui accepted an unknown --open id");
+    assert!(stderr.contains("--open"), "{stderr}");
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
