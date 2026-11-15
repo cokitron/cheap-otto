@@ -826,12 +826,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = std::thread::Builder::new()
         .name("cheap-otto-cli".to_string())
         .stack_size(CLI_STACK_SIZE_BYTES)
-        .spawn(|| run_cli().map_err(|err| err.to_string()))?;
+        .spawn(|| run_cli().map_err(|err| format!("{err:?}")))?;
 
     match handle.join() {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(err_msg)) => Err(err_msg.into()),
-        Err(_) => Err("cheap-otto CLI worker thread panicked".into()),
+        Ok(Err(debug_msg)) => {
+            eprintln!("Error: {debug_msg}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("Error: cheap-otto CLI worker thread panicked");
+            std::process::exit(101);
+        }
     }
 }
 
