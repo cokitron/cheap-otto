@@ -3736,12 +3736,9 @@ fn run_ui(opts: &UiOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
         && let Some(home) = user_home_dir()
     {
         // The managed block carries no forwards; rewriting it drops those an older build wrote.
-        let ssh_cfg_path = home.join(".ssh").join("config");
+        // A failure here stops `ui` before the tunnel, so the config never silently stays stale.
         let snippet = peer.build_port_tunnel(&[])?.ssh_config_snippet;
-        let existing = fs::read_to_string(&ssh_cfg_path).unwrap_or_default();
-        if let Ok(merged) = merge_ssh_config_block(&existing, &peer.alias, &snippet) {
-            let _ = fs::write(&ssh_cfg_path, merged);
-        }
+        rewrite_managed_ssh_config(&home.join(".ssh").join("config"), &peer.alias, &snippet)?;
     }
 
     println!("\n--- Opening the dashboard tunnel ---");
@@ -3759,7 +3756,36 @@ fn run_ui(opts: &UiOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Runs the read-only status probe and warns for each dashboard not listening on the Mac. The
+/// Writes the managed block for `alias` into the SSH config at `path`. Only a missing file counts
+/// as an empty config; any other read, merge or write failure is returned.
+fn rewrite_managed_ssh_config(
+    path: &Path,
+    alias: &str,
+    snippet: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    let merged = merge_ssh_config_block(&existing, alias, snippet)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, merged)?;
+    Ok(())
+}
+
+/// A dashboard is healthy only when its LaunchAgent is loaded and its port answers; a listener
+/// without a loaded LaunchAgent is some other process holding the port.
+fn dashboard_is_healthy(report: &DashboardStatusReport, id: DashboardId) -> bool {
+    report
+        .dashboards
+        .iter()
+        .any(|status| status.id == id && status.loaded && status.listening)
+}
+
+/// Runs the read-only status probe and warns for each dashboard not healthy on the Mac. The
 /// warning never stops `ui`: the dashboards that are up are still worth opening. [R3.10]
 fn warn_unlistening_dashboards(peer: &PeerNode, set: &DashboardSet) {
     let spec = build_status_spec(peer, set);
@@ -3771,13 +3797,9 @@ fn warn_unlistening_dashboards(peer: &PeerNode, set: &DashboardSet) {
     };
     let report = parse_status_output(&raw, set);
     for service in set.services() {
-        let listening = report
-            .dashboards
-            .iter()
-            .any(|status| status.id == service.id && status.listening);
-        if !listening {
+        if !dashboard_is_healthy(&report, service.id) {
             println!(
-                "  [warn] {} is not listening on the Mac (port {}); see {} or run `cheap-otto dashboards status --execute`",
+                "  [warn] {} is not loaded or its port {} is held by another process on the Mac; see {} or run `cheap-otto dashboards status --execute`",
                 service.display_name,
                 service.port,
                 dashboard_log_path(service.id)
@@ -4426,6 +4448,7 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheap_otto::dashboards::DashboardRemoteStatus;
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("cheap-otto-main-{name}-{}", std::process::id()));
@@ -4441,6 +4464,66 @@ mod tests {
             ssh_port: 22,
             started_epoch_secs: 1,
         }
+    }
+
+    fn report_with(id: DashboardId, loaded: bool, listening: bool) -> DashboardStatusReport {
+        DashboardStatusReport {
+            dashboards: vec![DashboardRemoteStatus {
+                id,
+                loaded,
+                pid: None,
+                listening,
+                last_exit: None,
+            }],
+            host: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_is_healthy_only_when_loaded_and_listening() {
+        let id = DashboardId::Reviewer;
+        assert!(dashboard_is_healthy(&report_with(id, true, true), id));
+        assert!(!dashboard_is_healthy(&report_with(id, false, true), id));
+        assert!(!dashboard_is_healthy(&report_with(id, true, false), id));
+    }
+
+    #[test]
+    fn dashboard_is_unhealthy_when_absent_from_the_report() {
+        let report = report_with(DashboardId::MissionControl, true, true);
+        assert!(!dashboard_is_healthy(&report, DashboardId::Reviewer));
+    }
+
+    #[test]
+    fn rewrites_managed_ssh_config_creating_missing_file_and_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("ssh-config-missing");
+        let path = dir.join(".ssh").join("config");
+        rewrite_managed_ssh_config(&path, "otto-mac", "Host otto-mac\n  HostName 192.0.2.10\n")?;
+        let written = fs::read_to_string(&path)?;
+        assert!(written.contains("# --- BEGIN cheap-otto (otto-mac) ---"));
+        assert!(written.contains("HostName 192.0.2.10"));
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_managed_ssh_config_propagates_read_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = temp_state_dir("ssh-config-dir");
+        fs::create_dir_all(&dir)?;
+        let result = rewrite_managed_ssh_config(&dir, "otto-mac", "Host otto-mac\n");
+        assert!(result.is_err());
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_managed_ssh_config_rejects_unsafe_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("ssh-config-alias");
+        let path = dir.join("config");
+        assert!(rewrite_managed_ssh_config(&path, "x; rm -rf ~", "Host x\n").is_err());
+        assert!(!path.exists());
+        Ok(())
     }
 
     fn dir_entries(dir: &Path) -> Vec<String> {
