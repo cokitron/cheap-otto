@@ -288,7 +288,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.3 Rewrite `cheap-otto ui`
 
-- [ ] Done
+- [x] Done
+- PR: #56
 - **Issue:** #18
 - **Covers:** R3.1, R3.10, R8.1
 - **Depends on:** T1.8, T2.1, T2.2
@@ -299,6 +300,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   3. Update the `///` help line of `Ui`: "Ensure every dashboard service on the paired Mac, open one SSH tunnel for all of them, and open Mission Control".
 - **Tests** in `tests/cli_integration.rs`:
   - `ui_dry_run_plans_services_then_one_tunnel_and_no_tmux`: stdout mentions all three ports, contains exactly one `ssh -N` line with three `-L`, and does not contain `tmux new-session`.
+  - `ui_dry_run_opens_no_socket`: with listeners bound on the `--port` and `--pixel-port` values (and the Reviewer port when free), `ui` without `--execute` exits 0 and no listener accepts a connection.
   - Update `multi_harness_delegate_inspect_ask_and_templates_work_end_to_end` or any other existing test only if it asserted on the old `ui` output.
 - **Acceptance:**
   - `cargo test -p cheap-otto --test cli_integration` passes.

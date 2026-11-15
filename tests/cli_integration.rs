@@ -748,3 +748,81 @@ fn dashboards_dry_runs_open_no_socket() -> Result<(), Box<dyn std::error::Error>
     let _ = fs::remove_dir_all(&temp);
     Ok(())
 }
+
+#[test]
+fn ui_dry_run_opens_no_socket() -> Result<(), Box<dyn std::error::Error>> {
+    let (temp, state_str) = paired_dashboard_dir("ui-no-socket")?;
+    let mission_control = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let pixel_office = std::net::TcpListener::bind("127.0.0.1:0")?;
+    mission_control.set_nonblocking(true)?;
+    pixel_office.set_nonblocking(true)?;
+    let port = mission_control.local_addr()?.port().to_string();
+    let pixel_port = pixel_office.local_addr()?.port().to_string();
+    // The Reviewer port is fixed, so bind it on a best-effort basis: another process may own it.
+    let reviewer = std::net::TcpListener::bind(("127.0.0.1", REVIEWER_PORT)).ok();
+    if let Some(listener) = &reviewer {
+        listener.set_nonblocking(true)?;
+    }
+
+    let args = [
+        "ui",
+        "--port",
+        &port,
+        "--pixel-port",
+        &pixel_port,
+        "--state-dir",
+        &state_str,
+    ];
+    let (ok, _, stderr) = run_cli_in(&temp, &args)?;
+    assert!(ok, "ui dry run failed: {stderr}");
+
+    let mut watched = vec![
+        ("Mission Control", &mission_control),
+        ("Pixel Office", &pixel_office),
+    ];
+    if let Some(listener) = &reviewer {
+        watched.push(("Reviewer", listener));
+    }
+    for (name, listener) in watched {
+        let accepted = listener.accept();
+        assert!(
+            matches!(&accepted, Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "a ui dry run connected to the {name} port: {accepted:?}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn ui_dry_run_plans_services_then_one_tunnel_and_no_tmux() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (temp, state_str) = paired_dashboard_dir("ui-dry-run")?;
+
+    let (ok, stdout, stderr) = run_cli_in(&temp, &["ui", "--state-dir", &state_str])?;
+    assert!(ok, "ui dry run failed: {stderr}");
+    for port in ["7420", "7421", "7430"] {
+        assert!(stdout.contains(&format!("127.0.0.1:{port}")), "{stdout}");
+    }
+    let tunnels: Vec<&str> = stdout.lines().filter(|l| l.contains("ssh -N")).collect();
+    assert_eq!(tunnels.len(), 1, "{stdout}");
+    assert_eq!(tunnels[0].matches(" -L ").count(), 3, "{stdout}");
+    assert!(!stdout.contains("tmux new-session"), "{stdout}");
+    assert!(stdout.contains("Browser         : http://localhost:7420"));
+    assert!(stdout.contains("Pass `--execute`"), "{stdout}");
+    assert!(!Path::new(&state_str).join("tunnel.json").exists());
+
+    let open = ["ui", "--open", "reviewer", "--state-dir", &state_str];
+    let (ok, stdout, stderr) = run_cli_in(&temp, &open)?;
+    assert!(ok, "ui --open reviewer failed: {stderr}");
+    assert!(stdout.contains("Browser         : http://localhost:7430"));
+
+    let bad = ["ui", "--open=x;rm", "--state-dir", &state_str];
+    let (ok, _, stderr) = run_cli_in(&temp, &bad)?;
+    assert!(!ok, "ui accepted an unknown --open id");
+    assert!(stderr.contains("--open"), "{stderr}");
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}

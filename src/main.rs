@@ -326,21 +326,24 @@ enum Commands {
         #[arg(long)]
         workspaces_root: Option<PathBuf>,
     },
-    /// Start `pixel-agents` + `cheap-otto serve` on the paired M1, tunnel `:7420`/`:7421`, and open Mission Control
+    /// Ensure every dashboard service on the paired Mac, open one SSH tunnel for all of them, and open Mission Control
     Ui {
-        /// Local & remote port for Mission Control (`http://localhost:7420`)
-        #[arg(long, default_value_t = 7420)]
+        /// Mission Control port, on the Mac and on 127.0.0.1 here
+        #[arg(long, default_value_t = MISSION_CONTROL_PORT)]
         port: u16,
-        /// Local & remote port for `pixel-agents` visual office (`http://localhost:7421`)
-        #[arg(long, default_value_t = 7421)]
+        /// Pixel Office port, on the Mac and on 127.0.0.1 here
+        #[arg(long, default_value_t = PIXEL_OFFICE_PORT)]
         pixel_port: u16,
-        /// Optional path to state directory containing `peer.json`
+        /// Optional path to state directory containing `peer.json` and `tunnel.json`
         #[arg(long)]
         state_dir: Option<PathBuf>,
         /// Do not automatically launch the system web browser
         #[arg(long)]
         no_open: bool,
-        /// Start remote services, establish SSH localhost port forwarding, and open the UI
+        /// Dashboard to open in the browser: mission-control, pixel-office or reviewer
+        #[arg(long, value_parser = DashboardId::parse, default_value = "mission-control")]
+        open: DashboardId,
+        /// Install the dashboard services on the Mac, open the shared tunnel, then the browser
         #[arg(long, visible_alias = "apply")]
         execute: bool,
     },
@@ -931,6 +934,16 @@ struct TunnelOptions<'a> {
     execute: bool,
 }
 
+/// Inputs of `cheap-otto ui`.
+struct UiOptions<'a> {
+    state_dir: Option<&'a Path>,
+    port: u16,
+    pixel_port: u16,
+    no_open: bool,
+    open: DashboardId,
+    execute: bool,
+}
+
 /// Inputs of the `dashboards` subcommands other than `tunnel`; each uses the fields it needs.
 struct DashboardOptions<'a> {
     state_dir: Option<&'a Path>,
@@ -1225,8 +1238,16 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             pixel_port,
             state_dir,
             no_open,
+            open,
             execute,
-        } => run_ui(port, pixel_port, state_dir.as_deref(), no_open, execute)?,
+        } => run_ui(&UiOptions {
+            state_dir: state_dir.as_deref(),
+            port,
+            pixel_port,
+            no_open,
+            open,
+            execute,
+        })?,
         Commands::Jobs {
             project,
             state_dir,
@@ -3667,111 +3688,124 @@ fn open_system_browser(url: &str) {
     }
 }
 
-fn run_ui(
-    port: u16,
-    pixel_port: u16,
-    explicit_state_dir: Option<&Path>,
-    no_open: bool,
-    execute: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Ensures the dashboard services, opens the one shared tunnel, checks status and opens the
+/// browser, in that order; a failed install stops before anything else. [R3.1, R3.10, R8.1]
+fn run_ui(opts: &UiOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
-    let state_dir = resolve_active_state_dir(explicit_state_dir, repo_root.as_deref());
+    let state_dir = resolve_active_state_dir(opts.state_dir, repo_root.as_deref());
     let (peer, _) = load_or_default_peer(&state_dir)?;
-    let tunnel = peer.build_port_tunnel(&[3000, 5173, 8080, port, pixel_port])?;
+    let set = DashboardSet::with_ports(opts.port, opts.pixel_port, REVIEWER_PORT)?;
+    let install = build_install_plan(&peer, &set);
+    let tunnel = build_tunnel_spec(&peer, &set);
+    let open_port = set.get(opts.open).map_or(opts.port, |service| service.port);
+    let open_url = format!("http://localhost:{open_port}");
 
-    let remote_start_script = format!(
-        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; \
-         mkdir -p ~/.pixel-agents ~/.cheap-otto ~/otto-workspaces; \
-         if command -v node >/dev/null 2>&1; then \
-           node -e 'const fs=require(\"fs\"),p=process.env.HOME+\"/.pixel-agents/config.json\";let c={{}};try{{c=JSON.parse(fs.readFileSync(p,\"utf8\"))}}catch{{}};c.standalone=Object.assign({{}},c.standalone,{{watchAllSessions:true}});c.hooksConsent=Object.assign({{}},c.hooksConsent,{{claude:\"granted\"}});fs.writeFileSync(p,JSON.stringify(c,null,2));'; \
-         fi; \
-         if command -v pixel-agents >/dev/null 2>&1; then \
-           tmux has-session -t cheapotto-pixel 2>/dev/null || tmux new-session -d -s cheapotto-pixel 'export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec pixel-agents --port {pixel_port} --host 127.0.0.1 --no-terminal'; \
-         fi; \
-         tmux kill-session -t cheapotto-serve 2>/dev/null || true; \
-         tmux new-session -d -s cheapotto-serve 'export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH\"; exec cheap-otto serve --host 127.0.0.1 --port {port} --pixel-port {pixel_port}'"
-    );
-
-    let start_spec = peer.build_ssh_probe_spec(
-        "Start pixel-agents (:7421) and cheap-otto serve (:7420) on paired MacBook",
-        &remote_start_script,
-    );
-
-    let ui_url = format!("http://localhost:{port}");
-    let pixel_url = format!("http://localhost:{pixel_port}");
-
-    println!("=== cheap-otto: Mission Control GUI & Pixel Office ===");
+    println!("=== cheap-otto: dashboards on the paired MacBook ===");
     println!(
         "Paired MacBook  : {} ({})",
         peer.alias,
         peer.ssh_destination()
     );
-    println!("Mission Control : {ui_url}");
-    println!("Pixel Office    : {pixel_url} (embedded + standalone Flat & Diorama views)");
-    println!("Remote Startup  :\n  $ {}", start_spec.display_command());
-
-    if !execute {
+    for service in set.services() {
         println!(
-            "\nPass `--execute` to start the remote M1 daemons, establish SSH port forwarding, and open Mission Control."
+            "{:<16}: http://127.0.0.1:{}",
+            service.display_name, service.port
+        );
+    }
+    println!("Install         : `cheap-otto dashboards install-script` prints the script");
+    for step in &install.display_steps {
+        println!("  * {step}");
+    }
+    println!("Tunnel          :\n  $ {}", tunnel.display_command());
+    println!("Browser         : {open_url}");
+
+    if !opts.execute {
+        // A dry run opens no socket: no SSH, no local port check. [R8.4]
+        println!(
+            "\nPass `--execute` to install the services on the Mac, open the tunnel and open {}.",
+            opts.open.display_name()
         );
         return Ok(());
     }
 
-    println!("\n--- Starting M1 Daemons & Tunnel ---");
-    execute_command_spec(&start_spec)?;
+    println!("\n--- Installing dashboard services ---");
+    // A failed install returns here, before the ssh config, the tunnel or the browser. [R3.10]
+    execute_remote_script(&install.spec)?;
 
     if state_dir.join("peer.json").exists()
         && let Some(home) = user_home_dir()
     {
-        let ssh_dir = home.join(".ssh");
-        let ssh_cfg_path = ssh_dir.join("config");
-        let existing = fs::read_to_string(&ssh_cfg_path).unwrap_or_default();
-        if let Ok(merged) =
-            merge_ssh_config_block(&existing, &peer.alias, &tunnel.ssh_config_snippet)
-        {
-            let _ = fs::write(&ssh_cfg_path, merged);
-        }
+        // The managed block carries no forwards; rewriting it drops those an older build wrote.
+        // A failure here stops `ui` before the tunnel, so the config never silently stays stale.
+        let snippet = peer.build_port_tunnel(&[])?.ssh_config_snippet;
+        rewrite_managed_ssh_config(&home.join(".ssh").join("config"), &peer.alias, &snippet)?;
     }
 
-    if !is_local_port_open(port) || !is_local_port_open(pixel_port) {
-        let port_str = peer.ssh_port.to_string();
-        let dest = peer.ssh_destination();
-        let fwd_ui = format!("127.0.0.1:{port}:127.0.0.1:{port}");
-        let fwd_px = format!("127.0.0.1:{pixel_port}:127.0.0.1:{pixel_port}");
-        println!("  ==> Spawning background SSH tunnel for :{port} and :{pixel_port}");
-        let _ = Command::new("ssh")
-            .args([
-                "-N",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ServerAliveInterval=30",
-                "-p",
-                &port_str,
-                "-L",
-                &fwd_ui,
-                "-L",
-                &fwd_px,
-                &dest,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        for _ in 0..12 {
-            if is_local_port_open(port) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
+    println!("\n--- Opening the dashboard tunnel ---");
+    {
+        let _lock = acquire_tunnel_lock(&state_dir)?;
+        ensure_dashboard_tunnel(&state_dir, &peer, &set)?;
     }
 
-    if !no_open {
-        open_system_browser(&ui_url);
+    warn_unlistening_dashboards(&peer, &set);
+
+    if !opts.no_open {
+        open_system_browser(&open_url);
     }
-    println!("\nMission Control is live at {ui_url}");
+    println!("\n{} is live at {open_url}", opts.open.display_name());
     Ok(())
+}
+
+/// Writes the managed block for `alias` into the SSH config at `path`. Only a missing file counts
+/// as an empty config; any other read, merge or write failure is returned.
+fn rewrite_managed_ssh_config(
+    path: &Path,
+    alias: &str,
+    snippet: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+    let merged = merge_ssh_config_block(&existing, alias, snippet)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, merged)?;
+    Ok(())
+}
+
+/// A dashboard is healthy only when its LaunchAgent is loaded and its port answers; a listener
+/// without a loaded LaunchAgent is some other process holding the port.
+fn dashboard_is_healthy(report: &DashboardStatusReport, id: DashboardId) -> bool {
+    report
+        .dashboards
+        .iter()
+        .any(|status| status.id == id && status.loaded && status.listening)
+}
+
+/// Runs the read-only status probe and warns for each dashboard not healthy on the Mac. The
+/// warning never stops `ui`: the dashboards that are up are still worth opening. [R3.10]
+fn warn_unlistening_dashboards(peer: &PeerNode, set: &DashboardSet) {
+    let spec = build_status_spec(peer, set);
+    let Some(raw) = capture_spec_stdout(&spec) else {
+        println!(
+            "  [warn] The status probe failed; run `cheap-otto dashboards status --execute` to check the services."
+        );
+        return;
+    };
+    let report = parse_status_output(&raw, set);
+    for service in set.services() {
+        if !dashboard_is_healthy(&report, service.id) {
+            println!(
+                "  [warn] {} is not loaded or its port {} is held by another process on the Mac; see {} or run `cheap-otto dashboards status --execute`",
+                service.display_name,
+                service.port,
+                dashboard_log_path(service.id)
+            );
+        }
+    }
 }
 
 /// Where the tunnel record lives inside the state directory. [R3.4]
@@ -4414,6 +4448,7 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cheap_otto::dashboards::DashboardRemoteStatus;
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("cheap-otto-main-{name}-{}", std::process::id()));
@@ -4429,6 +4464,66 @@ mod tests {
             ssh_port: 22,
             started_epoch_secs: 1,
         }
+    }
+
+    fn report_with(id: DashboardId, loaded: bool, listening: bool) -> DashboardStatusReport {
+        DashboardStatusReport {
+            dashboards: vec![DashboardRemoteStatus {
+                id,
+                loaded,
+                pid: None,
+                listening,
+                last_exit: None,
+            }],
+            host: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_is_healthy_only_when_loaded_and_listening() {
+        let id = DashboardId::Reviewer;
+        assert!(dashboard_is_healthy(&report_with(id, true, true), id));
+        assert!(!dashboard_is_healthy(&report_with(id, false, true), id));
+        assert!(!dashboard_is_healthy(&report_with(id, true, false), id));
+    }
+
+    #[test]
+    fn dashboard_is_unhealthy_when_absent_from_the_report() {
+        let report = report_with(DashboardId::MissionControl, true, true);
+        assert!(!dashboard_is_healthy(&report, DashboardId::Reviewer));
+    }
+
+    #[test]
+    fn rewrites_managed_ssh_config_creating_missing_file_and_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("ssh-config-missing");
+        let path = dir.join(".ssh").join("config");
+        rewrite_managed_ssh_config(&path, "otto-mac", "Host otto-mac\n  HostName 192.0.2.10\n")?;
+        let written = fs::read_to_string(&path)?;
+        assert!(written.contains("# --- BEGIN cheap-otto (otto-mac) ---"));
+        assert!(written.contains("HostName 192.0.2.10"));
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_managed_ssh_config_propagates_read_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = temp_state_dir("ssh-config-dir");
+        fs::create_dir_all(&dir)?;
+        let result = rewrite_managed_ssh_config(&dir, "otto-mac", "Host otto-mac\n");
+        assert!(result.is_err());
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_managed_ssh_config_rejects_unsafe_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("ssh-config-alias");
+        let path = dir.join("config");
+        assert!(rewrite_managed_ssh_config(&path, "x; rm -rf ~", "Host x\n").is_err());
+        assert!(!path.exists());
+        Ok(())
     }
 
     fn dir_entries(dir: &Path) -> Vec<String> {
