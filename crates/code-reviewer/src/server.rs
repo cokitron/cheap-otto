@@ -49,6 +49,10 @@ pub const DEFAULT_PIXEL_PORT: u16 = 7421;
 /// this one mirror the registry in `src/dashboards.rs` of the root crate, the source of truth;
 /// `tests/dashboard_ports.rs` there fails if they drift.
 pub const DEFAULT_MISSION_CONTROL_PORT: u16 = 7420;
+/// The Pixel Office LaunchAgent that `cheap-otto dashboards install` loads on the Mac. It mirrors
+/// the registry in `src/dashboards.rs` of the root crate, the source of truth;
+/// `tests/dashboard_labels.rs` there fails if they drift.
+pub const PIXEL_OFFICE_LAUNCHD_LABEL: &str = "com.cheapotto.dashboards.pixel-office";
 
 struct CachedHostProbe {
     captured_at: Instant,
@@ -1824,6 +1828,69 @@ fn build_pixel_office_payload() -> Value {
     }
 }
 
+/// What the Pixel Office start button does once the port is known to be closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelStartAction {
+    /// `launchd` accepted the kickstart, so wait for the port.
+    WaitForService,
+    /// The kickstart failed on macOS: report it and never spawn an orphan.
+    ReportNotInstalled,
+    /// No `launchd` on this host, so spawn `pixel-agents` directly.
+    SpawnDirectly,
+}
+
+/// Decides the start button's action. On macOS only the LaunchAgent may own the Pixel Office
+/// port: a process spawned here would live outside `launchd` and hold the port the service
+/// needs, so a failed (or missing) kickstart is reported instead of falling back to a spawn.
+fn pixel_start_action(is_macos: bool, kickstart_ok: Option<bool>) -> PixelStartAction {
+    match (is_macos, kickstart_ok) {
+        (false, _) => PixelStartAction::SpawnDirectly,
+        (true, Some(true)) => PixelStartAction::WaitForService,
+        (true, Some(false) | None) => PixelStartAction::ReportNotInstalled,
+    }
+}
+
+/// The error the start button returns when `launchctl kickstart` fails on macOS.
+fn pixel_office_not_installed_error(detail: &str) -> String {
+    format!(
+        "the Pixel Office service ({PIXEL_OFFICE_LAUNCHD_LABEL}) is not installed or could not be started ({detail}); install it with `cheap-otto dashboards install --execute`"
+    )
+}
+
+/// Runs `launchctl kickstart gui/<uid>/<label>` for the Pixel Office LaunchAgent, with the uid
+/// from `id -u`. Both spawns take discrete args and run without GitHub credentials.
+fn kickstart_pixel_office_service() -> Result<(), String> {
+    let mut id_cmd = Command::new("id");
+    id_cmd.arg("-u").stdin(Stdio::null()).stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut id_cmd);
+    let id_out = id_cmd
+        .output()
+        .map_err(|e| format!("`id -u` failed to run: {e}"))?;
+    let uid = String::from_utf8_lossy(&id_out.stdout).trim().to_string();
+    // The uid lands in a launchctl domain target, so accept digits only.
+    if !id_out.status.success() || uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("`id -u` did not print a numeric uid".to_string());
+    }
+
+    let mut cmd = Command::new("launchctl");
+    cmd.args([
+        "kickstart".to_string(),
+        format!("gui/{uid}/{PIXEL_OFFICE_LAUNCHD_LABEL}"),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
+    let status = cmd
+        .status()
+        .map_err(|e| format!("`launchctl kickstart` failed to run: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`launchctl kickstart` exited with {status}"))
+    }
+}
+
 fn start_pixel_agents_server() -> Result<Value, String> {
     let existing = build_pixel_office_payload();
     if existing["available"].as_bool() == Some(true) {
@@ -1833,6 +1900,39 @@ fn start_pixel_agents_server() -> Result<Value, String> {
         }));
     }
 
+    let is_macos = cfg!(target_os = "macos");
+    let kickstart = is_macos.then(kickstart_pixel_office_service);
+    match pixel_start_action(is_macos, kickstart.as_ref().map(Result::is_ok)) {
+        PixelStartAction::WaitForService => {}
+        PixelStartAction::ReportNotInstalled => {
+            let detail = match kickstart {
+                Some(Err(detail)) => detail,
+                Some(Ok(())) | None => "kickstart was not attempted".to_string(),
+            };
+            return Err(pixel_office_not_installed_error(&detail));
+        }
+        PixelStartAction::SpawnDirectly => spawn_pixel_agents_directly()?,
+    }
+
+    for _ in 0..15 {
+        thread::sleep(Duration::from_millis(200));
+        let p = build_pixel_office_payload();
+        if p["available"].as_bool() == Some(true) {
+            return Ok(json!({
+                "ok": true,
+                "message": format!("pixel-agents started on 127.0.0.1:{}", p["pixel_port"])
+            }));
+        }
+    }
+
+    Ok(json!({
+        "ok": true,
+        "message": "Started pixel-agents; refreshing connection..."
+    }))
+}
+
+/// Spawns `pixel-agents` directly. Only used off macOS, where there is no LaunchAgent.
+fn spawn_pixel_agents_directly() -> Result<(), String> {
     let candidate_bins = ["/opt/homebrew/bin/pixel-agents", "pixel-agents"];
     let bin = candidate_bins
         .iter()
@@ -1858,25 +1958,11 @@ fn start_pixel_agents_server() -> Result<Value, String> {
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
 
     cmd.spawn()
-        .map_err(|e| format!("failed to launch `{}`: {}", bin, e))?;
-
-    for _ in 0..15 {
-        thread::sleep(Duration::from_millis(200));
-        let p = build_pixel_office_payload();
-        if p["available"].as_bool() == Some(true) {
-            return Ok(json!({
-                "ok": true,
-                "message": format!("pixel-agents started on 127.0.0.1:{}", p["pixel_port"])
-            }));
-        }
-    }
-
-    Ok(json!({
-        "ok": true,
-        "message": "Launched pixel-agents background server; refreshing connection..."
-    }))
+        .map(|_| ())
+        .map_err(|e| format!("failed to launch `{}`: {}", bin, e))
 }
 
 #[cfg(test)]
@@ -1927,6 +2013,31 @@ mod tests {
             .collect();
         assert!(removed.contains(&"GH_TOKEN".to_string()));
         assert!(removed.contains(&"GITHUB_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn pixel_start_never_spawns_directly_on_macos() {
+        assert_eq!(
+            pixel_start_action(true, Some(true)),
+            PixelStartAction::WaitForService
+        );
+        assert_eq!(
+            pixel_start_action(true, Some(false)),
+            PixelStartAction::ReportNotInstalled
+        );
+        assert_eq!(
+            pixel_start_action(true, None),
+            PixelStartAction::ReportNotInstalled
+        );
+        for kickstart_ok in [None, Some(true), Some(false)] {
+            assert_eq!(
+                pixel_start_action(false, kickstart_ok),
+                PixelStartAction::SpawnDirectly
+            );
+        }
+        let error = pixel_office_not_installed_error("exit status: 113");
+        assert!(error.contains("cheap-otto dashboards install --execute"));
+        assert!(error.contains(PIXEL_OFFICE_LAUNCHD_LABEL));
     }
 
     #[test]

@@ -7,6 +7,11 @@ use cheap_otto::agent_session::{
 use cheap_otto::arbiter::{ArbiterPolicy, ArbiterSnapshot};
 use cheap_otto::bridge::{PeerNode, merge_ssh_config_block};
 use cheap_otto::command::CommandSpec;
+use cheap_otto::dashboards::{
+    DashboardSet, MISSION_CONTROL_PORT, PIXEL_OFFICE_PORT, REVIEWER_PORT, TunnelDecision,
+    TunnelFailure, TunnelRecord, build_tunnel_spec, command_line_is_recorded_tunnel, decide_tunnel,
+    describe_tunnel_failure, recorded_tunnel_covers,
+};
 use cheap_otto::doctor::{
     CheckStatus, ProbeSource, RawTelemetrySnapshot, SystemProbeInput, parse_active_otto_sessions,
 };
@@ -46,7 +51,7 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -446,6 +451,40 @@ enum Commands {
         #[arg(long)]
         remote: bool,
     },
+    /// Manage the dashboards (Mission Control, Pixel Office, Reviewer) on the paired MacBook
+    Dashboards {
+        #[command(subcommand)]
+        action: DashboardCommands,
+    },
+}
+
+/// Flags every `dashboards` subcommand shares.
+#[derive(Args, Debug)]
+struct DashboardArgs {
+    /// Optional path to state directory containing `peer.json` and `tunnel.json`
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Mission Control port, on the Mac and on 127.0.0.1 here
+    #[arg(long, default_value_t = MISSION_CONTROL_PORT)]
+    port: u16,
+    /// Pixel Office port, on the Mac and on 127.0.0.1 here
+    #[arg(long, default_value_t = PIXEL_OFFICE_PORT)]
+    pixel_port: u16,
+}
+
+#[derive(Subcommand, Debug)]
+enum DashboardCommands {
+    /// Show, start or stop the one SSH tunnel that forwards every dashboard port (`tunnel.json`)
+    Tunnel {
+        #[command(flatten)]
+        common: DashboardArgs,
+        /// Stop the tunnel recorded in `tunnel.json` instead of starting one
+        #[arg(long)]
+        stop: bool,
+        /// Start the tunnel (or, with `--stop`, stop it); without this only the plan is printed
+        #[arg(long, visible_alias = "apply")]
+        execute: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -815,6 +854,14 @@ struct RunsOptions<'a> {
     id: Option<&'a str>,
     limit: usize,
     state_dir: Option<&'a Path>,
+    execute: bool,
+}
+
+struct TunnelOptions<'a> {
+    state_dir: Option<&'a Path>,
+    port: u16,
+    pixel_port: u16,
+    stop: bool,
     execute: bool,
 }
 
@@ -1204,6 +1251,19 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             apply,
             remote,
         } => run_restore(state_dir.as_deref(), unload_schedules, apply, remote)?,
+        Commands::Dashboards { action } => match action {
+            DashboardCommands::Tunnel {
+                common,
+                stop,
+                execute,
+            } => run_dashboards_tunnel(&TunnelOptions {
+                state_dir: common.state_dir.as_deref(),
+                port: common.port,
+                pixel_port: common.pixel_port,
+                stop,
+                execute,
+            })?,
+        },
     }
 
     Ok(())
@@ -3615,4 +3675,513 @@ fn run_ui(
     }
     println!("\nMission Control is live at {ui_url}");
     Ok(())
+}
+
+/// Where the tunnel record lives inside the state directory. [R3.4]
+const TUNNEL_RECORD_FILE: &str = "tunnel.json";
+/// How long a fresh tunnel gets to open every forward. [R3.6]
+const TUNNEL_READY_SECS: u64 = 5;
+/// How long a stopped tunnel gets to release its ports before they count as foreign. [R3.5]
+const TUNNEL_STOP_GRACE_SECS: u64 = 2;
+
+/// Loads `tunnel.json`; a missing or unreadable record is no record.
+fn load_tunnel_record(state_dir: &Path) -> Option<TunnelRecord> {
+    let raw = fs::read_to_string(state_dir.join(TUNNEL_RECORD_FILE)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Writes `tunnel.json` through a sibling temp file and a rename, so a crash or a concurrent
+/// reader never sees a torn record of a live tunnel.
+fn save_tunnel_record(
+    state_dir: &Path,
+    record: &TunnelRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(state_dir)?;
+    let target = state_dir.join(TUNNEL_RECORD_FILE);
+    let temp = state_dir.join(format!("{TUNNEL_RECORD_FILE}.{}.tmp", std::process::id()));
+    let written = fs::write(&temp, serde_json::to_string_pretty(record)?)
+        .and_then(|()| fs::rename(&temp, &target));
+    if let Err(err) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+/// The inter-process lock file that serializes tunnel start, replace and stop.
+const TUNNEL_LOCK_FILE: &str = "tunnel.lock";
+
+/// Holds the OS file lock on `tunnel.lock`; the lock is released when the handle drops, so a
+/// crashed process never leaves a stale lock behind.
+#[derive(Debug)]
+struct TunnelLock {
+    _file: fs::File,
+}
+
+/// Takes the tunnel lock without blocking, so a second CLI process fails fast instead of racing
+/// the first one on `tunnel.json` and the ssh spawn.
+fn acquire_tunnel_lock(state_dir: &Path) -> Result<TunnelLock, Box<dyn std::error::Error>> {
+    fs::create_dir_all(state_dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state_dir.join(TUNNEL_LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(TunnelLock { _file: file }),
+        Err(fs::TryLockError::WouldBlock) => Err(format!(
+            "another cheap-otto process is changing the dashboard tunnel ({TUNNEL_LOCK_FILE} is held); retry when it finishes"
+        )
+        .into()),
+        Err(fs::TryLockError::Error(err)) => Err(err.into()),
+    }
+}
+
+fn remove_tunnel_record(state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match fs::remove_file(state_dir.join(TUNNEL_RECORD_FILE)) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+        _ => Ok(()),
+    }
+}
+
+/// The full command line of a running process, or `None` when it is gone or unreadable.
+/// `pid` is a number, so nothing operator-supplied reaches either command.
+fn process_command_line(pid: u32) -> Option<String> {
+    let line = if cfg!(target_os = "windows") {
+        let query =
+            format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine");
+        capture_command_stdout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &query],
+        )?
+    } else {
+        capture_command_stdout("ps", &["-p", &pid.to_string(), "-o", "args="])?
+    };
+    let line = line.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// True only when the recorded pid is alive and its command line is exactly the recorded
+/// tunnel's, so a recycled pid (someone's own ssh session) is never signalled. [R3.5]
+fn recorded_tunnel_is_running(record: &TunnelRecord) -> bool {
+    process_command_line(record.pid)
+        .is_some_and(|line| command_line_is_recorded_tunnel(&line, record))
+}
+
+/// Terminates a process; callers verify it with [`recorded_tunnel_is_running`] first.
+fn terminate_process(pid: u32) -> bool {
+    let pid = pid.to_string();
+    let mut command = if cfg!(target_os = "windows") {
+        let mut taskkill = Command::new("taskkill");
+        taskkill.args(["/PID", &pid, "/F"]);
+        taskkill
+    } else {
+        let mut kill = Command::new("kill");
+        kill.arg(&pid);
+        kill
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Terminates a verified-running recorded tunnel, or errors and keeps the record so the live
+/// process is never left running untracked.
+fn terminate_recorded_tunnel(record: &TunnelRecord) -> Result<(), Box<dyn std::error::Error>> {
+    if terminate_process(record.pid) {
+        return Ok(());
+    }
+    Err(format!(
+        "could not stop recorded tunnel pid {}; {TUNNEL_RECORD_FILE} kept",
+        record.pid
+    )
+    .into())
+}
+
+/// True when a verified-running recorded tunnel must be stopped before a new one starts: it does
+/// not cover the ports (conflict), or no port answers yet (start). A new record must never
+/// overwrite a live one.
+fn live_tunnel_needs_replacement(decision: &TunnelDecision, running: bool) -> bool {
+    running && !matches!(decision, TunnelDecision::AlreadyUp)
+}
+
+/// Stops the recorded tunnel, drops its record and waits for its ports to release; ports still
+/// answering after the grace period belong to a foreign process.
+fn replace_recorded_tunnel(
+    state_dir: &Path,
+    record: &TunnelRecord,
+    ports: &[u16],
+) -> Result<(), Box<dyn std::error::Error>> {
+    terminate_recorded_tunnel(record)?;
+    remove_tunnel_record(state_dir)?;
+    let deadline = Instant::now() + Duration::from_secs(TUNNEL_STOP_GRACE_SECS);
+    let still_held = loop {
+        let still_held = ports_answering(ports, true);
+        if still_held.is_empty() || Instant::now() >= deadline {
+            break still_held;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if still_held.is_empty() {
+        Ok(())
+    } else {
+        Err(foreign_holder_error(&still_held).into())
+    }
+}
+
+/// The ports in `ports` that answer (or, with `answering == false`, do not) on 127.0.0.1.
+fn ports_answering(ports: &[u16], answering: bool) -> Vec<u16> {
+    ports
+        .iter()
+        .copied()
+        .filter(|&port| is_local_port_open(port) == answering)
+        .collect()
+}
+
+/// The error for ports held by a process cheap-otto did not record, with the command that
+/// finds the holder of each one. [R3.2, R3.5]
+fn foreign_holder_error(held: &[u16]) -> String {
+    let ports: Vec<String> = held.iter().map(u16::to_string).collect();
+    let finders: Vec<String> = held
+        .iter()
+        .map(|port| {
+            if cfg!(target_os = "windows") {
+                format!("netstat -ano | findstr :{port}")
+            } else {
+                format!("lsof -nP -iTCP:{port} -sTCP:LISTEN")
+            }
+        })
+        .collect();
+    format!(
+        "Ports {} already answer on 127.0.0.1, but not through the tunnel cheap-otto recorded, so no tunnel was started. Find the holder with: {}",
+        ports.join(", "),
+        finders.join(" ; ")
+    )
+}
+
+fn describe_tunnel_record(record: &TunnelRecord) -> String {
+    let ports: Vec<String> = record.ports.iter().map(u16::to_string).collect();
+    format!(
+        "pid {} to {} (SSH port {}) forwarding {}, started at epoch {}",
+        record.pid,
+        record.destination,
+        record.ssh_port,
+        ports.join(", "),
+        record.started_epoch_secs
+    )
+}
+
+/// Makes every dashboard port reachable through exactly one recorded SSH tunnel: reuse the
+/// recorded tunnel when it covers the current peer and ports, replace it when it does not, and
+/// refuse when an unrecorded process holds the ports. [R3.1, R3.2, R3.4, R3.5, R3.6]
+fn ensure_dashboard_tunnel(
+    state_dir: &Path,
+    peer: &PeerNode,
+    set: &DashboardSet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ports = set.ports();
+    let local: Vec<(u16, bool)> = ports
+        .iter()
+        .map(|&port| (port, is_local_port_open(port)))
+        .collect();
+    let record = load_tunnel_record(state_dir);
+    let running = record.as_ref().is_some_and(recorded_tunnel_is_running);
+    if let Some(stale) = record.as_ref().filter(|_| !running) {
+        // An unverifiable record is stale: drop it and signal nothing. [R3.5]
+        println!(
+            "  [info] Removing stale tunnel record ({}); that pid was not signalled.",
+            describe_tunnel_record(stale)
+        );
+        remove_tunnel_record(state_dir)?;
+    }
+    let covers = recorded_tunnel_covers(record.as_ref(), running, set, peer);
+
+    let decision = decide_tunnel(&local, covers);
+    match &decision {
+        TunnelDecision::AlreadyUp => {
+            if let Some(record) = &record {
+                println!(
+                    "  ==> Tunnel already up ({})",
+                    describe_tunnel_record(record)
+                );
+            }
+            return Ok(());
+        }
+        TunnelDecision::Conflict { held, .. } if !running => {
+            return Err(foreign_holder_error(held).into());
+        }
+        TunnelDecision::Start | TunnelDecision::Conflict { .. } => {}
+    }
+    if let Some(record) = record.filter(|_| live_tunnel_needs_replacement(&decision, running)) {
+        let missing: Vec<u16> = local
+            .iter()
+            .filter(|(_, answers)| !answers)
+            .map(|(port, _)| *port)
+            .collect();
+        println!(
+            "  ==> Replacing the recorded tunnel ({}); ports not answering here: {missing:?}",
+            describe_tunnel_record(&record)
+        );
+        replace_recorded_tunnel(state_dir, &record, &ports)?;
+    }
+
+    start_dashboard_tunnel(state_dir, peer, set)
+}
+
+/// Where a freshly spawned tunnel stands on one readiness poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TunnelReadiness {
+    Ready,
+    ExitedEarly,
+    Waiting,
+}
+
+/// An exited ssh child is a failure even when every port answers, because the answer then comes
+/// from some other process and no tunnel is live.
+fn tunnel_readiness(child_exited: bool, unanswered: &[u16]) -> TunnelReadiness {
+    if child_exited {
+        TunnelReadiness::ExitedEarly
+    } else if unanswered.is_empty() {
+        TunnelReadiness::Ready
+    } else {
+        TunnelReadiness::Waiting
+    }
+}
+
+/// Spawns the tunnel, records it, and waits for every forward to answer. On failure the child
+/// is stopped and reaped, the record removed, and the unanswered ports named. [R3.4, R3.6]
+fn start_dashboard_tunnel(
+    state_dir: &Path,
+    peer: &PeerNode,
+    set: &DashboardSet,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec = build_tunnel_spec(peer, set);
+    let ports = set.ports();
+    println!("  ==> {} ($ {})", spec.description, spec.display_command());
+    let mut child = Command::new(&spec.program)
+        .args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+    let record = TunnelRecord {
+        pid: child.id(),
+        ports: ports.clone(),
+        destination: peer.ssh_destination(),
+        ssh_port: peer.ssh_port,
+        started_epoch_secs: current_epoch_secs(),
+    };
+    if let Err(err) = save_tunnel_record(state_dir, &record) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(TUNNEL_READY_SECS);
+    let (failure, unanswered) = loop {
+        // Check the child first: another process may answer these ports after ssh died.
+        let exited = child.try_wait().ok().flatten();
+        let unanswered = ports_answering(&ports, false);
+        match tunnel_readiness(exited.is_some(), &unanswered) {
+            TunnelReadiness::Ready => {
+                println!("  ==> Tunnel up ({})", describe_tunnel_record(&record));
+                return Ok(());
+            }
+            TunnelReadiness::ExitedEarly => {
+                let status = exited.map(|status| status.to_string()).unwrap_or_default();
+                break (TunnelFailure::ExitedEarly { status }, unanswered);
+            }
+            TunnelReadiness::Waiting => {}
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let waited_secs = TUNNEL_READY_SECS;
+            break (TunnelFailure::TimedOut { waited_secs }, unanswered);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    remove_tunnel_record(state_dir)?;
+    let ssh_test = format!("ssh -p {} {} true", peer.ssh_port, peer.ssh_destination());
+    Err(describe_tunnel_failure(&failure, &unanswered, &ssh_test).into())
+}
+
+/// Stops the recorded tunnel if it is verifiably ours and removes the record; a verified tunnel
+/// that cannot be stopped is an error and keeps the record.
+fn stop_dashboard_tunnel(state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(record) = load_tunnel_record(state_dir) else {
+        println!("No recorded tunnel.");
+        return Ok(());
+    };
+    if recorded_tunnel_is_running(&record) {
+        terminate_recorded_tunnel(&record)?;
+        println!("  ==> Stopped tunnel pid {}", record.pid);
+    } else {
+        println!(
+            "  [info] Recorded pid {} is not the recorded tunnel any more; it was not signalled.",
+            record.pid
+        );
+    }
+    remove_tunnel_record(state_dir)?;
+    println!("Removed {TUNNEL_RECORD_FILE}.");
+    Ok(())
+}
+
+fn run_dashboards_tunnel(opts: &TunnelOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let repo_root = discover_workspace(None).ok().and_then(|w| w.repo_root);
+    let state_dir = resolve_active_state_dir(opts.state_dir, repo_root.as_deref());
+    let record = load_tunnel_record(&state_dir);
+
+    println!("=== cheap-otto: dashboard tunnel ===");
+    println!(
+        "Recorded tunnel : {}",
+        record
+            .as_ref()
+            .map_or_else(|| "none".to_string(), describe_tunnel_record)
+    );
+
+    if opts.stop {
+        if opts.execute {
+            let _lock = acquire_tunnel_lock(&state_dir)?;
+            return stop_dashboard_tunnel(&state_dir);
+        }
+        match &record {
+            Some(record) => println!(
+                "\nPass `--stop --execute` to stop pid {} (only if it is still the recorded tunnel) and remove {TUNNEL_RECORD_FILE}.",
+                record.pid
+            ),
+            None => println!("No recorded tunnel."),
+        }
+        return Ok(());
+    }
+
+    let (peer, _) = load_or_default_peer(&state_dir)?;
+    let set = DashboardSet::with_ports(opts.port, opts.pixel_port, REVIEWER_PORT)?;
+    let spec = build_tunnel_spec(&peer, &set);
+    println!(
+        "Paired MacBook  : {} ({})",
+        peer.alias,
+        peer.ssh_destination()
+    );
+    for service in set.services() {
+        println!(
+            "{:<16}: http://127.0.0.1:{}",
+            service.display_name, service.port
+        );
+    }
+    println!("Tunnel          :\n  $ {}", spec.display_command());
+
+    if !opts.execute {
+        println!(
+            "\nPass `--execute` to start the tunnel, or reuse the recorded one when it already covers every port."
+        );
+        return Ok(());
+    }
+    let _lock = acquire_tunnel_lock(&state_dir)?;
+    ensure_dashboard_tunnel(&state_dir, &peer, &set)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_state_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("cheap-otto-main-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn sample_record(pid: u32) -> TunnelRecord {
+        TunnelRecord {
+            pid,
+            ports: vec![7420, 7421, 7430],
+            destination: "user@otto-mac".to_string(),
+            ssh_port: 22,
+            started_epoch_secs: 1,
+        }
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn saves_tunnel_record_atomically_without_leftover_temp_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("save");
+        save_tunnel_record(&dir, &sample_record(10))?;
+        assert_eq!(load_tunnel_record(&dir), Some(sample_record(10)));
+        assert_eq!(dir_entries(&dir), vec![TUNNEL_RECORD_FILE.to_string()]);
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn overwriting_tunnel_record_leaves_valid_json() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("overwrite");
+        save_tunnel_record(&dir, &sample_record(10))?;
+        save_tunnel_record(&dir, &sample_record(11))?;
+        assert_eq!(load_tunnel_record(&dir), Some(sample_record(11)));
+        assert_eq!(dir_entries(&dir), vec![TUNNEL_RECORD_FILE.to_string()]);
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn tunnel_lock_blocks_a_second_holder_until_the_first_drops()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_state_dir("lock");
+        let first = acquire_tunnel_lock(&dir)?;
+        let err = acquire_tunnel_lock(&dir).expect_err("second acquire must fail while held");
+        assert!(err.to_string().contains(TUNNEL_LOCK_FILE));
+        drop(first);
+        let _second = acquire_tunnel_lock(&dir)?;
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn exited_child_is_a_failure_even_when_every_port_answers() {
+        assert_eq!(tunnel_readiness(true, &[]), TunnelReadiness::ExitedEarly);
+        assert_eq!(
+            tunnel_readiness(true, &[7430]),
+            TunnelReadiness::ExitedEarly
+        );
+    }
+
+    #[test]
+    fn running_child_is_ready_only_when_every_port_answers() {
+        assert_eq!(tunnel_readiness(false, &[]), TunnelReadiness::Ready);
+        assert_eq!(tunnel_readiness(false, &[7430]), TunnelReadiness::Waiting);
+    }
+
+    #[test]
+    fn live_recorded_tunnel_is_replaced_before_any_start_or_conflict() {
+        let conflict = TunnelDecision::Conflict {
+            held: vec![7420],
+            missing: vec![7430],
+        };
+        assert!(live_tunnel_needs_replacement(&TunnelDecision::Start, true));
+        assert!(live_tunnel_needs_replacement(&conflict, true));
+        assert!(!live_tunnel_needs_replacement(
+            &TunnelDecision::AlreadyUp,
+            true
+        ));
+        assert!(!live_tunnel_needs_replacement(
+            &TunnelDecision::Start,
+            false
+        ));
+        assert!(!live_tunnel_needs_replacement(&conflict, false));
+    }
 }
