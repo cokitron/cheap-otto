@@ -1153,10 +1153,7 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                     && !open_nums.contains(&tpr.pr_number)
                 {
                     tpr.is_open = false;
-                    tpr.open_feedback_count = 0;
-                    tpr.staged_patch = None;
-                    tpr.staged_commit_message = None;
-                    tpr.pending_items.clear();
+                    clear_staged_state(tpr);
                     prune_non_actionable_handled_items(tpr, false);
                 }
             }
@@ -1202,12 +1199,30 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                 existing.head_ref = snap.head_ref.clone();
                 existing.base_ref = snap.base_ref.clone();
                 existing.head_sha = Some(snap.head_sha.clone());
-                existing.open_feedback_count = actionable_count;
+                // Open-but-ineligible PRs (draft, fork, disallowed author) must not keep a
+                // staged patch that could still be approved or pushed.
+                let eligible = repo_cfg.tender_enabled
+                    && !snap.is_draft
+                    && !snap.is_fork
+                    && cfg.is_tender_author_allowed(repo_cfg, &snap.author);
+                if eligible {
+                    existing.open_feedback_count = actionable_count;
+                } else {
+                    clear_staged_state(existing);
+                }
                 reconcile_pr_handled_items_and_status(existing, snap, &newly_resolved_threads);
             }
         }
     })
     .map_err(|e| e.to_string())
+}
+
+/// Drops any staged patch, pending items, and the open feedback count for a PR.
+fn clear_staged_state(tpr: &mut TenderPrState) {
+    tpr.open_feedback_count = 0;
+    tpr.staged_patch = None;
+    tpr.staged_commit_message = None;
+    tpr.pending_items.clear();
 }
 
 fn prune_non_actionable_handled_items(tpr: &mut TenderPrState, has_inline_threads: bool) {
@@ -4350,6 +4365,113 @@ gdocs_bin = "gdocs"
         .unwrap();
         let closed = LedgerStore::load_or_default(&state_dir).unwrap();
         assert!(!closed.tender_pull_requests["acme/web#11"].is_open);
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn sync_watched_prs_clears_staged_state_for_open_ineligible_prs() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_ineligible_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
+        };
+        let snap = |is_draft: bool| TenderPrSnapshot {
+            pr_number: 20,
+            title: "Add billing".to_string(),
+            author: cfg.accounts.primary.clone(),
+            is_draft,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat/billing".to_string(),
+            head_sha: "aaa1111".to_string(),
+            feedback_items: Vec::new(),
+        };
+        let seed_staged_state = || {
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                if let Some(tpr) = store.tender_pull_requests.get_mut("acme/web#20") {
+                    tpr.staged_patch = Some("diff --git a/x b/x".to_string());
+                    tpr.staged_commit_message = Some("fix: x".to_string());
+                    tpr.pending_items.push(TenderHandledItem {
+                        feedback_id: "thread:PRRT_1:100".to_string(),
+                        source_author: "cubic-dev-ai".to_string(),
+                        path: Some("src/x.rs".to_string()),
+                        line: Some(1),
+                        thread_node_id: Some("PRRT_1".to_string()),
+                        reply_comment_id: Some(100),
+                        summary: "P2: fix x".to_string(),
+                        action: TenderActionStatus::Fixed,
+                        reply_text: "Fixed".to_string(),
+                        commit_sha: None,
+                        issue_number: None,
+                        issue_url: None,
+                        draft_issue_title: None,
+                        draft_issue_body: None,
+                        resolved_thread: false,
+                        reply_posted: false,
+                    });
+                    tpr.open_feedback_count = 1;
+                }
+            })
+            .unwrap();
+        };
+
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(false)]).unwrap();
+
+        // Eligible snapshot leaves staged state intact.
+        seed_staged_state();
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(false)]).unwrap();
+        let kept = LedgerStore::load_or_default(&state_dir).unwrap();
+        let tpr = &kept.tender_pull_requests["acme/web#20"];
+        assert!(tpr.staged_patch.is_some());
+        assert!(tpr.staged_commit_message.is_some());
+        assert_eq!(tpr.pending_items.len(), 1);
+
+        // PR turns draft while still open: staged state is cleared, PR stays open.
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(true)]).unwrap();
+        let cleared = LedgerStore::load_or_default(&state_dir).unwrap();
+        let tpr = &cleared.tender_pull_requests["acme/web#20"];
+        assert!(tpr.is_open);
+        assert!(tpr.staged_patch.is_none());
+        assert!(tpr.staged_commit_message.is_none());
+        assert!(tpr.pending_items.is_empty());
+        assert_eq!(tpr.open_feedback_count, 0);
 
         let _ = fs::remove_dir_all(&state_dir);
     }

@@ -860,6 +860,12 @@ pub fn append_kb_entry(
         return Ok(path);
     }
 
+    // Serialize read, dedup check and append per overlay so concurrent writers cannot add duplicates.
+    // The `.lock` suffix keeps the file out of the KB merge, which only reads named `*.md` files.
+    let _kb_lock = acquire_file_spinlock(
+        &path.with_file_name(format!("{filename}.lock")),
+        Duration::from_secs(10),
+    );
     let merged_existing = load_brain_kb_section(workspace_root, brain_id, filename);
     let needle = kb_line_body(clean_rule);
     if merged_existing.lines().any(|l| kb_line_body(l) == needle) {
@@ -1920,6 +1926,35 @@ mod tests {
             "unexpected KB contents: {stored}"
         );
         assert!(stored.lines().any(|l| l.ends_with("** validate input")));
+        let _ = fs::remove_dir_all(&ws);
+        Ok(())
+    }
+
+    #[test]
+    fn append_kb_entry_concurrent_writers_add_single_bullet() -> Result<(), BrainError> {
+        let ws = std::env::temp_dir().join(format!("otto_kb_concurrent_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        let brain = SPECIALIST_BRAINS[0];
+        let rule = "Serialize KB appends per overlay";
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let ws = ws.clone();
+                std::thread::spawn(move || append_kb_entry(&ws, brain, "lesson", rule))
+            })
+            .collect();
+        let mut path = None;
+        for h in handles {
+            path = Some(h.join().expect("writer thread panicked")?);
+        }
+
+        let path = path.expect("at least one writer ran");
+        let stored = fs::read_to_string(&path)?;
+        let matching = stored
+            .lines()
+            .filter(|l| kb_line_body(l) == kb_line_body(rule))
+            .count();
+        assert_eq!(matching, 1, "unexpected KB contents: {stored}");
         let _ = fs::remove_dir_all(&ws);
         Ok(())
     }
