@@ -31,9 +31,10 @@ pub enum DashboardError {
     /// A dashboard id given on the command line or in a request is not known.
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
-    /// A deserialized set does not list each dashboard exactly once, in registry order.
+    /// A deserialized set differs from the registry in anything but ports: ids, order, names,
+    /// LaunchAgent labels or managers.
     #[error(
-        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+        "a dashboard set must match the registry apart from ports: mission-control, pixel-office and reviewer once each, in that order, with the registry's names, labels and managers"
     )]
     UnexpectedServices,
 }
@@ -147,9 +148,16 @@ impl TryFrom<DashboardSetFields> for DashboardSet {
         }
         let ports: Vec<u16> = fields.services.iter().map(|service| service.port).collect();
         validate_ports(&ports)?;
-        Ok(Self {
-            services: fields.services,
-        })
+        let &[mission_control, pixel_office, reviewer] = ports.as_slice() else {
+            return Err(DashboardError::UnexpectedServices);
+        };
+        // Labels, managers and display names come from the registry, so a payload that
+        // disagrees with it must not select the wrong LaunchAgents in `managed()`.
+        let set = Self::from_ports(mission_control, pixel_office, reviewer);
+        if set.services != fields.services {
+            return Err(DashboardError::UnexpectedServices);
+        }
+        Ok(set)
     }
 }
 
@@ -384,6 +392,40 @@ mod tests {
         assert!(parse(reordered).is_err());
 
         assert_eq!(parse(good)?, DashboardSet::standard());
+        Ok(())
+    }
+
+    #[test]
+    fn deserializing_rejects_services_that_differ_from_the_registry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good = serde_json::to_value(DashboardSet::standard())?;
+        let parse = |value: serde_json::Value| serde_json::from_value::<DashboardSet>(value);
+        let message = DashboardError::UnexpectedServices.to_string();
+
+        let mut manager = good.clone();
+        manager["services"][2]["manager"] = serde_json::json!("cheap-otto");
+        let err = parse(manager)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let mut label = good.clone();
+        label["services"][0]["launchd_label"] = serde_json::json!("com.cheapotto.other");
+        let err = parse(label)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let mut name = good.clone();
+        name["services"][1]["display_name"] = serde_json::json!("Renamed");
+        let err = parse(name).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let custom = DashboardSet::with_ports(8420, 8421, 8430)?;
+        let round_trip = parse(serde_json::to_value(&custom)?)?;
+        assert_eq!(round_trip, custom);
         Ok(())
     }
 }
