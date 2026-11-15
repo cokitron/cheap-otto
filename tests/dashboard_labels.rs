@@ -19,7 +19,9 @@ fn reviewer_pixel_office_label_matches_the_registry() {
         label.unwrap_or_default()
     );
     assert!(
-        REVIEWER_SERVER_SOURCE.contains(&declaration),
+        REVIEWER_SERVER_SOURCE
+            .lines()
+            .any(|line| line.trim() == declaration),
         "crates/code-reviewer/src/server.rs must declare `{declaration}`"
     );
 }
