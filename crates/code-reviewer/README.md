@@ -84,6 +84,7 @@ cargo run -p code-reviewer -- doctor
 
 # 3. Deploy & provision onto your paired `otto-mac` M1 appliance: installs both binaries (`cheap-otto`,
 #    `code-reviewer`), the `launchd` 2m poller + `:7430` UI, and the Mission Control + Pixel Office services
+#    (Pixel Office is skipped when `pixel-agents` is unavailable)
 cargo run -p code-reviewer -- m1 --host otto-mac sync --sync-tokens
 
 # 4. Open the Web Dashboard GUI (`http://127.0.0.1:7430`) through the one shared tunnel that

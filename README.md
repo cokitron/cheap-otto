@@ -96,8 +96,8 @@ cheap-otto pull --id fix-auth-race --execute --merge
 
 ### 4. Mission Control Web GUI, `pixel-agents` Visual Office & Playbook Templates (`src/server.rs`, `src/template.rs`)
 ```bash
-# Ensures the three dashboard services on the Mac (Mission Control :7420, `pixel-agents` office :7421,
-# Reviewer :7430; `launchd` LaunchAgents that come back after a crash), opens one tunnel, opens Mission Control
+# Ensures the Mission Control (:7420) and `pixel-agents` office (:7421) LaunchAgents on the Mac, checks the Reviewer (:7430,
+# provisioned by `code-reviewer m1 sync`), opens one tunnel, opens Mission Control
 cheap-otto ui --execute
 cheap-otto ui --execute --open reviewer   # same tunnel, opens the Reviewer instead
 
