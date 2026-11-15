@@ -1,51 +1,63 @@
 ---
 paths:
   - "**/*.rs"
-  - "Cargo.toml"
+  - "**/Cargo.toml"
 ---
 
 # Clippy, Formatting & Documentation Standards
 
-## 1. Zero-Warning Compiler & Clippy Policy
+## 1. Zero-Warning Policy
 
-All code in `cheap-otto` must compile with **zero warnings** under `rustc` and `clippy`:
+The gate is the default Clippy lint set with warnings denied, across the whole workspace:
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-### Key Lint Rules to Respect
-- **No needless clones or allocations:** Pass references (`&T`, `&str`, `&Path`) unless ownership is required; avoid `.to_string()` when `&'static str` or `format!` directly into a buffer works.
-- **Use explicit cast conversion where lossless:** Prefer `u8::from(bool)` over `bool as u8`.
-- **Format string inline variables:** Prefer `println!("  * {line}")` and `format!("Fix: {fix}")` (Rust 2021/2024 inline format args) when interpolating simple identifiers.
-- **Keep functions focused and readable:** Extract helper functions if cyclomatic complexity grows or if a function mixes parsing, policy evaluation, and string formatting.
+- `--workspace` matters. Without it you may lint only one package and miss the other.
+- **Pedantic is not part of the gate.** `-W clippy::pedantic` reports dozens of warnings in the root crate today. Don't enable it in manifests or CI, and don't sweep those warnings in an unrelated change. Writing new code that would pass pedantic is welcome.
+- **Fix the cause, not the lint.** The root crate has no `#[allow(...)]` attributes: when a handler grew too many parameters it got an options struct. `code-reviewer` has a handful of `#[allow(clippy::too_many_arguments)]`; don't add more, and never add a crate-level `#![allow]`.
+
+### Lints that come up most here
+- **Needless clones and allocations:** pass `&T`, `&str`, `&Path`; skip `.to_string()` when a `&'static str` will do.
+- **Lossless casts:** `u8::from(bool)` and `u64::from(x)` instead of `as`.
+- **Inline format args:** `println!("  * {line}")`, not `println!("  * {}", line)`.
+- **Large enum variants:** box them, as `ScheduleCommands::Add(Box<ScheduleAddArgs>)` does.
+- **Focused functions:** split a function that mixes parsing, policy and formatting.
 
 ---
 
-## 2. Rustfmt Standards
+## 2. Rustfmt
 
-- All Rust files must be formatted with standard `rustfmt` (`cargo fmt --all`).
-- Do not use `#[rustfmt::skip]` unless aligning a complex lookup table that is demonstrably harder to read when formatted.
+- Standard `rustfmt`, no `rustfmt.toml`. Run `cargo fmt --all` after editing; CI checks with `--check`.
+- No `#[rustfmt::skip]` anywhere today. Keep it that way unless a lookup table is clearly harder to read when formatted.
+- The embedded HTML pages are raw string literals, which `rustfmt` leaves alone, so their formatting is yours to keep tidy.
 
 ---
 
-## 3. Rustdoc & Inline Comments
+## 3. Rustdoc & Comments
 
-- **Document All Public APIs:**
-  - Every public module, struct, enum, and public method in `src/*.rs` should have a concise `///` doc comment explaining **why** it exists and what invariants it preserves.
-  - Document `# Errors` on public functions returning `Result<T, E>` to specify the exact conditions under which an `Err` is returned.
-- **Explain "Why", Not "What" in Inline Comments:**
+- **Module docs:** every module starts with a `//!` header that says what it owns and how it fits the larger flow. Update it when the module's job changes.
+- **Public API docs:** every public struct, enum, field and function in the root library has a `///` comment explaining why it exists and what it preserves. Fewer than ten items lack one today, so don't add to that count.
+- **`# Errors` section** on public functions returning `Result`, naming the variants and the conditions.
+- **clap doc comments are the help text.** A `///` on a subcommand or flag shows up in `--help`, so new flags and subcommands must have one, written for the operator: purpose, plus units and defaults when relevant.
+- **Comments explain why.**
   - Good: `// Keep normal battery sleep intact (5 min) in case AC power is disconnected for long periods`
   - Good: `// Rule 1: Fanless Thermal Guard (pause heavy queues when thermal state >= Serious)`
-  - Avoid redundant comments that merely restate the Rust syntax.
+  - Don't restate the code.
 
 ---
 
-## 4. Pre-Completion Verification Checklist
+## 4. Completion Checklist
 
-Before declaring any code change complete, always execute:
+Run these before saying a change is done. They are quick; run them rather than predicting the result.
 
 1. `cargo fmt --all -- --check`
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test`
-4. If CLI behavior changed, verify with `cargo run -- <subcommand>`.
+2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+3. `cargo test --workspace --all-targets --locked`
+4. If CLI behaviour changed: run the subcommand as a dry run against a temp state dir, for example
+   `cargo run -p cheap-otto -- delegate --project demo --id t1 --agent claude --task "x" --state-dir <tmp>`,
+   and read the printed plan. Never add `--execute` or `--apply` to verify.
+5. If a flag, default or command name changed: update the README, `docs/index.html` and the `CLAUDE.md` command list in the same change.
+
+Report what you ran and what it printed. If a gate fails, say so with the output.

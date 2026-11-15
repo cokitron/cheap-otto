@@ -48,23 +48,23 @@ Instead of tying up your Windows terminal, branch, and CPU waiting for coding ag
 ```bash
 # Probes live macOS sysctl/pmset (or pass --remote over SSH), saves .cheap-otto/state-backup.json,
 # and applies reversible pmset rules when --apply is passed
-cargo run -- init --battery-cap 78 --apply
+cargo run -p cheap-otto -- init --battery-cap 78 --apply
 
 # Run the 8-point appliance health check (auto-probes local macOS or paired SSH MacBook)
-cargo run -- doctor
+cargo run -p cheap-otto -- doctor
 ```
 
 ### 2. Pair Your Windows Workstation with the MacBook (`src/bridge.rs`)
 ```bash
 # Pair over LAN IP (e.g. 192.168.1.42) or Tailscale IP (e.g. 100.101.102.103)
 # Pass --apply to merge into ~/.ssh/config & verify SSH reachability, or --tunnel to forward ports live
-cargo run -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --apply
+cargo run -p cheap-otto -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --apply
 
 # Sync your active Windows Git repo (project & branch auto-detected!) to the MacBook
-cargo run -- sync --execute
+cargo run -p cheap-otto -- sync --execute
 
 # Run a native macOS / ARM64 build or test suite from your Windows terminal
-cargo run -- exec --cmd "cargo test --all-targets" --execute
+cargo run -p cheap-otto -- exec --cmd "cargo test --all-targets" --execute
 ```
 
 ### 3. Multi-Harness Delegation, Direct Per-Agent Querying & Pull (`src/worktree.rs`, `src/agent_session.rs`)
@@ -111,19 +111,19 @@ cheap-otto template run --id edge-audit --execute
 ### 4. Interactive M1 Terminal & Live Job Visibility (`src/terminal.rs`)
 ```bash
 # Drop into a persistent `manual` tmux session on the M1 (isolated from automated `otto-*` jobs)
-cargo run -- shell --execute
+cargo run -p cheap-otto -- shell --execute
 
 # Watch a running or finished agent/CI tmux pane live on the M1 (`--read-only` for safe observation)
-cargo run -- attach --id fix-auth-race --execute
+cargo run -p cheap-otto -- attach --id fix-auth-race --execute
 
 # Tail persistent logs for any delegated or scheduled job
-cargo run -- logs --id fix-auth-race --follow --execute
+cargo run -p cheap-otto -- logs --id fix-auth-race --follow --execute
 ```
 
 ### 5. Recurring CI Pipelines & Scheduled Agent Runs (`src/schedule.rs`)
 ```bash
 # Run native ARM64 CI every 15m whenever `origin/main` (or `otto-sync`) has new commits
-cargo run -- schedule add \
+cargo run -p cheap-otto -- schedule add \
   --id main-ci \
   --every 15m \
   --on-change \
@@ -131,7 +131,7 @@ cargo run -- schedule add \
   --execute
 
 # Schedule a nightly autonomous agent audit at 02:00 AM that opens a Draft PR when tests pass
-cargo run -- schedule add \
+cargo run -p cheap-otto -- schedule add \
   --id nightly-audit \
   --daily 02:00 \
   --agent claude \
@@ -140,13 +140,13 @@ cargo run -- schedule add \
   --execute
 
 # Inspect configured schedules and pass/fail JSONL run history
-cargo run -- schedule list --execute
-cargo run -- runs --execute
+cargo run -p cheap-otto -- schedule list --execute
+cargo run -p cheap-otto -- runs --execute
 ```
 
 ### 6. Restore Factory macOS Sleep Settings (& Unload Schedules) Anytime
 ```bash
-cargo run -- restore --unload-schedules --remote --apply
+cargo run -p cheap-otto -- restore --unload-schedules --remote --apply
 ```
 
 ---

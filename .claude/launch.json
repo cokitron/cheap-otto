@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mission-control",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "cheap-otto", "--", "serve", "--port", "7440", "--state-dir", "target/preview-state", "--workspaces-root", "target/preview-workspaces"],
+      "port": 7440
+    },
+    {
+      "name": "reviewer-dashboard",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "code-reviewer", "--", "--workspace", "crates/code-reviewer", "serve", "--bind", "127.0.0.1:7441"],
+      "port": 7441
+    }
+  ]
+}
