@@ -356,25 +356,26 @@ pub struct TunnelRecord { pub pid: u32, pub ports: Vec<u16>, pub destination: St
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TunnelDecision {
-    /// Every port answers locally.
+    /// Every port answers locally and the recorded tunnel is a live ssh process that covers them.
     AlreadyUp,
     /// No port answers locally.
     Start,
     /// Some ports answer and some do not.
     Conflict { held: Vec<u16>, missing: Vec<u16> },
 }
-pub fn decide_tunnel(local_ports: &[(u16, bool)]) -> TunnelDecision
+/// `recorded_tunnel_covers` is the result of `recorded_tunnel_covers(record, ssh_alive, set)`: the record exists, its pid is a live ssh process, and its ports include every port in the set.
+pub fn decide_tunnel(local_ports: &[(u16, bool)], recorded_tunnel_covers: bool) -> TunnelDecision
 ```
 
-- The tunnel forwards every port in the set, whether or not that service is installed on the Mac. An SSH forward listens locally even when nothing answers remotely, so "every port answers locally" means "the tunnel is up". [R3.1, R3.2]
+- The tunnel forwards every port in the set, whether or not that service is installed on the Mac. An SSH forward listens locally even when nothing answers remotely, so every port answering locally is evidence that a tunnel is up only when the recorded tunnel is a live ssh process that covers the ports. Three unrelated listeners must not be mistaken for the tunnel: with all ports answering and no such record, `decide_tunnel` returns `Conflict { held: <every port>, missing: [] }`. [R3.1, R3.2]
 - `BatchMode=yes` stops a detached process from hanging on a password prompt, and `ConnectTimeout=10` stops it from hanging on an unreachable host. The destination is `user@host`, not the alias. [R3.3]
 - `tunnel.json` lives in the state directory on the workstation. [R3.4]
 
 The imperative part lives in `src/main.rs` as `ensure_dashboard_tunnel(state_dir, peer, set) -> Result<(), Box<dyn Error>>`:
 
-1. Probe each port with `is_local_port_open` and call `decide_tunnel`.
+1. Probe each port with `is_local_port_open`, load `tunnel.json`, compute `recorded_tunnel_covers`, and call `decide_tunnel`.
 2. `AlreadyUp`: print it and return.
-3. `Conflict`: load `tunnel.json`. If its pid is alive **and is an ssh process**, terminate it, wait up to 2 s for the ports to close, and continue to step 4. Otherwise return an error naming `held` and printing how to find the holder: `netstat -ano | findstr :<port>` on Windows, `lsof -nP -iTCP:<port> -sTCP:LISTEN` elsewhere. [R3.5]
+3. `Conflict`: load `tunnel.json`. If its pid is alive **and is an ssh process**, terminate it, wait up to 2 s for the ports to close, and continue to step 4. Otherwise start nothing and return an error naming `held` (every port, when all of them answer without a recorded tunnel) and printing how to find the holder: `netstat -ano | findstr :<port>` on Windows, `lsof -nP -iTCP:<port> -sTCP:LISTEN` elsewhere. [R3.5]
 4. `Start`: spawn the `CommandSpec` with null stdio, write `tunnel.json` with `child.id()`, then poll for up to 5 s. If every port answers, succeed. If `child.try_wait()` reports an exit, delete `tunnel.json` and return the exit error with the SSH test command (`ssh -p <port> <user@host> true`). If the deadline passes with the child still alive, call `terminate_process(child.id())`, delete `tunnel.json` and return a timeout error that names the ports that did not answer and the SSH test command. [R3.6]
 
 Process helpers, also in `src/main.rs` (the reviewer's `state.rs` has the same idea around line 430):
@@ -401,13 +402,13 @@ New subcommand group in `src/main.rs`, following rule 05 (doc comments are help 
 | `cheap-otto dashboards tunnel [--stop]` | Ensure the tunnel, or stop the recorded one | `--execute` |
 | `cheap-otto ui [--open <id>]` | Install, tunnel, open the browser | `--execute` |
 
-Shared flags: `--state-dir`, `--port` (Mission Control), `--pixel-port`, `--reviewer-port`, each defaulting to the registry constants. `--execute` has `visible_alias = "apply"`. [R8.4]
+Shared flags: `--state-dir`, `--port` (Mission Control) and `--pixel-port`, each defaulting to the registry constants. The Reviewer port is always the `REVIEWER_PORT` constant (3.7 step 1), because the provisioner-managed Reviewer LaunchAgent is fixed at 7430. `--execute` has `visible_alias = "apply"`. [R8.4]
 
 ### 3.7 `cheap-otto ui`
 
 `run_ui` becomes:
 
-1. Resolve the state dir and peer; build `DashboardSet::with_ports(port, pixel_port, reviewer_port)`.
+1. Resolve the state dir and peer; build `DashboardSet::with_ports(port, pixel_port, REVIEWER_PORT)`.
 2. Build the install plan and the tunnel spec. Print the peer, the three URLs, the plan's `display_steps` and the tunnel command.
 3. Without `--execute`: print the hint and return.
 4. Run the install plan with `execute_command_spec`. The script's `dashboard=… action=…` lines go to the terminal. If it exits non-zero, return the error immediately (the script's `error=` and `dashboard=…` lines are already on the terminal) and do not touch the ssh config, tunnel or browser. [R3.10]
@@ -439,7 +440,7 @@ This changes behaviour: a plain `ssh otto-mac` no longer forwards 3000, 5173 and
 
 ### 3.10 `code-reviewer` alignment
 
-All changes stay std-only (rule 05).
+All changes remain synchronous and avoid adding async runtimes, HTTP clients, or TLS stacks (rule 05).
 
 - **Deploy both binaries** [R4.1]. In `crates/code-reviewer/src/m1.rs`, extract the remote build script from `sync_everything_to_m1` into a pure `fn render_remote_build_script(remote_dir_expr: &str, brew: &str, cargo: &str, npm: &str) -> String`, and add `cargo install --path . --locked --force` after the existing `cargo install --path crates/code-reviewer --locked --force` (inside the `if [ -d crates/code-reviewer ]` branch). The first deploy after this compiles `cheap-otto` in release mode on the Mac, which takes a few minutes.
 - **Provision the dashboards** [R4.2, R4.3]. New section 8 at the end of `crates/code-reviewer/scripts/m1-provision.sh`, before the final "Provisioning complete" line:
@@ -459,11 +460,11 @@ All changes stay std-only (rule 05).
 - **One tunnel** [R3.9]. Rewrite `open_tunneled_ui` (`crates/code-reviewer/src/server.rs`):
   1. If `127.0.0.1:<port>` answers locally, open the browser and return.
   2. Ensure the remote service (the existing `launchctl kickstart` script).
-  3. Find `cheap-otto`: a file named `cheap-otto` or `cheap-otto.exe` beside `std::env::current_exe()`, else `cheap-otto` on `PATH`. If found, run `cheap-otto ui --execute --no-open` with inherited stdio and wait for it.
-  4. If not found, spawn a fallback tunnel built by a pure `fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String>` that forwards only the reviewer port.
+  3. Decide whether to delegate with a pure `fn should_delegate_to_cheap_otto(requested_host: Option<&str>, peer_host: Option<&str>, port: u16) -> bool`: true only when the requested host is none or equals the peer recorded in `peer.json`, and `port == DEFAULT_UI_PORT` (7430). `cheap-otto ui` has no `--host` and always uses `REVIEWER_PORT`, so any other host or port cannot be expressed to it. When true, find `cheap-otto` (a file named `cheap-otto` or `cheap-otto.exe` beside `std::env::current_exe()`, else `cheap-otto` on `PATH`) and run `cheap-otto ui --execute --no-open`, adding `--state-dir <dir>` when one was given, with inherited stdio, and wait for it.
+  4. If delegation is skipped (custom host or port) or `cheap-otto` is not found, spawn a fallback tunnel built by a pure `fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String>` that forwards only the requested reviewer port to the requested host. The fallback never forwards Pixel Office and is never started when step 1 found the Reviewer port answering.
   5. Poll the local port. If it never answers, return an error; do not print "ready" or open a browser.
 - **Pixel Office start button**. `start_pixel_agents_server` first runs `launchctl kickstart "gui/<uid>/com.cheapotto.dashboards.pixel-office"` (uid from `id -u`). Only if that fails does it fall back to today's direct spawn.
-- **`scripts/open-ui.ps1`** becomes a thin wrapper: `& cargo run --quiet -- ui --host $HostAddr --port $Port` (plus `--no-open` when `-NoOpen` is set), run from the crate directory, checking `$LASTEXITCODE`.
+- **`scripts/open-ui.ps1`** becomes a thin wrapper over `code-reviewer ui`, so it follows the same rules (reuse the existing tunnel when the Reviewer port answers; otherwise delegation or the single-port fallback), and never forwards Pixel Office itself: `& cargo run --quiet -- ui --host $HostAddr --port $Port` (plus `--no-open` when `-NoOpen` is set), run from the crate directory, checking `$LASTEXITCODE`.
 - **Ports and link** [R2.5, R6.3]. Add `pub const DEFAULT_MISSION_CONTROL_PORT: u16 = 7420;` beside `DEFAULT_UI_PORT` in `crates/code-reviewer/src/server.rs`, and a link to Mission Control in `DASHBOARD_HTML` built from `location.hostname` and that port (text through `esc`). A test in the root crate, `tests/dashboard_ports.rs`, uses `include_str!("../crates/code-reviewer/src/server.rs")` and asserts the literal declarations of `DEFAULT_UI_PORT`, `DEFAULT_PIXEL_PORT` and `DEFAULT_MISSION_CONTROL_PORT` carry the registry's values.
 
 ## 4. Security
@@ -474,6 +475,7 @@ All changes stay std-only (rule 05).
 - Every generated listener argument is `127.0.0.1`; tests assert `0.0.0.0` never appears in a plist or script. [R1.4]
 - The install script is assembled from constants and `u16` ports. It takes no operator text, so there is nothing to inject. `--id` values are parsed into `DashboardId` before any command is built.
 - The install script kills processes by port. That is deliberate and visible: each kill prints `stray_killed=<pid>`.
+- The existing `cheap-otto serve --host` and `code-reviewer serve --bind` overrides can still bind a non-loopback address; this spec does not close them, and they are tracked in a separate follow-up issue.
 - The tunnel uses `BatchMode=yes`, `ConnectTimeout=10` and discrete args. The terminate helper refuses to kill a pid whose image is not ssh.
 - `status` reads `autoLoginUser`; nothing in this spec writes login settings.
 
@@ -520,7 +522,7 @@ Rollback: `cheap-otto dashboards uninstall --execute` removes the two managed La
 | --- | --- | --- |
 | D1 | LaunchAgents in `gui/<uid>` | LaunchDaemons need `sudo` and a system-level change, against the reversibility invariant. tmux is what fails today (P3). |
 | D2 | One Rust-generated install script, sent over SSH or piped on the Mac | A second hand-written copy in `m1-provision.sh` would drift from the Rust one. A `--local` execution mode would need a local `sh -c`, which rule 02 forbids in the root crate. |
-| D3 | Only `cheap-otto` opens dashboard tunnels; `code-reviewer ui` delegates | Making `code-reviewer` depend on the root library would pull tokio and axum into a crate that must stay std-only. |
+| D3 | Only `cheap-otto` opens dashboard tunnels; `code-reviewer ui` delegates | Making `code-reviewer` depend on the root library would pull tokio and axum into a crate that must stay synchronous and free of async runtimes, HTTP clients and TLS stacks. |
 | D4 | Remove `LocalForward` from the managed SSH config block | Keeping it is the root of P2. `ClearAllForwardings` on other commands would also clear the forwards a tunnel passes on its command line. |
 | D5 | The reviewer's LaunchAgent stays in `m1-provision.sh` | Moving a working production service adds risk for no user-visible gain; it can be a later spec. |
 | D6 | Free a port by killing its listener (`lsof`) | `pkill -f` would match the installer's own command line. |

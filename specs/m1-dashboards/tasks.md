@@ -166,12 +166,15 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`
 - **Steps:**
-  1. Add `build_tunnel_spec`, `TunnelRecord`, `TunnelDecision` and `decide_tunnel` as in design 3.5.
+  1. Add `build_tunnel_spec`, `TunnelRecord`, `TunnelDecision`, `recorded_tunnel_covers(record: Option<&TunnelRecord>, ssh_alive: bool, set: &DashboardSet) -> bool` and `decide_tunnel(local_ports, recorded_tunnel_covers)` as in design 3.5.
   2. Argument order: `-N`, the five `-o` options (the four below plus `-o ConnectTimeout=10`), `-p <ssh_port>`, one `-L 127.0.0.1:P:127.0.0.1:P` per port in set order, then `user@host` last.
-  3. `decide_tunnel`: all true → `AlreadyUp`; all false or an empty slice → `Start`; otherwise `Conflict` with `held` (true) and `missing` (false) in input order.
+  3. `decide_tunnel`: all true and `recorded_tunnel_covers` → `AlreadyUp`; all true without a covering record → `Conflict` with every port in `held` and an empty `missing`; all false or an empty slice → `Start`; otherwise `Conflict` with `held` (true) and `missing` (false) in input order.
+  4. `recorded_tunnel_covers`: true only when the record exists, `ssh_alive` is true and the record's ports include every port in the set.
 - **Tests:**
   - `tunnel_spec_forwards_every_port_on_loopback_with_safe_options`: three `-L` args, each starting and continuing with `127.0.0.1:`; contains `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `BatchMode=yes`, `ConnectTimeout=10`; the last arg is `user@host`.
   - `decides_already_up_start_and_conflict`
+  - `all_ports_answering_without_a_recorded_tunnel_is_a_conflict`: three answering ports with `recorded_tunnel_covers = false` give `Conflict` holding all three ports, so no tunnel is started.
+  - `recorded_tunnel_must_be_alive_ssh_and_cover_every_port`: no record, a dead or non-ssh pid, and a record missing one port are all false; a live ssh record covering all ports is true.
   - `tunnel_record_round_trips_as_json`
 - **Acceptance:** `cargo test -p cheap-otto --lib dashboards::tests` passes.
 
@@ -203,7 +206,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Depends on:** T1.4, T1.5, T1.6
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
-  1. Add `Commands::Dashboards { #[command(subcommand)] action: DashboardCommands }` and the enum with `List`, `Install`, `InstallScript`, `Status`, `Restart`, `Uninstall` (design 3.6). Every variant and flag gets a `///` help line. Shared flags: `--state-dir`, `--port`, `--pixel-port`, `--reviewer-port` (defaults from the registry constants); `--execute` with `visible_alias = "apply"` on install, status, restart, uninstall; `--json` on list and status; `--id` on restart.
+  1. Add `Commands::Dashboards { #[command(subcommand)] action: DashboardCommands }` and the enum with `List`, `Install`, `InstallScript`, `Status`, `Restart`, `Uninstall` (design 3.6). Every variant and flag gets a `///` help line. Shared flags: `--state-dir`, `--port`, `--pixel-port` (defaults from the registry constants; the Reviewer port is the `REVIEWER_PORT` constant, not a flag); `--execute` with `visible_alias = "apply"` on install, status, restart, uninstall; `--json` on list and status; `--id` on restart.
   2. One handler per subcommand taking one options struct, following the pattern of `run_delegate`; print the human-readable plan first unless `--json` is selected, then emit only JSON. Check `execute` only after the plan is printed.
   3. `install-script` prints `render_install_script` to stdout and nothing else (no banner), so it can be piped to `sh`.
   4. `status` without `--execute`: print the probe command and, per dashboard, whether its port answers locally (`is_local_port_open`). With `--execute`: run the probe with `capture_spec_stdout`, parse it, and print one row per dashboard with `loaded`, `pid`, `listening`, `tunnelled`. Print the warning for R5.3 when `autologin_user` is `None`, and the hints in design section 5 when a binary is missing or a service is loaded but not listening.
@@ -228,7 +231,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Steps:**
   1. Add `load_tunnel_record(state_dir) -> Option<TunnelRecord>`, `save_tunnel_record`, `remove_tunnel_record` for `<state_dir>/tunnel.json` (pretty JSON, like the other registries).
   2. Add `is_ssh_process_alive(pid: u32) -> bool` and `terminate_process(pid: u32)` using the commands in the table in design 3.5, spawned with discrete args.
-  3. Add `ensure_dashboard_tunnel(state_dir, peer, set)` implementing the four steps in design 3.5. When the poll for the forwarded ports times out, terminate the child, remove `tunnel.json` and return a timeout error that names the unanswered ports.
+  3. Add `ensure_dashboard_tunnel(state_dir, peer, set)` implementing the four steps in design 3.5. It computes `recorded_tunnel_covers` from `tunnel.json` and `is_ssh_process_alive`; when every port answers but no live ssh record covers them, it starts nothing and returns an error naming the ports and the holder-finding command (R3.2). When the poll for the forwarded ports times out, terminate the child, remove `tunnel.json` and return a timeout error that names the unanswered ports.
   4. Add `DashboardCommands::Tunnel { stop: bool, execute: bool, … }`. Without `--execute`: print the decision that would be taken, the ssh command, and the recorded tunnel if any. With `--execute`: call `ensure_dashboard_tunnel`. With `--stop --execute`: terminate the recorded pid if it is a live ssh process and remove `tunnel.json`; if there is no record, print `No recorded tunnel.` and exit 0.
 - **Tests** in `tests/cli_integration.rs` (ports 47420, 47421, 47430):
   - `dashboards_tunnel_dry_run_prints_one_ssh_command_with_three_forwards`: stdout has exactly three occurrences of `-L 127.0.0.1:`; no `tunnel.json` is written.
@@ -244,7 +247,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
   1. Replace the body of `run_ui` with the eight steps in design 3.7. If the install step fails, stop with the install error before touching the ssh config, tunnel or browser. After the tunnel is up, run the status probe and print a warning for each dashboard not listening. Delete the inline `remote_start_script` and the hand-built `ssh -N` block.
-  2. Add `--reviewer-port` (default from the registry) and `--open <id>` (default `mission-control`, parsed with `DashboardId::parse`) to `Commands::Ui`. Keep `--port`, `--pixel-port`, `--state-dir`, `--no-open`, `--execute`.
+  2. Add `--open <id>` (default `mission-control`, parsed with `DashboardId::parse`) to `Commands::Ui`. Keep `--port`, `--pixel-port`, `--state-dir`, `--no-open`, `--execute`.
   3. Update the `///` help line of `Ui`: "Ensure every dashboard service on the paired Mac, open one SSH tunnel for all of them, and open Mission Control".
 - **Tests** in `tests/cli_integration.rs`:
   - `ui_dry_run_plans_services_then_one_tunnel_and_no_tmux`: stdout mentions all three ports, contains exactly one `ssh -N` line with three `-L`, and does not contain `tmux new-session`.
@@ -293,7 +296,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ## Phase 4: `code-reviewer` alignment
 
-Everything in this phase stays std-only and synchronous.
+Everything in this phase stays synchronous and avoids async runtimes, HTTP clients, and TLS stacks.
 
 ### T4.1 `m1 sync` installs both binaries
 
@@ -334,12 +337,14 @@ Everything in this phase stays std-only and synchronous.
 - **Depends on:** T0.1, T2.3
 - **Files:** `crates/code-reviewer/src/server.rs`
 - **Steps:**
-  1. Add `fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String>`: `-N`, `-o ExitOnForwardFailure=yes`, `-o ServerAliveInterval=30`, `-o BatchMode=yes`, `-L 127.0.0.1:<port>:127.0.0.1:<port>`, `<host>`. Only one `-L`.
+  1. Add `fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String>`: `-N`, `-o ExitOnForwardFailure=yes`, `-o ServerAliveInterval=30`, `-o ServerAliveCountMax=3`, `-o ConnectTimeout=10`, `-o BatchMode=yes`, `-L 127.0.0.1:<port>:127.0.0.1:<port>`, `<host>`. Only one `-L`.
   2. Add `fn find_cheap_otto_binary() -> Option<PathBuf>`: a file named `cheap-otto` or `cheap-otto.exe` in the directory of `std::env::current_exe()`; otherwise `Some(PathBuf::from("cheap-otto"))` if `cheap-otto --version` runs successfully; otherwise `None`.
-  3. Rewrite `open_tunneled_ui` to the five steps in design 3.10. Remove the `DEFAULT_PIXEL_PORT` forward.
-  4. If the local port never answers, return `Err` with a message that names the port and suggests `cheap-otto dashboards status --execute`. Print "ready" and open the browser only after the port answers.
+  3. Add `fn should_delegate_to_cheap_otto(requested_host: Option<&str>, peer_host: Option<&str>, port: u16) -> bool` (design 3.10 step 3): true only when the host is none or the peer in `peer.json` and `port == DEFAULT_UI_PORT`. Read the real `ui` arguments first: `cheap-otto ui` accepts `--port`, `--pixel-port`, `--state-dir`, `--no-open`, `--execute` and no `--host`.
+  4. Rewrite `open_tunneled_ui` to the five steps in design 3.10. Delegate with `cheap-otto ui --execute --no-open` (plus `--state-dir <dir>` when given) only when `should_delegate_to_cheap_otto` is true; otherwise use the fallback. Remove the `DEFAULT_PIXEL_PORT` forward.
+  5. If the local port never answers, return `Err` with a message that names the port and suggests `cheap-otto dashboards status --execute`. Print "ready" and open the browser only after the port answers.
 - **Tests** in `crates/code-reviewer/src/server.rs` (add a `#[cfg(test)] mod tests` if the file has none):
-  - `fallback_tunnel_forwards_only_the_reviewer_port`: exactly one `-L`, it names the given port, and `7421` does not appear.
+  - `fallback_tunnel_forwards_only_the_reviewer_port`: exactly one `-L`, it names the given port, `7421` does not appear, and the args contain `ServerAliveCountMax=3` and `ConnectTimeout=10`.
+  - `delegation_is_skipped_for_custom_host_or_port`: a host other than the peer, or a port other than 7430, returns false; no host or the peer host on 7430 returns true.
 - **Acceptance:** `cargo test -p code-reviewer server::tests` passes. Do not run `code-reviewer ui`.
 
 ### T4.4 The Pixel Office button starts the service, not an orphan
@@ -363,7 +368,7 @@ Everything in this phase stays std-only and synchronous.
 - **Files:** `crates/code-reviewer/scripts/open-ui.ps1`
 - **Steps:**
   1. Keep the `param` block and `$ErrorActionPreference = "Stop"`.
-  2. Replace the body: build an argument array `run --quiet -- ui --host $HostAddr --port $Port` (add `--no-open` when `-NoOpen`), run `& cargo @argsList` from the crate directory inside `Push-Location`/`Pop-Location`, and `throw` when `$LASTEXITCODE` is not 0.
+  2. The script is a wrapper over `code-reviewer ui` and does not manage tunnels itself (R3.9). Replace the body: build an argument array `run --quiet -- ui --host $HostAddr --port $Port` (add `--no-open` when `-NoOpen`), run `& cargo @argsList` from the crate directory inside `Push-Location`/`Pop-Location`, and `throw` when `$LASTEXITCODE` is not 0.
   3. Remove the `Start-Process ssh` block and the health polling.
 - **Acceptance:** `grep -n "Start-Process" crates/code-reviewer/scripts/open-ui.ps1` prints nothing. Do not run the script.
 

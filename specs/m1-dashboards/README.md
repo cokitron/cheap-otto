@@ -13,7 +13,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 - With a logged-in GUI session on the Mac and `pixel-agents` installed, `code-reviewer m1 sync` leaves both binaries and all three dashboard services installed on the Mac. Without `pixel-agents`, the Pixel Office is skipped and reported.
 - `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error if an installed service fails to listen.
 - `cheap-otto dashboards status --execute` says which dashboards are up and why one is not. A skipped or failed dashboard stays unavailable and is reported there.
-- Each dashboard links to the others.
+- Mission Control and the Reviewer link to each other. The Pixel Office page is third-party and unmodified, so it has no links.
 - A dashboard that crashes comes back by itself.
 - `cheap-otto dashboards uninstall --execute` removes what this added.
 
@@ -28,7 +28,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 
 | If you are | Start with |
 | --- | --- |
-| An agent picking up work | The first unchecked task in `tasks.md` whose dependencies are all checked. T1.1, T1.8 and T4.1 depend on nothing. |
+| An agent picking up work | Pick the first unchecked, unclaimed task in `tasks.md` whose dependencies are all checked; skip tasks already claimed in their issue. T0.1 is in progress, so T1.1, T1.8 and T4.1 are currently available. |
 | Reviewing the plan | `design.md` sections 1 (problems), 8 (decisions) and 9 (open questions) |
 | The owner | Answer the four open questions in `design.md` section 9 if you disagree with the defaults, and run the two **LIVE** tasks at the end |
 

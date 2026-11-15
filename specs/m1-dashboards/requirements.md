@@ -52,14 +52,14 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 **User story:** As the operator, I want one command to make every dashboard reachable on the workstation, so that opening one dashboard never breaks another.
 
 1. WHEN the operator runs `cheap-otto ui` with the execute gate THEN the system SHALL make every installed dashboard reachable on the workstation at `http://127.0.0.1:<port>` through exactly one SSH tunnel process.
-2. WHEN every dashboard port already answers on the workstation THEN the system SHALL NOT start another tunnel.
+2. WHEN every dashboard port already answers on the workstation AND the tunnel recorded in `tunnel.json` is a live ssh process whose recorded ports cover every dashboard port THEN the system SHALL NOT start another tunnel; IF every port answers but no such recorded tunnel exists THEN the system SHALL start nothing, fail, name the ports, and print the command that finds the holder.
 3. The tunnel SHALL be spawned with discrete arguments, `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `ConnectTimeout=10`, and a loopback bind on both ends of every forward.
 4. WHEN the system starts a tunnel THEN it SHALL record the process id, ports, destination and start time in `tunnel.json` in the state directory.
 5. IF some dashboard ports answer on the workstation and others do not THEN the system SHALL stop the tunnel it recorded (if that process is alive) and start a new one; IF the ports are held by a process it did not record THEN it SHALL fail, name the ports, and print the command that finds the holder.
 6. IF the tunnel process exits, or has not opened every forward within 5 s, THEN the system SHALL terminate the process if still running, remove `tunnel.json`, report failure naming the ports that did not answer, and SHALL NOT print that the dashboards are ready or open a browser.
 7. The operator SHALL be able to see the tunnel's state and stop it with a command.
 8. The managed `Host` block that `cheap-otto` writes into `~/.ssh/config` SHALL NOT contain `LocalForward` lines, and rewriting the block SHALL remove any that an older version wrote.
-9. `code-reviewer ui` and `open-ui.ps1` SHALL NOT forward the Pixel Office port and SHALL NOT start a tunnel when the Reviewer port already answers on the workstation.
+9. `code-reviewer ui` and `open-ui.ps1` (a wrapper over it) SHALL NOT forward the Pixel Office port or start a second tunnel, and WHEN the Reviewer port already answers on the workstation they SHALL reuse the existing tunnel. WHEN it does not answer, they SHALL delegate to `cheap-otto ui`, which owns the single shared tunnel under R3.1 to R3.5, only if the requested host is the paired peer (or none was given) and the port is the default Reviewer port; otherwise they SHALL start a tunnel that forwards only the requested Reviewer port.
 10. WHEN `cheap-otto ui` runs with the execute gate THEN it SHALL stop before starting the tunnel or opening a browser if the install step failed, and after the tunnel is up it SHALL probe each dashboard's state on the Mac and warn for any dashboard that is not listening.
 
 ### R4. One deploy
