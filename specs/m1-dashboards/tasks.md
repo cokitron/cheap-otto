@@ -47,7 +47,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Files:** `src/dashboards.rs` (new), `src/lib.rs`
 - **Steps:**
   1. Create `src/dashboards.rs` with a `//!` module header and the constants, `DashboardError`, `DashboardId`, `ServiceManager`, `DashboardService` and `DashboardSet` exactly as in design 3.1.
-  2. Implement `DashboardId::all`, `slug`, `display_name`, `parse`, and `DashboardSet::standard`, `with_ports`, `get`, `ports`, `managed`. `standard()` calls `with_ports` with the three constants.
+  2. Implement `DashboardId::all`, `slug`, `display_name`, `parse`, and `DashboardSet::standard`, `with_ports`, `get`, `ports`, `managed`. `standard()` builds from the three constants through the private constructor that `with_ports` uses after validating, so it needs no `.expect()`; a test proves the constants pass `with_ports`.
   3. Mission Control and Pixel Office use `ServiceManager::CheapOtto` and the label `com.cheapotto.dashboards.<slug>`. Reviewer uses `ServiceManager::CodeReviewerProvisioner` and `REVIEWER_LAUNCHD_LABEL`.
   4. Add `pub mod dashboards;` to `src/lib.rs` (keep the list alphabetical).
 - **Tests** in `src/dashboards.rs`:
