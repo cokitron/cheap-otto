@@ -13,3 +13,5 @@ This file defines the workspace rules for AI coding agents (Antigravity, Claude 
 @[Embedded Web UI](.claude/rules/08-embedded-web-ui.md)
 @[Brand & Pages Site](.claude/rules/09-brand-and-pages-site.md)
 @[CI & Release](.claude/rules/10-ci-and-release.md)
+@[Specs Protocol](.claude/rules/11-specs-protocol.md)
+@[Specs: how to carry out a task](specs/README.md)

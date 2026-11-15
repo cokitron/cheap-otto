@@ -79,6 +79,10 @@ cargo run -p code-reviewer -- --help
 - **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
 - Rule 06 and `CONTRIBUTING.md` hold the full workflow; `SECURITY.md` says how to report a vulnerability.
 
+## Specs
+
+Larger work is planned in `specs/<feature>/` as requirements, then design, then tasks, and each task has a GitHub issue. `specs/README.md` is the protocol and the step-by-step for carrying out a task; follow it when asked to implement one. Current spec: `specs/m1-dashboards/` (every dashboard as a `launchd` service on the Mac, one SSH tunnel).
+
 ## Path-scoped rules
 
 `.claude/rules/` holds detailed rules that load when you touch matching files:
@@ -95,3 +99,4 @@ cargo run -p code-reviewer -- --help
 | `08-embedded-web-ui.md` | `ui_assets.rs`, `ui_html.rs`, both `server.rs` | Self-contained embedded pages, API parity, the request guard, previewing safely |
 | `09-brand-and-pages-site.md` | `docs/`, `.github/assets/`, `scripts/brand/`, `README.md` | Brand tokens, logo rules, regenerating assets, Pages deploy |
 | `10-ci-and-release.md` | `.github/`, manifests | CI jobs and required checks, release tags and targets, what never goes in a commit |
+| `11-specs-protocol.md` | `specs/` | How to implement a spec task and how to edit a spec |
