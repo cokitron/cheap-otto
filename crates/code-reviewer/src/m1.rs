@@ -476,7 +476,10 @@ mod tests {
         let reviewer = script
             .find("cargo install --path crates/code-reviewer --locked --force")
             .unwrap();
-        let provision = script.find("m1-provision.sh").unwrap();
+        // Anchor on the command that runs provisioning, not the earlier `chmod` that names it.
+        let provision = script
+            .find("/bin/sh \"$CR_ROOT/scripts/m1-provision.sh\"")
+            .unwrap();
         assert!(root < reviewer, "root crate must be installed first");
         assert!(
             reviewer < provision,
