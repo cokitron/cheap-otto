@@ -79,4 +79,11 @@ All four have defaults, so no task is blocked. See `design.md` section 9.
 
 Add one line per merged PR, newest first.
 
+- T3.1 `GET /api/dashboards`, T3.2 links between dashboards in Mission Control and T4.6 shared ports and a link back to Mission Control: #48, merged into `main`.
+- T1.7 tunnel spec, decision and record: #47, merged into `main`.
+- T1.2 reserve the `dashboards` project name and T1.3 LaunchAgent templates: #45, merged into `main`.
+- T4.3 part a, `code-reviewer ui` never opens a second tunnel: #44, merged into `main`.
+- T4.1 `m1 sync` installs both binaries: #43, merged into `main`.
+- T1.8 stop writing `LocalForward` into the SSH config block: #42, merged into `main`.
+- T1.1 dashboard registry: #41, merged into `main`.
 - T0.1 origin and host guard: #31, merged into `main` through #4.
