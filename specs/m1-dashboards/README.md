@@ -62,8 +62,9 @@ Tasks on different branches of this tree can be done in parallel by different ag
 
 ## Coordination with other open work
 
-- **PR #2 (governance)** edits `crates/code-reviewer/src/m1.rs`, `crates/code-reviewer/scripts/m1-provision.sh`, `crates/code-reviewer/src/server.rs`, `src/main.rs`, `CLAUDE.md` and `AGENTS.md`, and moves the Mac checkout default to `~/otto-workspaces/cheap-otto`. Phase 4 tasks touch the same files. Before starting T4.1 to T4.6, pull `main` and re-read those files; if PR #2 has merged, line references in `design.md` section 1 may have moved, and the function names are what to search for.
-- **The origin guard (T0.1)** edits both `server.rs` files. T3.1, T4.3, T4.4 and T4.6 start after it merges.
+- **Governance (#2, merged)** moved the Mac checkout default to `~/otto-workspaces/cheap-otto`, made `m1 sync` install both binaries, and edited `crates/code-reviewer/src/m1.rs`, `crates/code-reviewer/scripts/m1-provision.sh`, `crates/code-reviewer/src/server.rs` and `src/main.rs`. Line references in `design.md` section 1 may have moved; search by function name. T4.1 shrank to making that deploy step testable.
+- **The origin guard (T0.1, #31, merged into the rules branch)** edits both `server.rs` files and adds `request_guard.rs` to each crate. T3.1, T4.3, T4.4 and T4.6 build on it: router tests must send a loopback `Host` header.
+- **Merging needs** the checks in rule 10: the three-OS Rust gate, the governance job, the Cubic review, and every review thread resolved.
 
 ## Decisions waiting on the owner
 

@@ -35,7 +35,7 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 7. IF the Mac has no GUI session for the user THEN the install command SHALL fail with a message that names the cause and the fix, and SHALL NOT report success.
 8. The system SHALL write each managed service's output to `~/.cheap-otto/logs/dashboards/<id>.log` on the Mac.
 9. WHEN the install command (re)installs a service THEN it SHALL first stop the legacy tmux sessions `cheapotto-serve` and `cheapotto-pixel` and any stray process holding that service's port, so the service can bind. The install command SHALL then wait until the port is free (up to 5 s, then force-kill, then wait 2 s) before bootstrapping, and IF the port is still held THEN it SHALL report it, skip that service and fail.
-10. IF a managed service is not listening on its port within 10 s after bootstrap, or its port cannot be freed, THEN the install command SHALL report the service and cause, continue with the remaining services, and exit non-zero (exit code 4). Skipped services (R1.6) are not failures.
+10. IF a managed service is not listening on its port within 10 s after bootstrap, or its port cannot be freed, THEN the install command SHALL report the service, the cause, the service's log file and, when `launchd` has one, its last exit status, continue with the remaining services, and exit non-zero (exit code 4). Skipped services (R1.6) are not failures.
 
 ### R2. One registry
 
@@ -52,14 +52,14 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 **User story:** As the operator, I want one command to make every dashboard reachable on the workstation, so that opening one dashboard never breaks another.
 
 1. WHEN the operator runs `cheap-otto ui` with the execute gate THEN the system SHALL make every installed dashboard reachable on the workstation at `http://127.0.0.1:<port>` through exactly one SSH tunnel process.
-2. WHEN every dashboard port already answers on the workstation AND the tunnel recorded in `tunnel.json` is a live ssh process whose recorded ports cover every dashboard port THEN the system SHALL NOT start another tunnel; IF every port answers but no such recorded tunnel exists THEN the system SHALL start nothing, fail, name the ports, and print the command that finds the holder.
+2. WHEN every dashboard port already answers on the workstation AND the tunnel recorded in `tunnel.json` is a live ssh process whose recorded destination and SSH port equal the current peer's and whose recorded ports cover every dashboard port THEN the system SHALL NOT start another tunnel; IF every port answers but no such recorded tunnel exists THEN the system SHALL start nothing, fail, name the ports, and print the command that finds the holder.
 3. The tunnel SHALL be spawned with discrete arguments, `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `ConnectTimeout=10`, and a loopback bind on both ends of every forward.
-4. WHEN the system starts a tunnel THEN it SHALL record the process id, ports, destination and start time in `tunnel.json` in the state directory.
-5. IF some dashboard ports answer on the workstation and others do not THEN the system SHALL stop the tunnel it recorded (if that process is alive) and start a new one; IF the ports are held by a process it did not record THEN it SHALL fail, name the ports, and print the command that finds the holder.
+4. WHEN the system starts a tunnel THEN it SHALL record the process id, ports, destination, SSH port and start time in `tunnel.json` in the state directory.
+5. IF some dashboard ports answer on the workstation and others do not THEN the system SHALL stop the tunnel it recorded (if that process is alive) and start a new one; IF the ports are held by a process it did not record THEN it SHALL fail, name the ports, and print the command that finds the holder. IF the recorded tunnel is alive but was opened to a different destination or SSH port than the current peer THEN the system SHALL stop it and start a new one, even when every port answers.
 6. IF the tunnel process exits, or has not opened every forward within 5 s, THEN the system SHALL terminate the process if still running, remove `tunnel.json`, report failure naming the ports that did not answer, and SHALL NOT print that the dashboards are ready or open a browser.
 7. The operator SHALL be able to see the tunnel's state and stop it with a command.
 8. The managed `Host` block that `cheap-otto` writes into `~/.ssh/config` SHALL NOT contain `LocalForward` lines, and rewriting the block SHALL remove any that an older version wrote.
-9. `code-reviewer ui` and `open-ui.ps1` (a wrapper over it) SHALL NOT forward the Pixel Office port or start a second tunnel, and WHEN the Reviewer port already answers on the workstation they SHALL reuse the existing tunnel. WHEN it does not answer, they SHALL delegate to `cheap-otto ui`, which owns the single shared tunnel under R3.1 to R3.5, only if the requested host is the paired peer (or none was given) and the port is the default Reviewer port; otherwise they SHALL start a tunnel that forwards only the requested Reviewer port.
+9. `code-reviewer ui` and `open-ui.ps1` (a wrapper over it) SHALL NOT forward the Pixel Office port or start a second tunnel, and WHEN the Reviewer port already answers on the workstation they SHALL reuse the existing tunnel. WHEN it does not answer, they SHALL delegate to `cheap-otto ui`, which owns the single shared tunnel under R3.1 to R3.5, only if the requested host is the paired peer (or none was given) and the port is the default Reviewer port; otherwise they SHALL start a tunnel that forwards only the requested Reviewer port. IF that tunnel does not open the Reviewer port within 5 s, or its process exits, THEN they SHALL terminate and reap the process before reporting failure.
 10. WHEN `cheap-otto ui` runs with the execute gate THEN it SHALL stop before starting the tunnel or opening a browser if the install step failed, and after the tunnel is up it SHALL probe each dashboard's state on the Mac and warn for any dashboard that is not listening.
 
 ### R4. One deploy
@@ -104,11 +104,11 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 1. `cheap-otto ui --execute` SHALL remain the one command that leaves Mission Control open in the browser, and SHALL keep accepting `--port`, `--pixel-port`, `--state-dir` and `--no-open`.
 2. WHEN the operator runs the dashboard uninstall command with the execute gate THEN the system SHALL unload and delete only the managed dashboard LaunchAgents.
 3. WHEN the operator runs `cheap-otto restore --unload-schedules --apply` (adding `--remote` to act on the paired MacBook over SSH) THEN the system SHALL continue to remove every `com.cheapotto.*` LaunchAgent, including the dashboard services; WITHOUT `--apply` it SHALL only print the plan.
-4. Every new side-effecting command SHALL be a dry run without the execute gate and SHALL print the full plan first, except that with `--json` stdout SHALL contain only the JSON document.
+4. Every new side-effecting command SHALL be a dry run without the execute gate and SHALL print the full plan first, except that with `--json` stdout SHALL contain only the JSON document. A dry run SHALL NOT open any socket, local or remote.
 
 ### R9. The change is documented where people and agents look
 
-1. The README, the Pages site quickstart, `crates/code-reviewer/README.md`, both copies of the `update-m1` skill, `CLAUDE.md` and rules 06 and 07 SHALL describe the new commands and SHALL NOT describe the old tmux startup.
+1. The README, the Pages site quickstart, `crates/code-reviewer/README.md`, both copies of the `update-m1` skill, `CLAUDE.md` and rules 07 and 08 SHALL describe the new commands and SHALL NOT describe the old tmux startup.
 
 ## Out of scope
 
