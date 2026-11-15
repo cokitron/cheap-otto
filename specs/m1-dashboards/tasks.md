@@ -193,7 +193,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.8 Stop writing `LocalForward` into the SSH config block
 
-- [ ] Done
+- [x] Done
+- **PR:** #42
 - **Issue:** #15
 - **Covers:** R3.8
 - **Depends on:** nothing
