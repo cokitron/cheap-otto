@@ -1,6 +1,6 @@
 # m1-dashboards: every dashboard served from the Mac, one tunnel
 
-**Status:** in progress. Merged: T0.1 (the origin guard, #31, through #4), T1.1 (#41), T1.8 (#42), T4.1 (#43), T4.3 part a (#44), T1.2 and T1.3 (#45), T1.7 (#47), and T3.1, T3.2 and T4.6 (#48). T1.4 is in review in #51. Every other task whose dependencies are met can start.
+**Status:** implemented. Phases 0 to 5 (T0.1 to T5.2) are on `main`; the progress log below lists each PR. Only the two **LIVE** tasks are left, and only the owner runs them: T6.1 deploy and verify on the real Mac (#29), then T6.2 reboot behaviour (#30).
 
 **Tracking issue:** #6 (tasks are #7 to #30, label `m1-dashboards`, milestone "M1 dashboards").
 
@@ -79,6 +79,14 @@ All four have defaults, so no task is blocked. See `design.md` section 9.
 
 Add one line per merged PR, newest first.
 
+- T5.1 user documentation and T5.2 agent documentation: #59.
+- T4.2 provisioning installs the dashboard services, T4.3 part b `code-reviewer ui` delegates to `cheap-otto ui`, and T4.5 `open-ui.ps1` becomes a wrapper: #58, merged into `main`.
+- T2.3 rewrite `cheap-otto ui` onto the services and the one tunnel: #56, merged into `main`.
+- T1.5 uninstall and restart plans and T2.1 the `dashboards` subcommands: #54, merged into `main`.
+- T1.6 status script, parser and diagnosis: #52, merged into `main`.
+- T1.4 install script and install plan: #51, merged into `main`.
+- T2.2 tunnel management: #50, merged into `main`.
+- T4.4 the Pixel Office button starts the service, not an orphan: #49, merged into `main`.
 - T3.1 `GET /api/dashboards`, T3.2 links between dashboards in Mission Control and T4.6 shared ports and a link back to Mission Control: #48, merged into `main`.
 - T1.7 tunnel spec, decision and record: #47, merged into `main`.
 - T1.2 reserve the `dashboards` project name and T1.3 LaunchAgent templates: #45, merged into `main`.

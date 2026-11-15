@@ -8,7 +8,7 @@ A Rust 2024 Cargo workspace that turns a spare, lid-closed MacBook (`otto-mac`, 
 
 | Piece | Where | What it does |
 | --- | --- | --- |
-| `cheap-otto` | root package: `src/lib.rs` + `src/main.rs` | CLI for the dev bridge (`pair`, `sync`, `exec`, `shell`), the agent worktree farm (`delegate`, `inspect`, `ask`, `pull`), the `launchd` scheduler (`schedule`, `runs`), reversible power guardrails (`init`, `doctor`, `arbiter`, `restore`) and the Mission Control server (`serve`, `ui`, port 7420) |
+| `cheap-otto` | root package: `src/lib.rs` + `src/main.rs` | CLI for the dev bridge (`pair`, `sync`, `exec`, `shell`), the agent worktree farm (`delegate`, `inspect`, `ask`, `pull`), the `launchd` scheduler (`schedule`, `runs`), reversible power guardrails (`init`, `doctor`, `arbiter`, `restore`), the Mission Control server (`serve`, port 7420) and the dashboard services and their one tunnel (`ui`, `dashboards`) |
 | `code-reviewer` | `crates/code-reviewer`, binary only | Autonomous multi-lens PR reviewer and Code Tender that run on the Mac, with a dashboard on port 7430 |
 | Site and brand | `docs/`, `.github/assets/`, `scripts/brand/` | Static GitHub Pages site (no build step), logo and hero images, and the scripts that generate them |
 | Governance | `CONTRIBUTING.md`, `SECURITY.md`, `cubic.yaml`, `.ai/`, `.github/` | PR-only `main`, the Cubic AI review config and the context files it reads, CI, issue and PR templates |
@@ -17,9 +17,9 @@ A Rust 2024 Cargo workspace that turns a spare, lid-closed MacBook (`otto-mac`, 
 
 Assume the machine you are running on is paired with a live MacBook and live GitHub repos. Real state lives in `~/.cheap-otto/`, `~/.ssh/config`, `~/.code-reviewer/` and the gitignored `crates/code-reviewer/config/repos.toml`.
 
-- **`cheap-otto` is dry-run by default for OS and remote actions.** Those subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). Commands that only mutate local JSON, including `template add` and `template remove`, have no gate and write immediately. `pair --tunnel` opens a live tunnel. Pass side-effecting flags only when the user asked for that specific action.
+- **`cheap-otto` is dry-run by default for OS and remote actions.** Those subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). Commands that only mutate local JSON, including `template add` and `template remove`, have no gate and write immediately. `pair --tunnel` opens a live tunnel. `ui` and `dashboards install|uninstall|restart|tunnel` need `--execute` to act on the Mac or start or stop the dashboard tunnel; `dashboards status --execute` only probes. Pass side-effecting flags only when the user asked for that specific action.
 - **`code-reviewer` is live by default.** `poll`, `tend-poll`, `review`, `tend`, `sync-docs`, `ui` and mutating `m1 …` subcommands act on GitHub or the Mac at once. Use `--dry-run` on the first four. Only `doctor`, `status`, `m1 status` and `watch list` are read-only.
-- **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls both binaries and restarts the `launchd` jobs. Never run it unasked or from a feature branch.
+- **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls both binaries, restarts the `launchd` jobs and installs the dashboard services. Never run it unasked or from a feature branch.
 - **Dry runs still write state and may probe the Mac.** `init` and `pair` write directly to `--out-dir` (default `./.cheap-otto`) with no repo or home fallback. State-discovery commands such as `delegate` persist JSON into the state dir, which resolves `--state-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`. `doctor` and `init` read telemetry from the paired Mac over SSH. When you exercise the CLI, pass a temp `--out-dir` (`init`, `pair`) or `--state-dir` (the rest), and `--offline` on `init` and `doctor`.
 
 ## Commands
@@ -46,13 +46,15 @@ cargo run -p code-reviewer -- --help
 
 - **Functional core.** Every module in `src/` except `main.rs` and `server.rs` is pure, with one deliberate exception: `harness::generate_session_uuid` reads the clock and entropy. The core parses text captured from the OS (`pmset -g custom`, `sysctl`, `vm_stat`) and returns typed plans: structs holding a `Vec<CommandSpec>` (`src/command.rs`: a `program` plus discrete `args`). There is no filesystem, process or network I/O in the core, which is why the suite passes on Windows, Linux and macOS with no Mac attached.
 - **Imperative shells.** `src/main.rs` is the synchronous one: clap parsing, loading and saving state JSON, printing plans, and `execute_command_spec` behind the `--execute` gate for CLI commands. `src/server.rs` is the async one for `serve` (axum, `127.0.0.1:7420` by default). It is a live privileged control plane: its REST handlers spawn local `tmux`, `/bin/sh`, `git` and `launchctl` commands with no `--execute` gate, and its terminal API can drive tmux sessions, so keep it reachable only through localhost or an SSH tunnel. Its REST API is shared by the embedded Mission Control page (`src/ui_assets.rs`) and by external agents; CLI `--json` output is the other machine interface.
+- **Dashboards are `launchd` services on the Mac.** `src/dashboards.rs` is the registry (`DashboardSet::standard()`: Mission Control 7420, Pixel Office 7421, Reviewer 7430) and the pure planner for their LaunchAgents, install, uninstall, restart and status scripts, and the one `ssh -N` tunnel that forwards every port. `cheap-otto ui --execute` installs or updates the services, opens that tunnel (recorded in `tunnel.json`) and opens a browser; `code-reviewer ui` delegates to it only for the recorded peer on port 7430 and otherwise starts a Reviewer-only tunnel. The Reviewer's own LaunchAgent (`com.cheapotto.code-reviewer.ui`) stays with `m1-provision.sh`; `dashboards` reads, tunnels and restarts it but never installs or removes it.
 - **Remote work is an SSH command string.** The Mac's shell interprets it, so every interpolated value is validated (`validate_safe_identifier`, `validate_model_identifier`, `validate_session_identifier`) or quoted (`posix_single_quote`). The local process is always spawned with discrete args.
 - **Naming contract on the Mac.** Many modules depend on these, so change them everywhere or nowhere:
   - workspace `~/otto-workspaces/<project>`, worktree `.otto-worktrees/<task-id>` inside it
   - branch `otto/<task-id>`, tmux session `otto-<task-id>` (`manual` is reserved for the human)
   - log `~/.cheap-otto/logs/<project>/<task-id>.log`, run ledger `~/.cheap-otto/runs/<project>/history.jsonl`
   - LaunchAgent label `com.cheapotto.<project>.<id>`
-- **Local state.** A `.cheap-otto/` dir of pretty-printed JSON: `peer.json`, `state-backup.json`, `projects.json`, `agents.json`, `templates.json`, `schedules.json`. Schemas grow additively (`#[serde(default)]` on new fields), because `restore` must load a backup written by an older build.
+  - managed dashboard LaunchAgents (Mission Control and Pixel Office) use `com.cheapotto.dashboards.<id>` with logs under `~/.cheap-otto/logs/dashboards/<id>.log`; the provisioner-owned Reviewer uses `com.cheapotto.code-reviewer.ui` and `~/.cheap-otto/logs/code-reviewer/ui-server.log`, so `dashboards` is a reserved project name (`RESERVED_PROJECT_NAME`)
+- **Local state.** A `.cheap-otto/` dir of pretty-printed JSON: `peer.json`, `state-backup.json`, `projects.json`, `agents.json`, `templates.json`, `schedules.json`, `tunnel.json` (the dashboard tunnel's pid and ports). Schemas grow additively (`#[serde(default)]` on new fields), because `restore` must load a backup written by an older build.
 
 ### `code-reviewer`: a synchronous appliance binary
 
@@ -82,7 +84,7 @@ cargo run -p code-reviewer -- --help
 
 ## Specs
 
-Larger work is planned in `specs/<feature>/` as requirements, then design, then tasks, and each task has a GitHub issue. `specs/README.md` is the protocol and the step-by-step for carrying out a task; follow it when asked to implement one. Current spec: `specs/m1-dashboards/` (every dashboard as a `launchd` service on the Mac, one SSH tunnel).
+Larger work is planned in `specs/<feature>/` as requirements, then design, then tasks, and each task has a GitHub issue. `specs/README.md` is the protocol and the step-by-step for carrying out a task; follow it when asked to implement one. Current spec: `specs/m1-dashboards/` (every dashboard as a `launchd` service on the Mac, one SSH tunnel), implemented except the owner's two LIVE checks on the Mac.
 
 ## Path-scoped rules
 

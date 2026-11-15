@@ -46,7 +46,7 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 
 - **Doc comments are the help text.** New subcommands and flags must have a `///` line giving their purpose; document units (`MB`, `GB`, `secs`, `%`) and defaults when relevant.
 - **Dry-run by default.** A subcommand that touches the Mac, `~/.ssh/config` or macOS settings takes a boolean gate and only prints its plan without it:
-  - `#[arg(long, visible_alias = "apply")] execute: bool` for bridge, farm and schedule commands;
+  - `#[arg(long, visible_alias = "apply")] execute: bool` for bridge, farm, schedule and dashboard commands (`ui`, `dashboards install|uninstall|restart|status|tunnel`; `dashboards list` and `install-script` only print);
   - `#[arg(long, visible_alias = "execute")] apply: bool` for `init`, `pair` and `restore`.
   A new side-effecting subcommand must follow this, and its handler prints the full plan before the `if execute { … }` block.
 - **`--json`** on commands an agent might script (`delegate`, `inspect`, `ask`, `harnesses`, `template …`). JSON goes to stdout alone, with no banner text mixed in.
@@ -55,6 +55,8 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 - **Safe defaults for the canonical appliance:** 16 GB M1 Air, 78% charge ceiling, alias `otto-mac`, ports `3000,5173,8080`.
 - **Thin handlers.** Each `run_<subcommand>` takes one `&XOptions<'_>` struct, calls planners from `cheap_otto::*`, does file I/O at the boundary and prints. No business rules in `main.rs`.
 - **Identifiers are validated at the boundary.** Project names, task ids, aliases, model names and session ids go through the `validate_*` functions before a plan is built.
+- **`dashboards` is a reserved project name.** The dashboard LaunchAgents use `com.cheapotto.dashboards.<id>`, the namespace a project called `dashboards` would get, so `reject_dashboard_label` in `src/schedule.rs` refuses a schedule in that project (`RESERVED_PROJECT_NAME` in `src/dashboards.rs`, compared case-insensitively because APFS ignores case) and one whose label would be the Reviewer's `com.cheapotto.code-reviewer.ui`. A new command that derives a label or log path from a project name keeps that check.
+- **Dashboard ids are a closed set.** `--id` and `--open` parse with `DashboardId::parse` (`mission-control`, `pixel-office`, `reviewer`), never a free string.
 
 `code-reviewer` differs on one point: its commands act immediately and offer `--dry-run` instead. Keep `--dry-run` on anything that calls an LLM or writes to GitHub.
 

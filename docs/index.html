@@ -407,7 +407,7 @@
       <div class="vitals">
         <a class="vital y" href="#bridge"><span class="label">01 · bridge</span><span class="vital-val">Bridge</span><p>Sync a Windows repo to the Mac, run native ARM64 builds, forward dev ports back to localhost.</p><span class="cmds">pair · sync · exec · shell</span></a>
         <a class="vital" href="#farm"><span class="label">02 · farm</span><span class="vital-val">Farm</span><p>Hand tasks to Claude Code, Antigravity or Kiro, each in its own git worktree and tmux session.</p><span class="cmds">delegate · inspect · ask · pull</span></a>
-        <a class="vital d" href="#farm"><span class="label">03 · watch</span><span class="vital-val">:7420</span><p>Mission Control web GUI and REST API, plus the pixel-agents office on :7421.</p><span class="cmds">ui · serve · template</span></a>
+        <a class="vital d" href="#farm"><span class="label">03 · watch</span><span class="vital-val">:7420</span><p>Mission Control web GUI and REST API, the pixel-agents office on :7421 and the reviewer on :7430: launchd services on the Mac, one tunnel.</p><span class="cmds">ui · dashboards · template</span></a>
         <a class="vital m" href="#reviewer"><span class="label">04 · night shift</span><span class="vital-val">CI</span><p>launchd schedules, overnight agent runs with draft PRs, and an 8-brain code reviewer.</p><span class="cmds">schedule · runs · code-reviewer</span></a>
         <a class="vital" href="#guardrails"><span class="label">05 · guardrails</span><span class="vital-dash" aria-hidden="true"></span><span class="vital-val">Undo</span><p>Clamshell mode, a battery ceiling and thermal arbitration, all snapshotted first.</p><span class="cmds">init · doctor · restore</span></a>
       </div>
@@ -629,7 +629,7 @@
 
   /* ---------- hero typer ---------- */
   var scenes = [
-    [['p', 'cheap-otto pair --host 100.101.102.103 --alias otto-mac --ports 3000,5173 --apply'], ['ok', '✓ ~/.ssh/config updated · otto-mac reachable over Tailscale'], ['ok', '✓ forwarding localhost:3000, localhost:5173']],
+    [['p', 'cheap-otto pair --host 100.101.102.103 --alias otto-mac --ports 3000,5173 --apply --tunnel'], ['ok', '✓ ~/.ssh/config updated · otto-mac reachable over Tailscale'], ['ok', '✓ forwarding localhost:3000, localhost:5173']],
     [['p', 'cheap-otto sync --execute'], ['c', '# my-app @ main → ~/otto-workspaces/my-app (target/ and node_modules/ excluded)'], ['ok', '✓ synced in 2.1s · remote edits protected']],
     [['p', 'cheap-otto delegate --id fix-auth-race --agent claude --model sonnet --effort high --execute'], ['c', '# worktree .otto-worktrees/fix-auth-race · tmux otto-fix-auth-race'], ['w', '■ running · verify: cargo test --all-targets']],
     [['p', 'cheap-otto pull --id fix-auth-race --execute --merge'], ['ok', '✓ fetched otto/fix-auth-race into D:\\projects\\my-app'], ['ok', '✓ merged into main · go get a coffee']]
@@ -855,7 +855,7 @@
     ['Prep the Mac', 'prepare the mac', ['<span class="c"># snapshot pmset to .cheap-otto/state-backup.json, then apply clamshell + 78% ceiling</span>', 'cargo run -p cheap-otto -- init --battery-cap 78 --apply', 'cargo run -p cheap-otto -- doctor']],
     ['Pair', 'pair windows ⇄ mac', ['cargo run -p cheap-otto -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --apply', 'cargo run -p cheap-otto -- sync --execute', 'cargo run -p cheap-otto -- exec --cmd "cargo test --all-targets" --execute']],
     ['Delegate', 'delegate + pull', ['cheap-otto harnesses --remote', 'cheap-otto delegate --id fix-auth-race --agent claude --model sonnet --effort high --verify "cargo test --all-targets" --task "Fix the token refresh race condition and add unit tests" --execute', 'cheap-otto ask --id fix-auth-race --model opus --prompt "Summarize your root-cause fix and edge cases" --execute', 'cheap-otto pull --id fix-auth-race --execute --merge']],
-    ['Watch', 'mission control', ['<span class="c"># Mission Control on http://localhost:7420 · pixel-agents office on :7421</span>', 'cheap-otto ui --execute', 'cargo run -p cheap-otto -- attach --id fix-auth-race --execute', 'cargo run -p cheap-otto -- logs --id fix-auth-race --follow --execute']],
+    ['Watch', 'mission control', ['<span class="c"># Mission Control :7420 and Pixel Office :7421 (when `pixel-agents` is installed) via `cheap-otto ui`, Reviewer :7430 via `code-reviewer m1 sync`, one tunnel</span>', 'cargo run -p cheap-otto -- ui --execute', 'cargo run -p cheap-otto -- dashboards status --execute', 'cargo run -p cheap-otto -- attach --id fix-auth-race --execute', 'cargo run -p cheap-otto -- logs --id fix-auth-race --follow --execute']],
     ['Schedule', 'night shift', ['cargo run -p cheap-otto -- schedule add --id main-ci --every 15m --on-change --ci "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test" --execute', 'cargo run -p cheap-otto -- schedule add --id nightly-audit --daily 02:00 --agent claude --task "Audit dependencies and add missing edge-case unit tests" --draft-pr --execute', 'cargo run -p cheap-otto -- runs --execute']],
     ['Undo', 'put it all back', ['<span class="c"># restore factory sleep settings and unload every launchd schedule</span>', 'cargo run -p cheap-otto -- restore --unload-schedules --remote --apply']]
   ];
