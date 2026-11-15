@@ -79,6 +79,7 @@ All four have defaults, so no task is blocked. See `design.md` section 9.
 
 Add one line per merged PR, newest first.
 
+- T5.1 user documentation and T5.2 agent documentation: #59.
 - T4.2 provisioning installs the dashboard services, T4.3 part b `code-reviewer ui` delegates to `cheap-otto ui`, and T4.5 `open-ui.ps1` becomes a wrapper: #58, merged into `main`.
 - T2.3 rewrite `cheap-otto ui` onto the services and the one tunnel: #56, merged into `main`.
 - T1.5 uninstall and restart plans and T2.1 the `dashboards` subcommands: #54, merged into `main`.
