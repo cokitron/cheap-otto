@@ -123,6 +123,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.4 Install script and install plan
 
 - [x] Done
+- **PR:** #51
 - **Issue:** #11
 - **Covers:** R1.5, R1.6, R1.7, R1.9, R1.10, R4.4
 - **Depends on:** T1.3
