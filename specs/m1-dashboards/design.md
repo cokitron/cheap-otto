@@ -514,7 +514,7 @@ All changes remain synchronous and avoid adding async runtimes, HTTP clients, or
 | `cheap-otto` not installed on the Mac | Mission Control skipped with `reason=cheap-otto-not-installed`; CLI adds "run `code-reviewer m1 sync`". |
 | `pixel-agents` not installed | Pixel Office skipped with a reason; other services installed. [R1.6] |
 | Service never listens | Install script prints `listening=0`, still attempts the other services, and exits 4; `ui` stops before the tunnel and browser and points at `~/.cheap-otto/logs/dashboards/<id>.log`. [R1.10, R3.10] |
-| Port still held after `kill -9` | Install script prints `dashboard=<id> error=port-held pid=<pid>`, skips that service without bootstrapping, and exits 4. [R1.9] |
+| Port still held after `kill -9` | Install script prints `dashboard=<id> listening=0 cause=port-held pid=<pid> last_exit=<…> log=<path>`, skips that service without bootstrapping or probing its port, and exits 4. [R1.9, R1.10] |
 | Workstation port held by a foreign process | Error naming the ports and the command to find the holder; nothing is killed. [R3.5] |
 | Tunnel exits early or times out | Error with the SSH test command (a timeout also names the ports that did not answer); a live child is terminated; `tunnel.json` removed; no browser. [R3.6] |
 | Mac unreachable | `execute_command_spec` returns the SSH failure; nothing else runs. |
