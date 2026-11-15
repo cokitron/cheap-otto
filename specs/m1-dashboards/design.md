@@ -438,6 +438,8 @@ All changes stay std-only (rule 05).
 ## 4. Security
 
 - The origin and host guard from the preceding change stays as it is. This spec adds one `GET` route and no CORS. [R7]
+- That guard is `RequestGuard` (`src/request_guard.rs`, held in `ControlPlaneState::request_guard`; the reviewer has its own copy in `crates/code-reviewer/src/request_guard.rs`). Its allowlist is keyed on the listening port, which is one more reason the tunnel must forward each port to the same number. No task here extends the allowlist, because no dashboard calls another dashboard's API.
+- Router tests must send a loopback `Host` header, and a `POST` body to the reviewer must be `Content-Type: application/json`, or the guard refuses the request.
 - Every generated listener argument is `127.0.0.1`; tests assert `0.0.0.0` never appears in a plist or script. [R1.4]
 - The install script is assembled from constants and `u16` ports. It takes no operator text, so there is nothing to inject. `--id` values are parsed into `DashboardId` before any command is built.
 - The install script kills processes by port. That is deliberate and visible: each kill prints `stray_killed=<pid>`.

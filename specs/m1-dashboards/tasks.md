@@ -26,7 +26,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 - **Issue:** #7
 - **Covers:** R7.1
 - **Depends on:** nothing
-- **Status:** in progress in its own session; the PR is stacked on #4.
+- **Status:** implemented in PR #31 (stacked on #4), waiting for review and merge.
 - **Goal:** `cheap-otto serve` and `code-reviewer serve` reject state-changing requests from a foreign `Origin` and any request with a non-loopback `Host`; `CorsLayer::permissive()` is gone.
 - **Acceptance:**
   - The PR titled `fix(security): reject cross-origin requests to local control servers` is merged.
@@ -263,7 +263,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   3. `current` is true for Mission Control.
   4. Add the route to the module's `//!` header list.
 - **Tests** in `src/server.rs`:
-  - `api_lists_dashboards_with_listening_state`: `oneshot` a `GET /api/dashboards`; status 200; three entries with the ids in registry order; `current` true only for `mission-control`; every `listening` is a boolean.
+  - `api_lists_dashboards_with_listening_state`: `oneshot` a `GET /api/dashboards` **with a `Host: 127.0.0.1:7420` header** (the request guard from T0.1 answers 403 without a loopback `Host`); status 200; three entries with the ids in registry order; `current` true only for `mission-control`; every `listening` is a boolean.
 - **Acceptance:**
   - `cargo test -p cheap-otto --lib server::tests` passes.
   - Start the `mission-control` preview (`.claude/launch.json`, port 7440) and `curl -s http://127.0.0.1:7440/api/dashboards` returns the three entries with `"port":7440` for Mission Control.
