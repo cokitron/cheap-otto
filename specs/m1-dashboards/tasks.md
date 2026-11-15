@@ -70,7 +70,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Files:** `src/schedule.rs`
 - **Steps:**
   1. Add the variant `ReservedProjectName(String)` to `ScheduleError` with the message `project name '{0}' is reserved for dashboard services`.
-  2. In `build_schedule_install_plan`, after the project name is validated, return that error when it equals `crate::dashboards::RESERVED_PROJECT_NAME`.
+  2. In `build_schedule_install_plan`, after the project name is validated, return that error when it equals `crate::dashboards::RESERVED_PROJECT_NAME`, ignoring ASCII case (APFS file names are case-insensitive).
 - **Tests** in `src/schedule.rs`:
   - `rejects_schedule_for_reserved_dashboards_project`
 - **Acceptance:** `cargo test -p cheap-otto --lib schedule::tests` passes and includes the new test.

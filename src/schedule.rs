@@ -40,6 +40,9 @@ pub enum ScheduleError {
     /// Invalid `--model` or `--effort` flag on a scheduled agent job.
     #[error(transparent)]
     Harness(#[from] HarnessError),
+    /// The project name belongs to the dashboard LaunchAgents (`com.cheapotto.dashboards.*`).
+    #[error("project name '{0}' is reserved for dashboard services")]
+    ReservedProjectName(String),
 }
 
 /// Day of week for weekly `launchd` `StartCalendarInterval` rules (`0 = Sunday .. 6 = Saturday`).
@@ -469,6 +472,10 @@ pub fn build_schedule_install_plan(
 ) -> Result<ScheduleInstallPlan, ScheduleError> {
     let _ = peer.remote_project_dir(params.project_name)?;
     let clean_project = params.project_name.trim().to_string();
+    // APFS file names ignore case, so `Dashboards` would still overwrite a dashboard plist. [R2.4]
+    if clean_project.eq_ignore_ascii_case(crate::dashboards::RESERVED_PROJECT_NAME) {
+        return Err(ScheduleError::ReservedProjectName(clean_project));
+    }
 
     let clean_id = params.job_id.trim();
     if !validate_safe_identifier(clean_id) {
@@ -1060,6 +1067,39 @@ mod tests {
         );
         assert!(plan.runner_script.contains("claude -p"));
         assert!(plan.runner_script.contains("gh pr create --draft"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_schedule_for_reserved_dashboards_project() -> Result<(), ScheduleError> {
+        let peer = PeerNode::new("otto-mac", "192.0.2.10", "admin", 22)?;
+        for project_name in ["dashboards", " dashboards ", "Dashboards"] {
+            let result = build_schedule_install_plan(
+                &peer,
+                &NewScheduleParams {
+                    job_id: "mission-control",
+                    project_name,
+                    cadence: ScheduleCadence::IntervalSecs(300),
+                    workload: ScheduledWorkload::CiPipeline {
+                        branch: "main".to_string(),
+                        command: "cargo test".to_string(),
+                        only_on_change: false,
+                    },
+                    allow_battery: false,
+                    run_at_load: false,
+                },
+            );
+            assert_eq!(
+                result.err(),
+                Some(ScheduleError::ReservedProjectName(
+                    project_name.trim().to_string()
+                ))
+            );
+        }
+        assert_eq!(
+            ScheduleError::ReservedProjectName("dashboards".to_string()).to_string(),
+            "project name 'dashboards' is reserved for dashboard services"
+        );
         Ok(())
     }
 
