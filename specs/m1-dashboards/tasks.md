@@ -156,6 +156,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.5 Uninstall and restart plans
 
 - [x] Done
+- PR: #54
 - **Issue:** #12
 - **Covers:** R8.2
 - **Depends on:** T1.4
@@ -245,6 +246,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T2.1 `dashboards` subcommands
 
 - [x] Done
+- PR: #54
 - **Issue:** #16
 - **Covers:** R1.1, R4.4, R5.1 to R5.5, R8.2, R8.4
 - **Depends on:** T1.4, T1.5, T1.6
