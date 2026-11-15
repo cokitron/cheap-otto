@@ -6,7 +6,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 **Rules for every task**
 
-- One task, one branch, one PR. Branch name: `<type>/m1-dashboards-<task-id>-<slug>`, for example `feat/m1-dashboards-t1-3-plist-templates`. `<type>` is a prefix CI accepts (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`); a branch starting with `m1-dashboards/` fails the PR governance check.
+- One row of the PR plan below, one branch, one PR, inside the PR size budget in `../README.md` (at most 600 changed lines (tests included, `Cargo.lock` excluded) and one theme). Use the branch name the plan gives. `<type>` is a prefix CI accepts (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`); a branch starting with `m1-dashboards/` fails the PR governance check.
 - The gate must pass before you open the PR:
   ```bash
   cargo fmt --all -- --check
@@ -16,7 +16,30 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 - Use the exact test names given. Add more tests if you need them; do not rename or drop the listed ones.
 - Outside a **LIVE** task, never pass `--execute` or `--apply` against the real MacBook or real GitHub repos, and never run live `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui` (`sync-docs` has no dry run). A test may pass `--execute` only with an isolated temp `--state-dir` and no live endpoint, as T2.2's `tunnel --stop --execute` test does. Only tasks marked **LIVE** touch the real MacBook, and only the owner runs them.
 - No CORS headers, no bind address other than `127.0.0.1`, no new dependencies, no `.unwrap()` or `.expect()` outside tests.
-- When done: tick the box here, add `PR: #NN` under the task, and close the issue from the PR.
+- When done: tick the box of every task (or part) in the PR and add `PR: #NN` under each. The PR closes each task's issue, except for a part of a split task that is not the last part: that PR says `part of #NN`, and the last part closes the issue.
+
+## PR plan
+
+The 21 open tasks before the LIVE rollout ship as 14 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 13) because its second half needs the new `ui`. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
+
+| PR | Tasks | Branch | Needs |
+| --- | --- | --- | --- |
+| 1 | T1.1 registry | `feat/m1-dashboards-t1-1-registry` | nothing |
+| 2 | T1.8 SSH config without forwards | `fix/m1-dashboards-t1-8-ssh-config-forwards` | nothing |
+| 3 | T4.1 testable two-binary deploy | `refactor/m1-dashboards-t4-1-build-script` | nothing |
+| 4 | T4.3 part a: reviewer fallback tunnel | `fix/m1-dashboards-t4-3a-fallback-tunnel` | nothing |
+| 5 | T1.2 reserved name, T1.3 LaunchAgent templates | `feat/m1-dashboards-t1-2-t1-3-plists` | PR 1 |
+| 6 | T1.4 install script and plan | `feat/m1-dashboards-t1-4-install-script` | PR 5 |
+| 7 | T1.5 uninstall and restart, T1.6 status | `feat/m1-dashboards-t1-5-t1-6-status` | PR 6 |
+| 8 | T1.7 tunnel spec, decision and record | `feat/m1-dashboards-t1-7-tunnel` | PR 1 |
+| 9 | T2.1 `dashboards` subcommands | `feat/m1-dashboards-t2-1-subcommands` | PR 7 |
+| 10 | T2.2 tunnel management, T2.3 new `ui` | `feat/m1-dashboards-t2-2-t2-3-ui` | PRs 2, 8, 9 |
+| 11 | T3.1 hub API, T3.2 Mission Control links, T4.6 shared ports and link back | `feat/m1-dashboards-t3-links` | PR 1 |
+| 12 | T4.2 provisioning, T4.4 Pixel Office button | `feat/m1-dashboards-t4-2-t4-4-services` | PRs 3, 9 |
+| 13 | T4.3 part b: delegate to `cheap-otto ui`, T4.5 `open-ui.ps1` | `feat/m1-dashboards-t4-3b-t4-5-delegate` | PRs 4, 10 |
+| 14 | T5.1 user docs, T5.2 agent docs | `docs/m1-dashboards-t5-docs` | PRs 12, 13 |
+
+After PR 14 the owner runs T6.1 and T6.2 on the real Mac; they produce no PR unless they find a bug.
 
 ## Phase 0: prerequisite
 
@@ -345,7 +368,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.3 `code-reviewer ui` never opens a second tunnel
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
 - **Issue:** #23
 - **Covers:** R3.6, R3.9
 - **Depends on:** T0.1, T2.3
@@ -361,6 +385,9 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
   - `delegation_is_skipped_for_custom_host_or_port`: a host other than the peer, or a port other than 7430, returns false; no host or the peer host on 7430 returns true.
   - `fallback_poll_step_decides_ready_wait_exited_or_timed_out`: all eight input combinations give the expected step.
   - `delegation_and_fallback_commands_strip_github_credentials`: for the version probe, the delegated `ui` command and the fallback tunnel command, `Command::get_envs()` shows both `GH_TOKEN` and `GITHUB_TOKEN` removed (the same assertion style as the existing `strip_github_credentials` test in `brains.rs`).
+- **Parts** (one PR each, in this order; see the PR plan):
+  - **a. Fallback tunnel** (PR 4, needs only T0.1): steps 1 and 5, and from step 4 `reviewer_fallback_tunnel_command` (through `strip_github_credentials`) and removing the `DEFAULT_PIXEL_PORT` forward. `open_tunneled_ui` always takes the fallback path for now. `cheap-otto dashboards status` does not exist yet, so the failure message names the port and suggests checking the Reviewer service with `code-reviewer m1 status`; part b switches the hint to `cheap-otto dashboards status --execute`. Tests: `fallback_tunnel_forwards_only_the_reviewer_port`, `fallback_poll_step_decides_ready_wait_exited_or_timed_out`. The PR says `part of #23`.
+  - **b. Delegate to `cheap-otto ui`** (PR 13, needs T2.3): steps 2 and 3, the rest of step 4, and the step 5 hint naming `cheap-otto dashboards status --execute`. Tests: `delegation_is_skipped_for_custom_host_or_port`, `delegation_and_fallback_commands_strip_github_credentials`. The PR closes #23.
 - **Acceptance:** `cargo test -p code-reviewer server::tests` passes. Do not run `code-reviewer ui`.
 
 ### T4.4 The Pixel Office button starts the service, not an orphan
