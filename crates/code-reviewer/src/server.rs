@@ -1,4 +1,9 @@
 //! Lightweight single-binary HTTP/JSON server (`127.0.0.1:7430`) and SSH-tunneled browser launcher (`code-reviewer ui`).
+//!
+//! The server has no authentication and its `POST` routes act for real, so every request passes
+//! `request_guard` before routing: the `Host` must name this server, a state-changing request
+//! that carries an `Origin` must come from an allowlisted one, and a `POST` body must be
+//! `application/json`. No CORS headers are sent.
 
 use crate::brains::{
     ADVERSARIAL_BRAIN, SPECIALIST_BRAINS, append_kb_entry, is_runner_authenticated,
@@ -11,6 +16,7 @@ use crate::config::{
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
+use crate::request_guard::{RequestGuard, host_name_of, require_json_body};
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
     TenderTriggerDecision, TrackedPrState, evaluate_tender_trigger,
@@ -49,6 +55,8 @@ struct CachedHostProbe {
 pub struct ServerContext {
     pub workspace: PathBuf,
     pub config_path: PathBuf,
+    /// `Host` names and web origins allowed to reach the router, checked on every request.
+    guard: RequestGuard,
     probe_cache: Mutex<Option<CachedHostProbe>>,
 }
 
@@ -58,23 +66,34 @@ pub fn run_ui_server(
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr)?;
+    // The origin allowlist is keyed on the port browsers see, so read it back from the socket.
+    let port = listener
+        .local_addr()
+        .map_or(DEFAULT_UI_PORT, |addr| addr.port());
+    let guard = RequestGuard::for_listener(&host_name_of(bind_addr).unwrap_or_default(), port);
     println!(
         "[code-reviewer-ui] Dashboard listening on http://{} (workspace: {})",
         bind_addr,
         workspace.display()
     );
+    println!(
+        "[code-reviewer-ui] Trusted origins: {}",
+        guard.trusted_origins().join(", ")
+    );
 
     let ctx = Arc::new(ServerContext {
         workspace: workspace.to_path_buf(),
         config_path: config_path.to_path_buf(),
+        guard,
         probe_cache: Mutex::new(None),
     });
 
     for incoming in listener.incoming() {
-        let Ok(stream) = incoming else { continue };
+        let Ok(mut stream) = incoming else { continue };
         let ctx_clone = Arc::clone(&ctx);
         thread::spawn(move || {
-            let _ = handle_http_connection(stream, &ctx_clone);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = handle_http_connection(&mut stream, &ctx_clone);
         });
     }
     Ok(())
@@ -178,11 +197,64 @@ fn open_browser(url: &str) {
     }
 }
 
-fn handle_http_connection(
-    mut stream: TcpStream,
+/// The parts of an HTTP request head the server acts on.
+#[derive(Debug, PartialEq, Eq)]
+struct RequestHead<'a> {
+    method: &'a str,
+    target: &'a str,
+    host: Option<&'a str>,
+    origin: Option<&'a str>,
+    content_type: Option<&'a str>,
+    content_length: usize,
+}
+
+impl<'a> RequestHead<'a> {
+    /// Parses the request line and the headers the guard and the body reader need. Never fails:
+    /// a missing request line reads as `GET /` and unknown headers are ignored.
+    fn parse(head: &'a str) -> Self {
+        let mut lines = head.lines();
+        let mut request_line = lines.next().unwrap_or("").split_whitespace();
+        let mut parsed = Self {
+            method: request_line.next().unwrap_or("GET"),
+            target: request_line.next().unwrap_or("/"),
+            host: None,
+            origin: None,
+            content_type: None,
+            content_length: 0,
+        };
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let (name, value) = (name.trim(), value.trim());
+            if name.eq_ignore_ascii_case("host") {
+                record_single_valued(&mut parsed.host, value);
+            } else if name.eq_ignore_ascii_case("origin") {
+                record_single_valued(&mut parsed.origin, value);
+            } else if name.eq_ignore_ascii_case("content-type") {
+                parsed.content_type.get_or_insert(value);
+            } else if name.eq_ignore_ascii_case("content-length") {
+                parsed.content_length = value.parse::<usize>().unwrap_or(0);
+            }
+        }
+        parsed
+    }
+}
+
+/// Stores a header that must appear once. A repeat with a different value blanks it, so the
+/// guard refuses the request instead of trusting whichever copy came first.
+fn record_single_valued<'a>(slot: &mut Option<&'a str>, value: &'a str) {
+    match *slot {
+        None => *slot = Some(value),
+        Some(previous) if previous != value => *slot = Some(""),
+        Some(_) => {}
+    }
+}
+
+fn handle_http_connection<S: Read + Write>(
+    stream: &mut S,
     ctx: &ServerContext,
 ) -> Result<(), std::io::Error> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buf = vec![0u8; 65_536];
     let n = stream.read(&mut buf)?;
     if n == 0 {
@@ -190,25 +262,13 @@ fn handle_http_connection(
     }
 
     let raw = String::from_utf8_lossy(&buf[..n]);
-    let (head, body_part) = match raw.split_once("\r\n\r\n") {
+    let (head_text, body_part) = match raw.split_once("\r\n\r\n") {
         Some((h, b)) => (h, b.to_string()),
         None => (raw.as_ref(), String::new()),
     };
-
-    let mut lines = head.lines();
-    let req_line = lines.next().unwrap_or("");
-    let mut parts = req_line.split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let full_target = parts.next().unwrap_or("/");
-
-    let mut content_len: usize = 0;
-    for header in lines {
-        if let Some((k, v)) = header.split_once(':')
-            && k.trim().eq_ignore_ascii_case("content-length")
-        {
-            content_len = v.trim().parse::<usize>().unwrap_or(0);
-        }
-    }
+    let head = RequestHead::parse(head_text);
+    let method = head.method;
+    let content_len = head.content_length;
 
     let mut body = body_part.into_bytes();
     while body.len() < content_len && body.len() < 512_000 {
@@ -218,11 +278,28 @@ fn handle_http_connection(
             Ok(r) => body.extend_from_slice(&extra[..r]),
         }
     }
+
+    // Nothing below this point runs for a request the guard refuses: not the page, not a route.
+    let verdict = ctx
+        .guard
+        .evaluate(method, head.host, head.origin)
+        .and_then(|()| require_json_body(method, head.content_type, content_len));
+    if let Err(rejection) = verdict {
+        let bytes =
+            serde_json::to_vec(&json!({ "error": rejection.to_string() })).unwrap_or_default();
+        return write_http_response(
+            stream,
+            rejection.http_status(),
+            "application/json; charset=utf-8",
+            &bytes,
+        );
+    }
+
     let body_str = String::from_utf8_lossy(&body[..body.len().min(content_len)]).to_string();
 
-    let (path, query) = match full_target.split_once('?') {
+    let (path, query) = match head.target.split_once('?') {
         Some((p, q)) => (p, q),
-        None => (full_target, ""),
+        None => (head.target, ""),
     };
 
     if method == "GET"
@@ -233,7 +310,7 @@ fn handle_http_connection(
             || path == "/pixel")
     {
         return write_http_response(
-            &mut stream,
+            stream,
             200,
             "text/html; charset=utf-8",
             DASHBOARD_HTML.as_bytes(),
@@ -244,17 +321,17 @@ fn handle_http_connection(
     match result {
         Ok(val) => {
             let bytes = serde_json::to_vec(&val).unwrap_or_else(|_| b"{}".to_vec());
-            write_http_response(&mut stream, 200, "application/json; charset=utf-8", &bytes)
+            write_http_response(stream, 200, "application/json; charset=utf-8", &bytes)
         }
         Err(msg) => {
             let bytes = serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default();
-            write_http_response(&mut stream, 400, "application/json; charset=utf-8", &bytes)
+            write_http_response(stream, 400, "application/json; charset=utf-8", &bytes)
         }
     }
 }
 
-fn write_http_response(
-    stream: &mut TcpStream,
+fn write_http_response<S: Write>(
+    stream: &mut S,
     status: u16,
     content_type: &str,
     body: &[u8],
@@ -262,7 +339,9 @@ fn write_http_response(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
+        415 => "Unsupported Media Type",
         _ => "Server Error",
     };
     let header = format!(
@@ -1606,4 +1685,240 @@ fn start_pixel_agents_server() -> Result<Value, String> {
         "ok": true,
         "message": "Launched pixel-agents background server; refreshing connection..."
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const OWN_HOST: &str = "127.0.0.1:7430";
+    const OWN_ORIGIN: &str = "http://127.0.0.1:7430";
+    const FOREIGN_ORIGIN: &str = "http://evil.example";
+
+    /// In-memory connection: the request is read from `input`, the response lands in `output`.
+    struct FakeStream {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for FakeStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buf)
+        }
+    }
+
+    impl Write for FakeStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A context whose workspace and config do not exist, so no route can touch real state.
+    fn test_context() -> ServerContext {
+        let workspace = std::env::temp_dir().join("code-reviewer-guard-test-missing-workspace");
+        ServerContext {
+            config_path: workspace.join("config").join("repos.toml"),
+            workspace,
+            guard: RequestGuard::for_listener("127.0.0.1", 7430),
+            probe_cache: Mutex::new(None),
+        }
+    }
+
+    fn request(method: &str, target: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut raw = format!("{method} {target} HTTP/1.1\r\n");
+        for (name, value) in headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if !body.is_empty() {
+            raw.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        raw.push_str("\r\n");
+        raw.push_str(body);
+        raw
+    }
+
+    /// Sends one raw request through the connection handler and returns `(status, response)`.
+    fn exchange(raw_request: &str) -> (u16, String) {
+        let mut stream = FakeStream {
+            input: Cursor::new(raw_request.as_bytes().to_vec()),
+            output: Vec::new(),
+        };
+        handle_http_connection(&mut stream, &test_context()).unwrap();
+        let response = String::from_utf8_lossy(&stream.output).to_string();
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap();
+        (status, response)
+    }
+
+    #[test]
+    fn parses_request_line_and_guard_headers_case_insensitively() {
+        let head = RequestHead::parse(
+            "POST /api/repos/add?x=1 HTTP/1.1\r\nHOST: localhost:7430\r\norigin:http://localhost:7430\r\nContent-type: application/json; charset=utf-8\r\ncontent-LENGTH: 42\r\nX-Other: ignored",
+        );
+        assert_eq!(
+            head,
+            RequestHead {
+                method: "POST",
+                target: "/api/repos/add?x=1",
+                host: Some("localhost:7430"),
+                origin: Some("http://localhost:7430"),
+                content_type: Some("application/json; charset=utf-8"),
+                content_length: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_empty_and_headerless_heads_without_panicking() {
+        for head in [
+            "",
+            "\r\n",
+            "GET",
+            "GET / HTTP/1.1\r\nno-colon-line\r\n: empty-name",
+        ] {
+            let parsed = RequestHead::parse(head);
+            assert_eq!((parsed.host, parsed.origin), (None, None), "{head:?}");
+            assert_eq!(parsed.content_length, 0);
+        }
+    }
+
+    #[test]
+    fn blanks_conflicting_duplicate_host_and_origin_headers() {
+        let head = RequestHead::parse(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1:7430\r\nHost: evil.example\r\nOrigin: http://127.0.0.1:7430\r\nOrigin: http://evil.example",
+        );
+        assert_eq!((head.host, head.origin), (Some(""), Some("")));
+
+        let repeated =
+            RequestHead::parse("GET / HTTP/1.1\r\nHost: 127.0.0.1:7430\r\nHost: 127.0.0.1:7430");
+        assert_eq!(repeated.host, Some(OWN_HOST));
+    }
+
+    #[test]
+    fn serves_health_and_the_page_to_a_loopback_host() {
+        let (status, response) =
+            exchange(&request("GET", "/api/health", &[("Host", OWN_HOST)], ""));
+        assert_eq!(status, 200);
+        assert!(response.ends_with(r#"{"ok":true}"#), "{response}");
+
+        for host in [OWN_HOST, "localhost:7430", "[::1]:7430"] {
+            let (status, response) = exchange(&request("GET", "/", &[("Host", host)], ""));
+            assert_eq!(status, 200, "{host}");
+            assert!(response.contains("Content-Type: text/html"), "{host}");
+        }
+    }
+
+    #[test]
+    fn refuses_rebound_or_missing_host_before_serving_page_or_api() {
+        for target in ["/", "/api/health", "/api/overview"] {
+            for headers in [&[("Host", "evil.example:7430")][..], &[][..]] {
+                let (status, response) = exchange(&request("GET", target, headers, ""));
+                assert_eq!(status, 403, "{target} with {headers:?}");
+                assert!(response.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_cross_origin_simple_post_before_routing() {
+        // A `text/plain` JSON body is the request a foreign page can send without a preflight.
+        // `{}` fails to parse in the route, so a regression here could still not flip a repo.
+        for origin in [FOREIGN_ORIGIN, "null", "http://127.0.0.1:7420"] {
+            let (status, response) = exchange(&request(
+                "POST",
+                "/api/repos/toggle",
+                &[
+                    ("Host", OWN_HOST),
+                    ("Origin", origin),
+                    ("Content-Type", "text/plain;charset=UTF-8"),
+                ],
+                "{}",
+            ));
+            assert_eq!(status, 403, "{origin}");
+            assert!(
+                response.contains("cross-origin request refused"),
+                "{origin}"
+            );
+            assert!(!response.to_ascii_lowercase().contains("access-control-"));
+        }
+    }
+
+    #[test]
+    fn refuses_cross_origin_post_without_a_body() {
+        // An unknown route stands in for the body-less action routes: the guard never sees the
+        // path, and a regression must not be able to start a real poll from the test suite.
+        let (status, _) = exchange(&request(
+            "POST",
+            "/api/guard-probe",
+            &[("Host", OWN_HOST), ("Origin", FOREIGN_ORIGIN)],
+            "",
+        ));
+        assert_eq!(status, 403);
+    }
+
+    #[test]
+    fn passes_same_origin_json_post_and_originless_post_to_the_router() {
+        for headers in [
+            &[
+                ("Host", OWN_HOST),
+                ("Origin", OWN_ORIGIN),
+                ("Content-Type", "application/json"),
+            ][..],
+            &[("Host", OWN_HOST), ("Content-Type", "application/json")][..],
+        ] {
+            let (status, response) = exchange(&request("POST", "/api/guard-probe", headers, "{}"));
+            assert_eq!(status, 400, "{headers:?}");
+            assert!(
+                response.contains("unknown endpoint `POST /api/guard-probe`"),
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_post_body_that_is_not_declared_json() {
+        for headers in [
+            &[("Host", OWN_HOST), ("Content-Type", "text/plain")][..],
+            &[("Host", OWN_HOST)][..],
+            &[
+                ("Host", OWN_HOST),
+                ("Origin", OWN_ORIGIN),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+            ][..],
+        ] {
+            let (status, response) = exchange(&request("POST", "/api/repos/toggle", headers, "{}"));
+            assert_eq!(status, 415, "{headers:?}");
+            assert!(response.starts_with("HTTP/1.1 415 Unsupported Media Type\r\n"));
+        }
+    }
+
+    #[test]
+    fn preflight_from_foreign_origin_gets_no_cors_allow_header() {
+        let (status, response) = exchange(&request(
+            "OPTIONS",
+            "/api/actions/review",
+            &[
+                ("Host", OWN_HOST),
+                ("Origin", FOREIGN_ORIGIN),
+                ("Access-Control-Request-Method", "POST"),
+                ("Access-Control-Request-Headers", "content-type"),
+            ],
+            "",
+        ));
+        assert_eq!(status, 400);
+        assert!(
+            !response
+                .to_ascii_lowercase()
+                .contains("access-control-allow")
+        );
+    }
 }

@@ -10,6 +10,12 @@
 //! - Interactive M1 `tmux` pane inspection & command input (`GET/POST /api/terminal/{session}`)
 //! - Real-time `stream-json` -> `pixel-agents` (`v1.6.0`) HTTP `HookEvent` forwarder so every
 //!   harness (`claude`, `agy`, `kiro`, `custom`) animates inside the Flat & Diorama Pixel Office.
+//!
+//! The API has no authentication, so every request first passes `guard_request`: the `Host`
+//! must name this server, and a state-changing request that carries an `Origin` must come from
+//! an allowlisted one (see [`crate::request_guard`]). No CORS headers are sent: the page calls
+//! its own origin, the `pixel-agents` office is an iframe, and the hook forwarder is a
+//! server-to-server `POST`, so nothing in a browser needs to read this API cross-origin.
 
 use crate::agent_session::{
     AgentSessionRecord, AgentSessionRegistry, AgentSessionStatus, AgentTurnEntry,
@@ -24,6 +30,7 @@ use crate::harness::{
     parse_stream_json_line, standard_efforts,
 };
 use crate::macos::{MacOsStateBackup, parse_pmset_batt_ac_power};
+use crate::request_guard::RequestGuard;
 use crate::schedule::{
     NewScheduleParams, ScheduleCadence, ScheduleRegistry, ScheduledWorkload,
     build_schedule_install_plan, parse_run_history_jsonl,
@@ -33,9 +40,10 @@ use crate::ui_assets::MISSION_CONTROL_HTML;
 use crate::worktree::{AgentRunner, posix_single_quote, slugify_task_prompt};
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
-    http::StatusCode,
-    response::{Html, IntoResponse},
+    extract::{Path as AxumPath, Request, State},
+    http::{HeaderMap, HeaderName, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -52,7 +60,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
-use tower_http::cors::CorsLayer;
 
 /// Runtime configuration for `cheap-otto serve`.
 #[derive(Debug, Clone)]
@@ -75,10 +82,28 @@ pub struct ServeConfig {
 pub struct ControlPlaneState {
     /// Immutable server paths and ports.
     pub config: ServeConfig,
+    /// `Host` names and web origins allowed to reach the API, checked on every request.
+    pub request_guard: RequestGuard,
     /// Byte offsets already forwarded per `.ndjson` file so hook events are never duplicated.
     pub forwarded_offsets: Mutex<HashMap<PathBuf, u64>>,
     /// Serializes writes to `agents.json`, `templates.json`, and `schedules.json`.
     pub store_lock: Mutex<()>,
+}
+
+impl ControlPlaneState {
+    /// Builds the shared state for `config`. The request guard trusts only the server's own
+    /// origins on `config.host:config.port`; grow `request_guard` before serving to let
+    /// another local dashboard call this API.
+    #[must_use = "the state must be passed to build_router"]
+    pub fn new(config: ServeConfig) -> Self {
+        let request_guard = RequestGuard::for_listener(&config.host, config.port);
+        Self {
+            config,
+            request_guard,
+            forwarded_offsets: Mutex::new(HashMap::new()),
+            store_lock: Mutex::new(()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,34 +296,68 @@ pub fn build_router(state: Arc<ControlPlaneState>) -> Router {
             "/api/terminal/{session}",
             get(handle_capture_terminal).post(handle_send_terminal_keys),
         )
-        .layer(CorsLayer::permissive())
+        // Added last so it wraps every route above, and the fallback, before any handler runs.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            guard_request,
+        ))
         .with_state(state)
+}
+
+/// Middleware in front of every route: refuses with `403` a request whose `Host` is not this
+/// server (DNS rebinding) or whose state-changing method comes from a foreign web `Origin`.
+///
+/// It only extracts the headers; the decision is [`RequestGuard::evaluate`].
+async fn guard_request(
+    State(state): State<Arc<ControlPlaneState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // HTTP/2 and absolute-form targets carry the host in the URI instead of a `Host` header.
+    let host = header_text(request.headers(), &header::HOST)
+        .or_else(|| request.uri().authority().map(|a| a.as_str()));
+    let origin = header_text(request.headers(), &header::ORIGIN);
+    match state
+        .request_guard
+        .evaluate(request.method().as_str(), host, origin)
+    {
+        Ok(()) => next.run(request).await,
+        Err(rejection) => error_response(StatusCode::FORBIDDEN, &rejection.to_string()),
+    }
+}
+
+/// Reads a header as text. A header that is present but not valid text becomes `Some("")`, so
+/// the guard refuses it instead of treating it as absent.
+fn header_text<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
+    headers.get(name).map(|v| v.to_str().unwrap_or(""))
 }
 
 /// Starts `cheap-otto serve` on `host:port` alongside the background `pixel-agents` NDJSON hook forwarder.
 ///
 /// # Errors
 /// Returns an error if the TCP listener cannot bind to `host:port`.
-pub async fn run_serve(config: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_serve(mut config: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&config.state_dir)?;
     fs::create_dir_all(&config.workspaces_root)?;
 
+    let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+    // The origin allowlist is keyed on the port browsers see, so resolve `--port 0` first.
+    config.port = listener.local_addr().map_or(config.port, |a| a.port());
     let bind_addr = format!("{}:{}", config.host, config.port);
-    let state = Arc::new(ControlPlaneState {
-        config,
-        forwarded_offsets: Mutex::new(HashMap::new()),
-        store_lock: Mutex::new(()),
-    });
+    let state = Arc::new(ControlPlaneState::new(config));
 
     spawn_pixel_bridge_loop(Arc::clone(&state));
 
-    let app = build_router(state);
-    let listener = TcpListener::bind(&bind_addr).await?;
     println!("=== cheap-otto serve (Mission Control & Agent API) ===");
     println!("Listening on    : http://{bind_addr}");
     println!(
         "API Endpoints   : http://{bind_addr}/api/harnesses | /api/agents | /api/templates | /api/schedules"
     );
+    println!(
+        "Trusted origins : {}",
+        state.request_guard.trusted_origins().join(", ")
+    );
+    let app = build_router(state);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -1666,32 +1725,268 @@ mod tests {
     fn test_router(tmp_dir: &Path) -> Router {
         let peer =
             PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap_or_else(|_| unreachable!());
-        let state = Arc::new(ControlPlaneState {
-            config: ServeConfig {
-                host: "127.0.0.1".to_string(),
-                port: 7420,
-                pixel_port: 7421,
-                state_dir: tmp_dir.join("state"),
-                workspaces_root: tmp_dir.join("workspaces"),
-                peer,
-            },
-            forwarded_offsets: Mutex::new(HashMap::new()),
-            store_lock: Mutex::new(()),
-        });
+        let state = Arc::new(ControlPlaneState::new(ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 7420,
+            pixel_port: 7421,
+            state_dir: tmp_dir.join("state"),
+            workspaces_root: tmp_dir.join("workspaces"),
+            peer,
+        }));
         build_router(state)
+    }
+
+    const OWN_HOST: &str = "127.0.0.1:7420";
+    const OWN_ORIGIN: &str = "http://127.0.0.1:7420";
+    const FOREIGN_ORIGIN: &str = "http://evil.example";
+
+    fn temp_state_dir() -> PathBuf {
+        let tmp =
+            std::env::temp_dir().join(format!("cheap-otto-srv-test-{}", generate_session_uuid()));
+        let _ = fs::create_dir_all(&tmp);
+        tmp
+    }
+
+    /// Builds a request the way a browser or CLI would send it: `host` and `origin` are the
+    /// raw header values, and a JSON `body` brings its `Content-Type`.
+    fn guarded_request(
+        method: &str,
+        uri: &str,
+        host: Option<&str>,
+        origin: Option<&str>,
+        body: Option<Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(h) = host {
+            builder = builder.header("host", h);
+        }
+        if let Some(o) = origin {
+            builder = builder.header("origin", o);
+        }
+        let body = match body {
+            Some(val) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(&val).unwrap())
+            }
+            None => Body::empty(),
+        };
+        builder.body(body).unwrap()
+    }
+
+    fn template_body(id: &str) -> Value {
+        json!({ "template_id": id, "harness": "claude", "prompt": "Run the nightly audit" })
+    }
+
+    async fn error_message(res: Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), 65_536).await.unwrap();
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        val["error"].as_str().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn same_origin_post_passes_the_guard() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        for (host, origin) in [
+            (OWN_HOST, OWN_ORIGIN),
+            ("localhost:7420", "http://localhost:7420"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(guarded_request(
+                    "POST",
+                    "/api/templates",
+                    Some(host),
+                    Some(origin),
+                    Some(template_body("same-origin")),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::CREATED, "{origin}");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn post_without_origin_passes_for_cli_and_agents() {
+        let tmp = temp_state_dir();
+        let res = test_router(&tmp)
+            .oneshot(guarded_request(
+                "POST",
+                "/api/templates",
+                Some(OWN_HOST),
+                None,
+                Some(template_body("from-cli")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_post_to_terminal_is_forbidden() {
+        let tmp = temp_state_dir();
+        // Never a session that could exist: if the guard regressed, tmux must find no target.
+        let res = test_router(&tmp)
+            .oneshot(guarded_request(
+                "POST",
+                "/api/terminal/guard-test-no-such-session",
+                Some(OWN_HOST),
+                Some(FOREIGN_ORIGIN),
+                Some(json!({ "keys": "", "enter": false })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(!res.headers().contains_key("access-control-allow-origin"));
+        assert_eq!(
+            error_message(res).await,
+            "cross-origin request refused: Origin is not on this server's allowlist"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_write_is_forbidden_on_every_state_changing_route() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        for (method, uri) in [
+            ("POST", "/api/agents"),
+            ("POST", "/api/agents/demo/t1/ask"),
+            ("DELETE", "/api/agents/demo/t1"),
+            ("POST", "/api/templates"),
+            ("POST", "/api/templates/nightly/run"),
+            ("DELETE", "/api/templates/nightly"),
+            ("POST", "/api/schedules"),
+            ("POST", "/api/schedules/demo/nightly/run-now"),
+            ("DELETE", "/api/schedules/demo/nightly"),
+        ] {
+            for origin in [FOREIGN_ORIGIN, "null", "http://127.0.0.1:7421"] {
+                let res = app
+                    .clone()
+                    .oneshot(guarded_request(
+                        method,
+                        uri,
+                        Some(OWN_HOST),
+                        Some(origin),
+                        None,
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::FORBIDDEN,
+                    "{method} {uri} from {origin}"
+                );
+            }
+        }
+        assert!(!tmp.join("state").exists(), "a refused request wrote state");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn preflight_from_foreign_origin_gets_no_cors_allow_header() {
+        let tmp = temp_state_dir();
+        let res = test_router(&tmp)
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/terminal/manual")
+                    .header("host", OWN_HOST)
+                    .header("origin", FOREIGN_ORIGIN)
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        for name in [
+            "access-control-allow-origin",
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+            "access-control-allow-credentials",
+        ] {
+            assert!(!res.headers().contains_key(name), "{name}");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn non_loopback_host_is_forbidden_on_every_path() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        for uri in ["/", "/api/health", "/api/pixel-office", "/no-such-route"] {
+            for host in [
+                Some("evil.example"),
+                Some("evil.example:7420"),
+                Some("127.0.0.1.evil.example:7420"),
+                None,
+            ] {
+                let res = app
+                    .clone()
+                    .oneshot(guarded_request("GET", uri, host, None, None))
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::FORBIDDEN, "{uri} via {host:?}");
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_get_passes_without_cors_allow_header() {
+        let tmp = temp_state_dir();
+        let res = test_router(&tmp)
+            .oneshot(guarded_request(
+                "GET",
+                "/api/health",
+                Some("localhost:7420"),
+                Some(FOREIGN_ORIGIN),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!res.headers().contains_key("access-control-allow-origin"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn host_in_request_target_is_checked_when_no_host_header_is_sent() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        for (uri, expected) in [
+            ("http://127.0.0.1:7420/api/health", StatusCode::OK),
+            ("http://evil.example/api/health", StatusCode::FORBIDDEN),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(guarded_request("GET", uri, None, None, None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), expected, "{uri}");
+        }
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
     async fn api_serves_ui_launches_agent_queries_it_and_manages_templates() {
-        let tmp =
-            std::env::temp_dir().join(format!("cheap-otto-srv-test-{}", generate_session_uuid()));
-        let _ = fs::create_dir_all(&tmp);
+        let tmp = temp_state_dir();
         let app = test_router(&tmp);
 
         // 1. GET / serves Mission Control HTML
         let res_root = app
             .clone()
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("host", OWN_HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res_root.status(), StatusCode::OK);
@@ -1714,6 +2009,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/agents")
+                    .header("host", OWN_HOST)
                     .header("content-type", "application/json")
                     .body(Body::from(create_body))
                     .unwrap(),
@@ -1737,6 +2033,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/agents/cheapotto/review-auth/ask")
+                    .header("host", OWN_HOST)
                     .header("content-type", "application/json")
                     .body(Body::from(ask_body))
                     .unwrap(),
@@ -1769,6 +2066,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/templates")
+                    .header("host", OWN_HOST)
                     .header("content-type", "application/json")
                     .body(Body::from(tpl_body))
                     .unwrap(),

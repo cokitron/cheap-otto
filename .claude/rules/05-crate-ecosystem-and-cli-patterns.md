@@ -19,7 +19,7 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 | `clap` | `4.5` (`derive`) | both | CLI parsing with `#[derive(Parser, Subcommand, Args)]` |
 | `serde`, `serde_json` | `1.0` | both | State files, plans, API payloads, `stream-json` NDJSON |
 | `thiserror` | `2.0` | both | Domain error enums |
-| `axum`, `tokio`, `tower-http` | `0.8`, `1.43`, `0.6` | `cheap-otto` only | The `serve` REST API and the `pixel-agents` event forwarder |
+| `axum`, `tokio` | `0.8`, `1.43` | `cheap-otto` only | The `serve` REST API and the `pixel-agents` event forwarder |
 | `tower` | `0.5` (dev) | `cheap-otto` only | `oneshot` router tests |
 | `chrono`, `toml` | `0.4`, `0.8` | `code-reviewer` only | Ledger timestamps, `config/repos.toml` |
 

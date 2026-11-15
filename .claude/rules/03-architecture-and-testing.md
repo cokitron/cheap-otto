@@ -32,7 +32,7 @@ The root crate separates pure decision-making from side effects.
 | Kind | Where | How it runs |
 | --- | --- | --- |
 | Unit tests | `#[cfg(test)] mod tests` at the bottom of each module | `cargo test -p cheap-otto --lib <module>::tests` or `cargo test -p code-reviewer <module>::tests` |
-| API tests | `src/server.rs`, `#[tokio::test]` | Build the router with `build_router` and drive it with `tower::ServiceExt::oneshot`. No socket is opened. |
+| API tests | `src/server.rs`, `#[tokio::test]` | Build the router with `build_router` and drive it with `tower::ServiceExt::oneshot`. No socket is opened. Send a loopback `Host` header, or the request guard answers `403`. |
 | CLI integration | `tests/cli_integration.rs` | Spawns the real binary via `env!("CARGO_BIN_EXE_cheap-otto")` in an isolated temp dir |
 
 - Integration tests must stay hermetic: create a temp dir with `create_isolated_temp_dir`, pass `--out-dir` or `--state-dir` into it, pass `--offline` to `init` and `doctor`, and never pass `--execute` or `--apply`. They assert on the printed plan and on the state files written.

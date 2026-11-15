@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod hardware;
 pub mod harness;
 pub mod macos;
+pub mod request_guard;
 pub mod schedule;
 pub mod server;
 pub mod template;
