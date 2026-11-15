@@ -36,7 +36,8 @@ There are two layers, and they have different rules.
 - **Remote command: a POSIX string the Mac's shell will interpret.** The last argument to `ssh` is shell text, so every interpolated value must be one of:
   - a typed number (`u8`, `u16`, `u32`, `u8::from(bool)`);
   - an identifier that passed a validator: `validate_safe_identifier` (project names, task ids, aliases, users, tmux sessions), `validate_model_identifier` or `validate_session_identifier`. All three allow only a small ASCII set and reject a leading `-`, so a value can't be read as a flag;
-  - free text wrapped by `posix_single_quote` (prompts, verify commands, questions).
+  - free text wrapped by `posix_single_quote` (prompts, questions).
+  - **Known exception:** the verify command. `build_agent_ask_plan` interpolates `verify_and_commit` raw (`src/agent_session.rs:431-437`), as do the follow-up and task handlers in `src/server.rs` (`verify_command`, around lines 772-779 and 1306-1317). Treat it as trusted operator input: it must never carry PR, agent or API-derived text. It is **not** only operator-reachable today: it is set by the CLI `--verify` flag and by the `verify_command` field of Mission Control REST requests, and that API is unauthenticated (section 6). This is an open injection gap, not a satisfied rule. Fixing it means validated command arguments or an operator-configured allowlist; until then, don't add new paths that feed it.
   New interpolation points need one of these three, plus a test with a hostile input such as `x'; rm -rf ~ #`.
 - **`launchd` plists** are XML: pass every interpolated string through `xml_escape` (`src/schedule.rs`).
 - **Multi-line remote scripts go over stdin.** `code-reviewer` uses `run_ssh_script` (`ssh host sh -s`), which also normalises CRLF. Prefer it to nesting quotes, especially from PowerShell.
@@ -46,9 +47,12 @@ There are two layers, and they have different rules.
 
 ## 4. Tokens & Agent Subprocesses (`code-reviewer`)
 
-- GitHub access is `gh` with a per-account `GH_TOKEN` read from `~/.code-reviewer/tokens/<user>.token` (mode 600). It never mutates the global `gh` login.
-- Every LLM agent and check-command subprocess is spawned with `.env_remove("GH_TOKEN")` and `.env_remove("GITHUB_TOKEN")`. A new spawn site for `claude`, `agy` or a repo check must do the same.
-- Code Tender refuses to commit `.env`, `.env.*` (except `.env.example`), keys and submodule changes; it checks `git status --porcelain` before every commit. Extend that guard rather than working around it.
+- GitHub access is `gh` with a per-account `GH_TOKEN` read from `~/.code-reviewer/tokens/<user>.token` (`github.rs`). It never mutates the global `gh` login. Token files are operator-provisioned: `code-reviewer m1 …` writes them on the Mac with mode 600 (`m1.rs`). Nothing in the code validates file or directory permissions when a token is read, so a looser mode is not detected.
+- GitHub token stripping is per spawn site, not global:
+  - **Stripped** (`.env_remove("GH_TOKEN")` and `.env_remove("GITHUB_TOKEN")`): the Code Tender check/install command (`tender.rs:3320`), the Code Tender verify/check shell (`tender.rs:3562`) and the Code Tender `claude`/`agy` agent spawns (`tender.rs:3655`).
+  - **Not stripped:** the reviewer and adversarial-verifier `claude`/`agy` spawns in `brains.rs`, and the other helper spawns (for example `cargo` and `prettier` in `tender.rs`, and the auth probes). These inherit the ambient environment. They are gaps to be fixed.
+  - A new spawn site for `claude`, `agy` or a repo check must strip both variables.
+- Code Tender's pre-commit guard is `find_forbidden_modified_files` (`tender.rs:1517`). It reads `git status --porcelain` output and rejects paths by name only: basename `.env`, `.env.*` (except `.env.example`), paths ending `.token`, `.pem` or `.key`, paths containing `.git/`, and `peer.json`. It does **not** detect submodule or gitlink changes, so a changed gitlink can pass and be staged. Extend the guard (for example by checking gitlink mode `160000` entries) rather than working around it.
 - Bot-authored comments carry `BOT_COMMENT_MARKER` or `BOT_TENDER_MARKER`. Loop prevention depends on them, so every comment or review body the tool posts must carry one.
 - Never log or print a token, and never write one outside `tokens_dir`.
 

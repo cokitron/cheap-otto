@@ -40,7 +40,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - **Module docs:** every module starts with a `//!` header that says what it owns and how it fits the larger flow. Update it when the module's job changes.
 - **Public API docs:** every public struct, enum, field and function in the root library has a `///` comment explaining why it exists and what it preserves. Fewer than ten items lack one today, so don't add to that count.
 - **`# Errors` section** on public functions returning `Result`, naming the variants and the conditions.
-- **clap doc comments are the help text.** A `///` on a subcommand or flag shows up in `--help`, so write it for the operator: purpose, units, default.
+- **clap doc comments are the help text.** A `///` on a subcommand or flag shows up in `--help`, so new flags and subcommands must have one, written for the operator: purpose, plus units and defaults when relevant.
 - **Comments explain why.**
   - Good: `// Keep normal battery sleep intact (5 min) in case AC power is disconnected for long periods`
   - Good: `// Rule 1: Fanless Thermal Guard (pause heavy queues when thermal state >= Serious)`

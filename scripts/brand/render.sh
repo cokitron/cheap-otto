@@ -32,7 +32,7 @@ find_chrome() {
       return 0
     fi
   done
-  for candidate in google-chrome chromium chromium-browser microsoft-edge; do
+  for candidate in google-chrome google-chrome-stable chromium chromium-browser microsoft-edge microsoft-edge-stable; do
     if command -v "${candidate}" >/dev/null 2>&1; then
       command -v "${candidate}"
       return 0
@@ -77,7 +77,7 @@ shot() {
   "${BROWSER}" --headless=new --disable-gpu --hide-scrollbars --allow-file-access-from-files \
     --virtual-time-budget=5000 --force-device-scale-factor="${scale}" \
     --window-size="${width},${height}" --screenshot="${target}" \
-    "${TEMPLATE_URL}?k=${kind}&a=${ASSETS_URL}" >/dev/null 2>&1
+    "${TEMPLATE_URL}?k=${kind}&a=$(node -p 'encodeURIComponent(process.argv[1])' "${ASSETS_URL}")" >/dev/null 2>&1
   if [[ ! -s "$5" ]]; then
     echo "error: ${BROWSER} did not write $5" >&2
     exit 1

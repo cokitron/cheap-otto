@@ -25,7 +25,7 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 
 ### Adding a dependency
 - **`std` first.** No crate for string handling, path joining or formatting the standard library already covers.
-- **`code-reviewer` stays synchronous and std-only.** No `tokio`, `axum`, `reqwest`, `hyper` or TLS stack: its HTTP server is hand-rolled on `std::net`, and GitHub and Drive access goes through `gh`, `gdrive` and `gdocs` subprocesses. It is compiled on the Mac on every deploy, so build time is a feature.
+- **`code-reviewer` stays synchronous and avoids async runtimes, HTTP clients and TLS stacks.** Its HTTP server is hand-rolled on `std::net`, and GitHub and Drive access goes through `gh`, `gdrive` and `gdocs` subprocesses. It is compiled on the Mac on every deploy, so build time is a feature.
 - **`cheap-otto` uses the async runtime only for `serve`.** Other subcommands are synchronous; don't make them async to reuse a helper.
 - **No HTTP client, `regex`, `openssl` or `anyhow`.** Network calls are subprocesses, parsing is string splitting, errors are `thiserror` enums.
 - **No platform-only crates as unconditional dependencies** (`core-foundation`, `io-kit`, `windows`). Everything must compile on all three OSes.
@@ -44,7 +44,7 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 
 ## 3. `clap` Conventions (`src/main.rs`)
 
-- **Doc comments are the help text.** Every subcommand and flag has a `///` line giving purpose, units (`MB`, `GB`, `secs`, `%`) and default.
+- **Doc comments are the help text.** New subcommands and flags must have a `///` line giving their purpose; document units (`MB`, `GB`, `secs`, `%`) and defaults when relevant.
 - **Dry-run by default.** A subcommand that touches the Mac, `~/.ssh/config` or macOS settings takes a boolean gate and only prints its plan without it:
   - `#[arg(long, visible_alias = "apply")] execute: bool` for bridge, farm and schedule commands;
   - `#[arg(long, visible_alias = "execute")] apply: bool` for `init`, `pair` and `restore`.

@@ -26,7 +26,7 @@ Each binary ships one web page compiled into the executable. There is no bundler
 
 ## 2. The API is the product
 
-- The page talks only to its own server with relative `fetch('/api/…')` calls. Anything the page can do, an external agent can do with the same request, so design routes for both: JSON in, JSON out, stable field names.
+- Control-plane calls use relative `fetch('/api/…')` requests. Mission Control also embeds the separately served pixel-agents office: it asks `/api/pixel-office` for the port and token, then points the iframe at `http://<page host>:<pixel_port>/` (`loadPixelOffice` in `src/ui_assets.rs`). That is the one non-relative URL; keep it optional and don't add others. Anything the page can do, an external agent can do with the same request, so design routes for both: JSON in, JSON out, stable field names.
 - New Mission Control behaviour is a route in `build_router` plus a handler that calls a core planner (rule 03), then UI. Cover the route in the `#[tokio::test]` at the bottom of `src/server.rs` with `oneshot`.
 - The dashboard's routes are a `match (method, path)` in `crates/code-reviewer/src/server.rs`. `POST /api/actions/*`, `/api/tender/*`, `/api/settings/*` and `/api/repos/*` act for real: they start reviews, push fixes and rewrite `config/repos.toml`.
 - Validate path and body identifiers in the handler (`validate_safe_identifier`, `validate_repo_slug`) before using them in a command or a path.
@@ -48,6 +48,6 @@ Each binary ships one web page compiled into the executable. There is no bundler
 | `mission-control` | `cheap-otto serve --port 7440 --state-dir target/preview-state --workspaces-root target/preview-workspaces` | The real page against an empty throwaway state dir. No SSH calls. |
 | `reviewer-dashboard` | `code-reviewer --workspace crates/code-reviewer serve --bind 127.0.0.1:7441` | The real page reading the local ledger in `~/.code-reviewer`. |
 
-- Rendering and `GET` requests are safe on both.
-- On the reviewer dashboard, **don't click action buttons or send `POST` requests** while previewing: they run against the real config and accounts.
+- Rendering is safe on both, but not every `GET`: the reviewer dashboard's `GET /api/tender/open-prs` polls GitHub and syncs the ledger (`crates/code-reviewer/src/server.rs`).
+- On the reviewer dashboard, **don't click action buttons, open the open-PR picker, or send `POST` requests** while previewing: they run against the real config and accounts. To exercise them, point the preview at a disposable config and state dir instead of `~/.code-reviewer`.
 - After a UI change, rebuild (the HTML is compiled in), reload, and check the browser console for errors. Check a narrow viewport too; operators open these on laptops beside a terminal.

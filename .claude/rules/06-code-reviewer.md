@@ -26,8 +26,8 @@ launchd (120s) → poll: one batched GraphQL query per repo, no LLM call when no
   → state.rs TriggerDecision: initial review | re-review (new push or human reply) | post-merge docs
   → detached per-PR worker process (up to max_parallel_prs)
       → read-only git worktree pinned to head.sha
-      → brains 01..07 in parallel, lead runner alternating claude ⇄ agy, failover on quota errors
-      → 08-adversarial-verifier, path-sharded, sees only `path:line` + claim
+      → applicable brains 01..07 in waves capped by `max_parallel_brains_per_pr`, lead runner alternating claude ⇄ agy, failover on quota errors
+      → 08-adversarial-verifier, path-sharded, receives stripped candidate metadata and reads the referenced files/direct callers
       → diff.rs: inline comment if the line is inside a diff hunk, else summary observation
       → github.rs: one atomic review (COMMENT | APPROVE | REQUEST_CHANGES)
   → ledger ~/.code-reviewer/state.json + reviews/<owner>__<repo>/pr-<N>/ (+ optional Drive doc)
@@ -52,7 +52,7 @@ The only component that writes to other people's branches. Its limits are load-b
 
 ## 4. Prompts and knowledge bases are product, not docs
 
-- `brains/<NN-name>/PROMPT.md` plus `kb/lessons.md`, `kb/false-positives.md` and `kb/exemplars.md`. Each brain reads only its own KB. `tender-agents/` follows the same shape.
+- `brains/<NN-name>/PROMPT.md` plus `kb/lessons.md`, `kb/false-positives.md` and `kb/exemplars.md`. Each brain reads only its own KB. Tender agents use `PROMPT.md` plus optional `notes.md`, per-agent `kb/lessons.md`, and shared files under `tender-agents/kb/` (`check-recipes.md`, `do-not-repeat.md`, `patterns-fixed.md`); they have no `false-positives.md` or `exemplars.md`.
 - KB entries are appended by `code-reviewer kb add` and from the dashboard; keep the files append-friendly and don't reformat existing entries.
 - A prompt change alters what gets posted on PRs. Treat it like a code change: say what behaviour changes and why, and keep the output contract the parser expects (ids, `path:line`, severity and confidence tags).
 - Brain ids are referenced by number and name in code, config, the dashboard and the README table. Renaming one means changing all four.

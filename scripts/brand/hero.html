@@ -39,8 +39,11 @@
 <body>
 <div id="v"></div>
 <script>
-  var q = new URLSearchParams(location.search), kind = q.get('k') || 'night';
-  var A = q.get('a') || '../../docs/assets/';
+  var q = new URLSearchParams(location.search), kind = q.get('k');
+  if (['night', 'paper', 'social'].indexOf(kind) < 0) kind = 'night';
+  var A = (q.get('a') || '../../docs/assets/').replace(/[&<>"']/g, function (c) {
+    return '&#' + c.charCodeAt(0) + ';';
+  });
   var v = document.getElementById('v');
   if (kind === 'social') {
     v.innerHTML = '<div class="social"><div class="bar"></div><img class="word" src="' + A + 'otto-wordmark-ink.svg"><span class="url">github.com/cokitron/cheap-otto</span>' +

@@ -16,10 +16,10 @@ A Rust 2024 Cargo workspace that turns a spare, lid-closed MacBook (`otto-mac`, 
 
 Assume the machine you are running on is paired with a live MacBook and live GitHub repos. Real state lives in `~/.cheap-otto/`, `~/.ssh/config`, `~/.code-reviewer/` and the gitignored `crates/code-reviewer/config/repos.toml`.
 
-- **`cheap-otto` is dry-run by default.** Side-effecting subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). `pair --tunnel` opens a live tunnel. Pass these flags only when the user asked for that specific action.
-- **`code-reviewer` is live by default.** `poll`, `tend-poll`, `review`, `tend`, `sync-docs`, `ui` and every `m1 …` subcommand act on GitHub or the Mac at once. Use `--dry-run` on the first four. Only `doctor`, `status` and `watch list` are read-only.
+- **`cheap-otto` is dry-run by default for OS and remote actions.** Those subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). Commands that only mutate local JSON, including `template add` and `template remove`, have no gate and write immediately. `pair --tunnel` opens a live tunnel. Pass side-effecting flags only when the user asked for that specific action.
+- **`code-reviewer` is live by default.** `poll`, `tend-poll`, `review`, `tend`, `sync-docs`, `ui` and mutating `m1 …` subcommands act on GitHub or the Mac at once. Use `--dry-run` on the first four. Only `doctor`, `status`, `m1 status` and `watch list` are read-only.
 - **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls the binary and restarts the `launchd` jobs. Never run it unasked or from a feature branch.
-- **Dry runs still write state and may probe the Mac.** `init`, `pair` and `delegate` persist JSON into the state dir, which resolves `--state-dir`/`--out-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`. `doctor` and `init` read telemetry from the paired Mac over SSH. When you exercise the CLI, pass a temp `--state-dir` or `--out-dir`, and `--offline` on `init` and `doctor`.
+- **Dry runs still write state and may probe the Mac.** `init` and `pair` write directly to `--out-dir` (default `./.cheap-otto`) with no repo or home fallback. State-discovery commands such as `delegate` persist JSON into the state dir, which resolves `--state-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`. `doctor` and `init` read telemetry from the paired Mac over SSH. When you exercise the CLI, pass a temp `--out-dir` (`init`, `pair`) or `--state-dir` (the rest), and `--offline` on `init` and `doctor`.
 
 ## Commands
 
@@ -43,8 +43,8 @@ cargo run -p code-reviewer -- --help
 
 ### `cheap-otto`: plans are data, execution happens at the edge
 
-- **Functional core.** Every module in `src/` except `main.rs` and `server.rs` is pure. It parses text captured from the OS (`pmset -g custom`, `sysctl`, `vm_stat`) and returns typed plans: structs holding a `Vec<CommandSpec>` (`src/command.rs`: a `program` plus discrete `args`). There is no filesystem, process or network I/O in the core, which is why the suite passes on Windows, Linux and macOS with no Mac attached.
-- **Imperative shells.** `src/main.rs` is the synchronous one: clap parsing, loading and saving state JSON, printing plans, and `execute_command_spec` behind the `--execute` gate (the only place local processes are spawned). `src/server.rs` is the async one for `serve` (axum on `127.0.0.1:7420`). Its REST API is shared by the embedded Mission Control page (`src/ui_assets.rs`) and by external agents; CLI `--json` output is the other machine interface.
+- **Functional core.** Every module in `src/` except `main.rs` and `server.rs` is pure, with one deliberate exception: `harness::generate_session_uuid` reads the clock and entropy. The core parses text captured from the OS (`pmset -g custom`, `sysctl`, `vm_stat`) and returns typed plans: structs holding a `Vec<CommandSpec>` (`src/command.rs`: a `program` plus discrete `args`). There is no filesystem, process or network I/O in the core, which is why the suite passes on Windows, Linux and macOS with no Mac attached.
+- **Imperative shells.** `src/main.rs` is the synchronous one: clap parsing, loading and saving state JSON, printing plans, and `execute_command_spec` behind the `--execute` gate for CLI commands. `src/server.rs` is the async one for `serve` (axum, `127.0.0.1:7420` by default). It is a live privileged control plane: its REST handlers spawn local `tmux`, `/bin/sh`, `git` and `launchctl` commands with no `--execute` gate, and its terminal API can drive tmux sessions, so keep it reachable only through localhost or an SSH tunnel. Its REST API is shared by the embedded Mission Control page (`src/ui_assets.rs`) and by external agents; CLI `--json` output is the other machine interface.
 - **Remote work is an SSH command string.** The Mac's shell interprets it, so every interpolated value is validated (`validate_safe_identifier`, `validate_model_identifier`, `validate_session_identifier`) or quoted (`posix_single_quote`). The local process is always spawned with discrete args.
 - **Naming contract on the Mac.** Many modules depend on these, so change them everywhere or nowhere:
   - workspace `~/otto-workspaces/<project>`, worktree `.otto-worktrees/<task-id>` inside it
@@ -53,10 +53,10 @@ cargo run -p code-reviewer -- --help
   - LaunchAgent label `com.cheapotto.<project>.<id>`
 - **Local state.** A `.cheap-otto/` dir of pretty-printed JSON: `peer.json`, `state-backup.json`, `projects.json`, `agents.json`, `templates.json`, `schedules.json`. Schemas grow additively (`#[serde(default)]` on new fields), because `restore` must load a backup written by an older build.
 
-### `code-reviewer`: a std-only appliance binary
+### `code-reviewer`: a synchronous appliance binary
 
-- **No async runtime, no HTTP crate.** `server.rs` is a hand-rolled `std::net` server. GitHub access goes through `gh` subprocesses with a per-account `GH_TOKEN`; agents run as `claude` and `agy` subprocesses.
-- **Review flow.** `poll` runs from `launchd` every two minutes with one batched GraphQL query, so idle ticks cost no AI tokens. `state.rs` picks the trigger (initial review, re-review after a push or reply, post-merge docs). Each PR gets a detached worker. `brains.rs` runs brains `01`–`07` in parallel in a read-only worktree pinned to the head SHA, then `08-adversarial-verifier` strikes unproven claims. `diff.rs` keeps only inline comments that land inside diff hunks, because one bad line makes GitHub reject the whole review. `github.rs` posts it in one call and the ledger goes to `~/.code-reviewer/state.json`.
+- **No async runtime, no HTTP/TLS stack.** `server.rs` is a hand-rolled `std::net` server. GitHub access goes through `gh` subprocesses with a per-account `GH_TOKEN`; agents run as `claude` and `agy` subprocesses.
+- **Review flow.** `poll` runs from `launchd` every two minutes with one batched GraphQL query, so idle ticks cost no AI tokens. `state.rs` picks the trigger (initial review, re-review after a push or reply, post-merge docs). Each PR gets a detached worker. `brains.rs` runs only the applicable brains `01`–`07`, in waves capped by `max_parallel_brains_per_pr`, in a read-only worktree pinned to the head SHA, then `08-adversarial-verifier` strikes unproven claims. `diff.rs` keeps only inline comments that land inside diff hunks, because one bad line makes GitHub reject the whole review. `github.rs` posts it in one call and the ledger goes to `~/.code-reviewer/state.json`.
 - **Code Tender (`tender.rs`) is the write path.** It fixes review feedback in writable PR worktrees, runs the repo's check command, has the other provider verify the diff, then pushes or stages a patch.
 - **Prompts are data.** `brains/<id>/PROMPT.md` with a `kb/` folder each, and `tender-agents/`.
 
@@ -66,7 +66,7 @@ cargo run -p code-reviewer -- --help
 2. The battery charge ceiling stays in `50..=100` (default 78) and the battery sleep fallback (`pmset -b sleep 5`) is always kept.
 3. Arbiter precedence: kill-switch first, then thermal `Serious` or worse, before any other rule.
 4. No `unsafe` (`#![forbid(unsafe_code)]` at every crate root) and no `.unwrap()`, `.expect()` or `panic!` outside tests. Both crates are at zero today.
-5. Servers bind `127.0.0.1` only. Remote access goes through SSH tunnels.
+5. Servers default to `127.0.0.1`, but `cheap-otto serve --host` and `code-reviewer serve --bind` accept overrides; do not expose either server on a non-loopback address. Remote access goes through SSH tunnels.
 6. Tests need no Mac, no network and no wall-clock time.
 
 ## Conventions

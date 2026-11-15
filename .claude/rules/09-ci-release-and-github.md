@@ -24,7 +24,7 @@ cargo test --workspace --all-targets
 ## 2. Release (`.github/workflows/release.yml`)
 
 - **Trigger:** pushing a tag matching `v*`.
-- **Builds** `cargo build --release --workspace --locked` for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`.
+- **Builds** `cargo build --release --workspace --locked --target <target>` for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`.
 - **Packages** both binaries plus `README.md` and `LICENSE` as `cheap-otto-<tag>-<target>.tar.gz` (`.zip` on Windows), with `SHA256SUMS.txt`, and creates or updates the GitHub release for that tag.
 - `--locked` means a stale `Cargo.lock` fails the release. Commit the lockfile with every manifest change.
 
@@ -48,7 +48,7 @@ Tagging and pushing a tag publish binaries to the public. Do it only when the us
 
 - `.cheap-otto/`, `peer.json`, `state-backup.json` (host names, users, IPs of the operator's machines)
 - `crates/code-reviewer/config/repos.toml` (private org, repo and account names)
-- `crates/code-reviewer/living-docs/*/` and `reviews/` (content from watched private repos)
-- `.env*`, `*.token`, `*.pem`, `*.key`
+- `crates/code-reviewer/living-docs/*/` and `crates/code-reviewer/reviews/` (content from watched private repos)
+- `.env`, `.env.*` (except `.env.example`), `*.token`, `*.pem`, `*.key`
 
 Examples in docs and tests use placeholders: `192.168.1.42`, `100.101.102.103`, `admin`, `otto-mac`, `acme-org/web-app`.

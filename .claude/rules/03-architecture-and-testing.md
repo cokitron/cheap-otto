@@ -17,7 +17,7 @@ The root crate separates pure decision-making from side effects.
    - Takes the current time as a parameter (`now_epoch_secs: u64`). The one exception is session-id generation in `harness.rs`.
    - Must compile and pass its tests on Windows, Linux and macOS without Apple hardware.
 2. **Imperative shells:**
-   - `src/main.rs` (sync): clap parsing, state JSON load and save, printing, and `execute_command_spec` behind `--execute`. Handlers are `run_<subcommand>(opts: &XOptions<'_>)`.
+   - `src/main.rs` (sync): clap parsing, state JSON load and save, printing, and `execute_command_spec` behind `--execute`. Handlers are `run_<subcommand>` functions. Most take an options struct (`opts: &XOptions<'_>`), but some, such as `run_sync` and `run_attach`, take direct parameters.
    - `src/server.rs` (async, axum): the `serve` REST API. It may spawn processes and read state, but it calls the same core planners as the CLI.
    - `scripts/bootstrap-macos.sh`: one-shot setup on the Mac.
 
@@ -49,10 +49,11 @@ The root crate separates pure decision-making from side effects.
   - `merges_ssh_config_block_idempotently_without_duplicating_entries`
   - `escapes_single_quotes_in_remote_safe_agent_invocation`
   - `status_banners_carry_anti_loop_markers_and_never_retrigger`
-- **Coverage triad:**
+- **For `cheap-otto` hardware and power changes, coverage triad:**
   1. Happy path on the canonical hardware (16 GB M1 Air, AC power, nominal thermals).
   2. Boundary and degraded conditions: 8 GB x86, `Serious` thermals, the 300 s idle threshold, memory under 2048 MB, a CI build pre-empting the LLM.
   3. Invalid input: too little RAM, a ceiling outside `50..=100`, malformed or missing `pmset`/`sysctl` sections, unsafe identifiers.
+- **All other changes** (including `code-reviewer`) need a happy-path test plus a boundary or invalid-input test.
 - **Anything that builds a remote command gets an injection test** with quotes, `;`, `$()` and a leading `-` in the input.
 - **Deterministic assertions:** compare whole structs and enums with `assert_eq!` where possible. No wall-clock time, randomness or network in tests. Don't assert on absolute paths or path separators; tests run on all three OSes.
 - **A bug fix starts with a failing test** that reproduces it.
