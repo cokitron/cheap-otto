@@ -530,4 +530,70 @@ BREW_PKGS='gh jq' CARGO_PKGS='ripgrep' NPM_PKGS='pnpm' REPO_ROOT=\"$CR_ROOT\" /b
             "/Users/m/otto-workspaces/cheap-otto"
         );
     }
+
+    #[cfg(unix)]
+    fn run_dashboard_section(label: &str, stub: Option<&str>) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = include_str!("../scripts/m1-provision.sh");
+        let start = script.find("# 8. Dashboard services").unwrap();
+        let end = script
+            .find("echo \"[m1-provision] Provisioning complete.\"")
+            .unwrap();
+        assert!(start < end);
+        let section = &script[start..end];
+
+        let home =
+            std::env::temp_dir().join(format!("m1_provision_{label}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let bin_dir = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        if let Some(body) = stub {
+            let bin = bin_dir.join("cheap-otto");
+            std::fs::write(&bin, body).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("set -eu\n{section}"))
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_reports_dashboards_installed_when_the_install_script_succeeds() {
+        let out = run_dashboard_section("ok", Some("#!/bin/sh\necho 'exit 0'\n"));
+        assert!(out.contains("Dashboard services are installed"));
+        assert!(!out.contains("WARN"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_warns_when_the_install_script_fails() {
+        let out = run_dashboard_section("warn", Some("#!/bin/sh\necho 'exit 3'\n"));
+        assert!(out.contains("WARN: dashboard service install failed"));
+        assert!(!out.contains("Dashboard services are installed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_skips_when_install_script_generation_fails() {
+        let out = run_dashboard_section("gen_fail", Some("#!/bin/sh\necho 'exit 0'\nexit 2\n"));
+        assert!(out.contains("missing or too old for dashboard services; skipping"));
+        assert!(!out.contains("Dashboard services are installed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_skips_when_cheap_otto_is_missing() {
+        let out = run_dashboard_section("missing", None);
+        assert!(out.contains("missing or too old for dashboard services; skipping"));
+        assert!(!out.contains("Dashboard services are installed"));
+    }
 }
