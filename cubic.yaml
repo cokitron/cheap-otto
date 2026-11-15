@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+version: 1
+
+reviews:
+  enabled: true
+  sensitivity: medium
+  incremental_commits: true
+  check_drafts: false
+  architecture_diagrams: true
+  external_contributors_require_manual_review: false
+  show_ai_feedback_buttons: true
+  resolve_threads_when_addressed: true
+  merge_confidence: true
+  auto_approve_behavior: disabled
+  auto_approve: disabled
+  ultrareview: manual
+  auto_ultrareview: disabled
+  custom_instructions: |
+    Review `cheap-otto` and `crates/code-reviewer` as a security-sensitive, cross-platform Rust 2024 workspace that controls paired macOS/Windows developer hosts over SSH and polls GitHub Pull Requests autonomously.
+    Focus on high-signal defects: command/SSH injection, broken `#![forbid(unsafe_code)]` invariants, panic-prone `.unwrap()`/`.expect()` in production paths, integer underflow/overflow, race conditions in lockfiles or JSON state persistence, battery/thermal appliance safety regressions, cross-OS path bugs (Windows vs macOS/Linux), leaked secrets or private repository identifiers, and any weakening of Code Tender's Stage-1 author allowlist (`tender_allowed_authors`) or fork rejection (`isCrossRepository`).
+    Avoid purely stylistic nitpicks already enforced by `rustfmt` and `cargo clippy -- -D warnings`.
+  ignore:
+    files:
+      - "Cargo.lock"
+      - ".claude/worktrees/**"
+      - "crates/code-reviewer/living-docs/**"
+      - "crates/code-reviewer/reviews/**"
+      - "**/*.snap"
+    pr_labels:
+      - "skip-ai-review"
+  custom_rules:
+    - name: "Rust Safety, Error Handling & Clippy Discipline"
+      description: |
+        Enforce `#![forbid(unsafe_code)]`, idiomatic `Result` propagation without `.unwrap()` or `.expect()` in non-test production paths, saturating/checked arithmetic (`saturating_sub`, `saturating_add`, `clamp`), and cross-platform compatibility across Linux, macOS, and Windows. Flag panicking slice indexing on untrusted strings or OS command output.
+      file_paths:
+        - ".claude/rules/01-rust-idioms-and-edition-2024.md"
+        - ".claude/rules/04-clippy-formatting-and-docs.md"
+      include:
+        - "**/*.rs"
+        - "Cargo.toml"
+        - "crates/**/Cargo.toml"
+
+    - name: "Shell-Free Process Execution & SSH Transport Security"
+      description: |
+        Flag any local `Command` invocation that passes interpolated user, Git, or GitHub input into `sh -c` or `cmd /C` instead of explicit argument arrays (`CommandSpec` / `.args(...)`). Verify SSH remote scripts use `BatchMode=yes`, stream multi-line POSIX scripts over stdin with CRLF normalized to LF, and validate identifiers (`validate_safe_identifier`) against leading `-`, `..`, path separators, and shell metacharacters.
+      file_paths:
+        - ".claude/rules/02-security-and-appliance-safety.md"
+      include:
+        - "src/**/*.rs"
+        - "crates/**/*.rs"
+        - "scripts/**/*.sh"
+        - "crates/**/scripts/**/*.sh"
+
+    - name: "GitHub Polling, Untrusted Input & Code Tender Author Isolation"
+      description: |
+        Verify `crates/code-reviewer` treats all GitHub PR titles, bodies, branch names, diffs, and comments as untrusted input, strips `GH_TOKEN` and `GITHUB_TOKEN` from child LLM processes, and enforces Stage-1 poll filtering in `poll_tender_repository_for_repo`, `run_tender_poll`, and `run_single_pr_tend`: cross-repository forks (`is_fork` / `isCrossRepository`) and any PR author outside `tender_allowed_authors` must be skipped before querying threads or running Code Tender.
+      file_paths:
+        - ".ai/security-and-tender-boundaries.md"
+      include:
+        - "crates/code-reviewer/**/*.rs"
+        - "crates/code-reviewer/config/**"
+
+    - name: "State Persistence, Concurrency Locks & Fanless M1 Guards"
+      description: |
+        Verify JSON ledgers (`state.json`, `agents.json`, `state-backup.json`) use exclusive lockfiles and atomic temp-file renames, `pmset` power changes remain 100% reversible via `MacOsStateBackup` with `50..=100%` battery charge caps, and scheduled pollers/arbiters honor AC/battery floors and `kern.thermalstate` pressure on fanless Apple Silicon hosts.
+      file_paths:
+        - ".ai/architecture-and-invariants.md"
+        - ".claude/rules/03-architecture-and-testing.md"
+      include:
+        - "src/**/*.rs"
+        - "crates/**/*.rs"
+        - "crates/**/scripts/**/*.sh"
+
+    - name: "Open-Source Governance, Public Sanitization & CI Hygiene"
+      description: |
+        Flag any committed secret, `.token`, `.env`, private `config/repos.toml`, private organization/repository identifier, or hardcoded personal workstation credential in git-tracked files, workflows, prompts, or knowledge bases. Ensure new behavior includes deterministic unit or integration tests without live network or SSH dependencies.
+      file_paths:
+        - ".claude/rules/06-git-workflow-and-governance.md"
+      include:
+        - "**/*"
+      exclude:
+        - "Cargo.lock"
+
+pr_descriptions:
+  generate: true
+  skip_if_author_description: true
+  cubic_review_link: true
+  instructions: |
+    Summarize the motivation, architectural impact across `cheap-otto` and `crates/code-reviewer`, security/isolation considerations, and automated test verification concisely.
+
+issues:
+  fix_with_cubic_buttons: false
+  pr_comment_fixes: false
+  auto_fix: "off"

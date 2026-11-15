@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub const DEFAULT_M1_HOST: &str = "otto-mac";
-pub const DEFAULT_M1_REPO_PATH: &str = "~/otto-workspaces/code-reviewer";
+pub const DEFAULT_M1_REPO_PATH: &str = "~/otto-workspaces/cheap-otto";
 
 pub struct M1SyncOptions<'a> {
     pub host: &'a str,
@@ -26,7 +26,15 @@ pub struct M1SyncOptions<'a> {
 /// and UTF-8 BOMs never corrupt multi-line commands or special characters.
 pub fn run_ssh_script(host: &str, script: &str) -> Result<String, String> {
     let mut child = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", host, "sh", "-s"])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ClearAllForwardings=yes",
+            host,
+            "sh",
+            "-s",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -73,12 +81,8 @@ pub fn push_bytes_to_m1(
         safe_mode.as_str()
     };
 
-    // Expand leading `~/` to `$HOME/` safely inside single-quoted path handling.
-    let target_expr = if let Some(rest) = remote_path.strip_prefix("~/") {
-        format!("$HOME/{}", shell_escape_rel(rest))
-    } else {
-        shell_escape_rel(remote_path)
-    };
+    // Expand leading `~/` to `$HOME/` safely inside double-quoted POSIX sh paths.
+    let target_expr = remote_shell_path_expr(remote_path);
 
     let script = format!(
         "set -eu\n\
@@ -112,11 +116,7 @@ pub fn sync_everything_to_m1(
     } else {
         format!("ssh://{}{}", opts.host, opts.remote_repo_path)
     };
-    let remote_dir_expr = if let Some(rest) = opts.remote_repo_path.strip_prefix("~/") {
-        format!("$HOME/{}", shell_escape_rel(rest))
-    } else {
-        shell_escape_rel(opts.remote_repo_path)
-    };
+    let remote_dir_expr = remote_shell_path_expr(opts.remote_repo_path);
 
     // 1. Ensure named `m1` remote points to `remote_url` and push `HEAD:otto-sync`
     let _ = Command::new("git")
@@ -138,11 +138,24 @@ pub fn sync_everything_to_m1(
         return Err("failed to configure git remote `m1`".into());
     }
 
+    let prep_remote = format!(
+        "set -eu\n\
+         mkdir -p \"{repo}\"\n\
+         if [ ! -d \"{repo}/.git\" ]; then git init \"{repo}\" >/dev/null; fi\n\
+         git -C \"{repo}\" config receive.denyCurrentBranch ignore\n",
+        repo = remote_dir_expr,
+    );
+    run_ssh_script(opts.host, &prep_remote)?;
+
     println!(
         "[m1-sync] Pushing local HEAD -> {} (otto-sync)...",
         remote_url
     );
     let push_status = Command::new("git")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ClearAllForwardings=yes",
+        )
         .args([
             "-C",
             &workspace.to_string_lossy(),
@@ -167,10 +180,12 @@ pub fn sync_everything_to_m1(
          export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
          cd \"{repo}\"\n\
          git checkout -- scripts/ crates/code-reviewer/scripts/ 2>/dev/null || true\n\
-         git checkout -B main otto-sync\n\
-         cargo test --all-targets\n\
-         cargo clippy --all-targets -- -D warnings\n\
+         git checkout -f -B main otto-sync\n\
+         git reset --hard otto-sync\n\
+         cargo test --workspace --all-targets\n\
+         cargo clippy --workspace --all-targets --all-features -- -D warnings\n\
          if [ -d crates/code-reviewer ]; then\n\
+           cargo install --path . --locked --force\n\
            cargo install --path crates/code-reviewer --locked --force\n\
            CR_ROOT=\"$(pwd)/crates/code-reviewer\"\n\
          else\n\
@@ -254,9 +269,10 @@ pub fn sync_m1_reviews_to_drive(
     host: &str,
     remote_repo_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let remote_expr = remote_shell_path_expr(remote_repo_path);
     let list_script = format!(
-        "find \"{}/reviews\" -name 'observations.json' -type f 2>/dev/null || true\n",
-        shell_escape_rel(remote_repo_path)
+        "find \"{repo}/crates/code-reviewer/reviews\" \"{repo}/reviews\" -name 'observations.json' -type f 2>/dev/null || true\n",
+        repo = remote_expr
     );
     let paths_raw = run_ssh_script(host, &list_script)?;
     let mut updated_prs: Vec<TrackedPrState> = Vec::new();
@@ -364,7 +380,7 @@ pub fn print_m1_live_status(host: &str, remote_repo_path: &str) -> Result<(), St
          echo ''\n\
          echo '=== 4. Recent Poller Log Tail ==='\n\
          tail -n 18 \"$HOME/.cheap-otto/logs/code-reviewer/sched-pr-poller.log\" 2>/dev/null || true\n",
-        repo = shell_escape_rel(remote_repo_path),
+        repo = remote_shell_path_expr(remote_repo_path),
     );
     let out = run_ssh_script(host, &script)?;
     print!("{}", out);
@@ -381,6 +397,15 @@ pub fn kickstart_m1_poller(host: &str) -> Result<(), String> {
     )?;
     print!("{}", out);
     Ok(())
+}
+
+/// Expands leading `~/` to `$HOME/` so double-quoted POSIX `sh` strings resolve the remote home directory.
+pub fn remote_shell_path_expr(remote_path: &str) -> String {
+    if let Some(rest) = remote_path.strip_prefix("~/") {
+        format!("$HOME/{}", shell_escape_rel(rest))
+    } else {
+        shell_escape_rel(remote_path)
+    }
 }
 
 fn shell_escape_rel(input: &str) -> String {
@@ -424,5 +449,17 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"otto-mac:m1"), "b3R0by1tYWM6bTE=");
+    }
+
+    #[test]
+    fn expands_remote_tilde_paths_for_posix_sh() {
+        assert_eq!(
+            remote_shell_path_expr("~/otto-workspaces/cheap-otto"),
+            "$HOME/otto-workspaces/cheap-otto"
+        );
+        assert_eq!(
+            remote_shell_path_expr("/Users/m/otto-workspaces/cheap-otto"),
+            "/Users/m/otto-workspaces/cheap-otto"
+        );
     }
 }

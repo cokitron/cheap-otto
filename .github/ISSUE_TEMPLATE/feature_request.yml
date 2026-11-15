@@ -1,0 +1,19 @@
+name: Feature Request
+description: Propose a focused enhancement for cheap-otto or crates/code-reviewer
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What workflow friction or limitation does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution & Safety Considerations
+      description: Describe the CLI/UI behavior and how it preserves reversibility, cross-OS testability, and security invariants.
+    validations:
+      required: true

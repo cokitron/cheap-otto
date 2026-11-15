@@ -557,6 +557,7 @@ pub struct OpenPrSnapshot {
     pub title: String,
     pub author: String,
     pub is_draft: bool,
+    pub is_fork: bool,
     pub base_ref: String,
     pub head_ref: String,
     pub head_sha: String,
@@ -1511,9 +1512,15 @@ pub fn is_non_actionable_tender_item(
         return true;
     }
 
-    // Cubic clean-pass summaries and thread-backed summary wrappers (whose findings are already inline reviewThreads).
-    if body.contains("**No issues found**")
-        || body.contains("**All reported issues were addressed**")
+    // Cubic clean-pass summaries, auto-generated PR descriptions, and thread-backed summary wrappers
+    // (whose actionable findings are already represented as inline `reviewThreads`).
+    let body_lc = body.to_ascii_lowercase();
+    if body_lc.contains("no issues found")
+        || body_lc.contains("0 issues found")
+        || body_lc.contains("no actionable issues")
+        || body_lc.contains("all reported issues were addressed")
+        || body_lc.contains("all issues were addressed")
+        || body.contains("<!-- cubic-pr-description")
     {
         return true;
     }
@@ -1729,6 +1736,7 @@ mod tests {
             title: "feat: test".to_string(),
             author: "alice-dev".to_string(),
             is_draft: false,
+            is_fork: false,
             base_ref: "main".to_string(),
             head_ref: "feat/test".to_string(),
             head_sha: "8521991abcdef".to_string(),
@@ -1754,6 +1762,7 @@ mod tests {
             title: "docs: correct CI status".to_string(),
             author: "alice-dev".to_string(),
             is_draft: false,
+            is_fork: false,
             base_ref: "main".to_string(),
             head_ref: "docs/ci-status".to_string(),
             head_sha: "aaaa1111".to_string(),
@@ -2141,5 +2150,91 @@ mod tests {
             TenderTriggerDecision::HandleFeedback { items, .. }
                 if items.len() == 1 && items[0].feedback_id == "thread-comment:200"
         ));
+    }
+
+    #[test]
+    fn cubic_inline_threads_trigger_for_owner_while_clean_summaries_and_external_authors_skip() {
+        let cubic_clean = TenderFeedbackItem {
+            feedback_id: "review:PRR_CLEAN".to_string(),
+            thread_node_id: None,
+            reply_comment_id: None,
+            kind: TenderFeedbackKind::ReviewSummary,
+            author: "cubic-dev-ai[bot]".to_string(),
+            created_at: "2026-11-14T15:00:00Z".to_string(),
+            path: None,
+            line: None,
+            review_state: Some("COMMENTED".to_string()),
+            is_resolved: false,
+            inline_comment_count: 0,
+            answered_by_tender: false,
+            answered_by_pr_author: false,
+            latest_author_reply: None,
+            body: "<!-- cubic:review-summary -->\ncubic reviewed this PR — 0 issues found."
+                .to_string(),
+        };
+        assert!(is_non_actionable_tender_item(
+            &cubic_clean,
+            "cokitron",
+            true
+        ));
+
+        let cubic_thread_wrapper = TenderFeedbackItem {
+            inline_comment_count: 1,
+            body: "<!-- cubic:review-summary -->\ncubic found 1 issue.".to_string(),
+            ..cubic_clean.clone()
+        };
+        assert!(is_non_actionable_tender_item(
+            &cubic_thread_wrapper,
+            "cokitron",
+            true
+        ));
+
+        let cubic_inline = TenderFeedbackItem {
+            feedback_id: "thread-comment:888".to_string(),
+            thread_node_id: Some("PRRT_888".to_string()),
+            reply_comment_id: Some(888),
+            kind: TenderFeedbackKind::ReviewThreadComment,
+            author: "cubic-dev-ai[bot]".to_string(),
+            created_at: "2026-11-14T15:00:05Z".to_string(),
+            path: Some("src/cli.rs".to_string()),
+            line: Some(42),
+            review_state: None,
+            is_resolved: false,
+            inline_comment_count: 0,
+            answered_by_tender: false,
+            answered_by_pr_author: false,
+            latest_author_reply: None,
+            body: "**P1:** Reject shell metacharacters in branch name.".to_string(),
+        };
+        let owned_snap = TenderPrSnapshot {
+            pr_number: 12,
+            title: "chore: harden git strategy".to_string(),
+            author: "cokitron".to_string(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "chore/git-strategy".to_string(),
+            head_sha: "4acacac123456".to_string(),
+            feedback_items: vec![cubic_thread_wrapper, cubic_inline],
+        };
+
+        // Owner (`author_allowed = true`) gets ONLY the actionable inline thread (not the wrapper).
+        assert!(matches!(
+            evaluate_tender_trigger(None, &owned_snap, true, 3, true),
+            TenderTriggerDecision::HandleFeedback { items, .. }
+                if items.len() == 1 && items[0].feedback_id == "thread-comment:888"
+        ));
+
+        // Any other contributor (`author_allowed = false`) or fork PR is rejected with zero items!
+        assert_eq!(
+            evaluate_tender_trigger(None, &owned_snap, false, 3, true),
+            TenderTriggerDecision::SkipUnownedAuthor
+        );
+        let mut fork_snap = owned_snap;
+        fork_snap.is_fork = true;
+        assert_eq!(
+            evaluate_tender_trigger(None, &fork_snap, true, 3, true),
+            TenderTriggerDecision::SkipFork
+        );
     }
 }
