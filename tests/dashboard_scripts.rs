@@ -66,3 +66,12 @@ fn rendered_status_script_passes_sh_syntax_check() -> Result<(), Box<dyn std::er
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn rendered_uninstall_script_passes_sh_syntax_check() -> Result<(), std::io::Error> {
+    let script = cheap_otto::dashboards::render_uninstall_script(&DashboardSet::standard());
+    let (ok, stderr) = sh_syntax_check("uninstall", &script)?;
+    assert!(ok, "sh -n rejected the uninstall script: {stderr}");
+    Ok(())
+}
