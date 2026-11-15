@@ -43,6 +43,24 @@ pub enum ScheduleError {
     /// The project name belongs to the dashboard LaunchAgents (`com.cheapotto.dashboards.*`).
     #[error("project name '{0}' is reserved for dashboard services")]
     ReservedProjectName(String),
+    /// The schedule's `launchd` label is the Reviewer dashboard's LaunchAgent label.
+    #[error("launchd label '{0}' is reserved for the Reviewer dashboard service")]
+    ReservedLaunchdLabel(String),
+}
+
+/// Refuses a schedule whose LaunchAgent would be a dashboard's. [R2.4]
+///
+/// APFS file names ignore case, so `Dashboards` (or `code-reviewer` with id `UI`) would still
+/// write, boot out or kick the dashboard's plist.
+fn reject_dashboard_label(project: &str, job_id: &str) -> Result<(), ScheduleError> {
+    if project.eq_ignore_ascii_case(crate::dashboards::RESERVED_PROJECT_NAME) {
+        return Err(ScheduleError::ReservedProjectName(project.to_string()));
+    }
+    let label = format!("com.cheapotto.{project}.{job_id}");
+    if label.eq_ignore_ascii_case(crate::dashboards::REVIEWER_LAUNCHD_LABEL) {
+        return Err(ScheduleError::ReservedLaunchdLabel(label));
+    }
+    Ok(())
 }
 
 /// Day of week for weekly `launchd` `StartCalendarInterval` rules (`0 = Sunday .. 6 = Saturday`).
@@ -472,15 +490,11 @@ pub fn build_schedule_install_plan(
 ) -> Result<ScheduleInstallPlan, ScheduleError> {
     let _ = peer.remote_project_dir(params.project_name)?;
     let clean_project = params.project_name.trim().to_string();
-    // APFS file names ignore case, so `Dashboards` would still overwrite a dashboard plist. [R2.4]
-    if clean_project.eq_ignore_ascii_case(crate::dashboards::RESERVED_PROJECT_NAME) {
-        return Err(ScheduleError::ReservedProjectName(clean_project));
-    }
-
     let clean_id = params.job_id.trim();
     if !validate_safe_identifier(clean_id) {
         return Err(ScheduleError::InvalidJobId(params.job_id.to_string()));
     }
+    reject_dashboard_label(&clean_project, clean_id)?;
 
     let validated_workload = match &params.workload {
         ScheduledWorkload::CiPipeline {
@@ -828,6 +842,8 @@ pub fn build_schedule_remove_plan(
     if !validate_safe_identifier(clean_id) {
         return Err(ScheduleError::InvalidJobId(job_id.to_string()));
     }
+    // Dashboard LaunchAgents are removed only by the dashboard uninstall path.
+    reject_dashboard_label(&clean_project, clean_id)?;
 
     let launchd_label = format!("com.cheapotto.{clean_project}.{clean_id}");
     let macos_home = format!("/Users/{}", peer.ssh_user);
@@ -877,6 +893,7 @@ pub fn build_schedule_kickstart_spec(
     if !validate_safe_identifier(clean_id) {
         return Err(ScheduleError::InvalidJobId(job_id.to_string()));
     }
+    reject_dashboard_label(clean_project, clean_id)?;
     let label = format!("com.cheapotto.{clean_project}.{clean_id}");
     let port_str = peer.ssh_port.to_string();
     let dest = peer.ssh_destination();
@@ -1100,6 +1117,55 @@ mod tests {
             ScheduleError::ReservedProjectName("dashboards".to_string()).to_string(),
             "project name 'dashboards' is reserved for dashboard services"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn schedules_never_install_remove_or_kick_a_dashboard_label() -> Result<(), ScheduleError> {
+        let peer = PeerNode::new("otto-mac", "192.0.2.10", "admin", 22)?;
+        let reserved = Err(ScheduleError::ReservedProjectName("Dashboards".to_string()));
+        assert_eq!(
+            build_schedule_remove_plan(&peer, "Dashboards", "mission-control").map(|_| ()),
+            reserved
+        );
+        assert_eq!(
+            build_schedule_kickstart_spec(&peer, "Dashboards", "mission-control").map(|_| ()),
+            reserved
+        );
+        let reviewer = Err(ScheduleError::ReservedLaunchdLabel(
+            "com.cheapotto.code-reviewer.UI".to_string(),
+        ));
+        assert_eq!(
+            build_schedule_remove_plan(&peer, "code-reviewer", "UI").map(|_| ()),
+            reviewer
+        );
+        assert_eq!(
+            build_schedule_kickstart_spec(&peer, "code-reviewer", "UI").map(|_| ()),
+            reviewer
+        );
+        let install = build_schedule_install_plan(
+            &peer,
+            &NewScheduleParams {
+                job_id: "ui",
+                project_name: "code-reviewer",
+                cadence: ScheduleCadence::IntervalSecs(300),
+                workload: ScheduledWorkload::CiPipeline {
+                    branch: "main".to_string(),
+                    command: "cargo test".to_string(),
+                    only_on_change: false,
+                },
+                allow_battery: false,
+                run_at_load: false,
+            },
+        );
+        assert_eq!(
+            install.err(),
+            Some(ScheduleError::ReservedLaunchdLabel(
+                crate::dashboards::REVIEWER_LAUNCHD_LABEL.to_string()
+            ))
+        );
+        // Other code-reviewer schedules are fine.
+        assert!(build_schedule_remove_plan(&peer, "code-reviewer", "nightly").is_ok());
         Ok(())
     }
 
