@@ -8,6 +8,7 @@
 //! - Repeatable task templates (`GET/POST /api/templates`, `POST /api/templates/{id}/run`)
 //! - Native M1 `launchd` schedules & run history (`GET/POST /api/schedules`, `GET /api/runs`)
 //! - Interactive M1 `tmux` pane inspection & command input (`GET/POST /api/terminal/{session}`)
+//! - The dashboard hub: every dashboard's port and whether it is listening (`GET /api/dashboards`)
 //! - Real-time `stream-json` -> `pixel-agents` (`v1.6.0`) HTTP `HookEvent` forwarder so every
 //!   harness (`claude`, `agy`, `kiro`, `custom`) animates inside the Flat & Diorama Pixel Office.
 //!
@@ -22,6 +23,7 @@ use crate::agent_session::{
     normalize_agent_id, summarize_ndjson_and_log,
 };
 use crate::bridge::{PeerNode, validate_safe_identifier};
+use crate::dashboards::{DashboardError, DashboardId, DashboardSet, REVIEWER_PORT};
 use crate::doctor::parse_df_free_percent;
 use crate::hardware::{ThermalLevel, parse_macos_vm_stat_available_mb};
 use crate::harness::{
@@ -84,6 +86,9 @@ pub struct ControlPlaneState {
     pub config: ServeConfig,
     /// `Host` names and web origins allowed to reach the API, checked on every request.
     pub request_guard: RequestGuard,
+    /// The dashboards on this server's ports, or why those ports are not a valid set.
+    /// `run_serve` refuses to serve on `Err`; `GET /api/dashboards` answers it with a 500.
+    pub dashboards: Result<DashboardSet, DashboardError>,
     /// Byte offsets already forwarded per `.ndjson` file so hook events are never duplicated.
     pub forwarded_offsets: Mutex<HashMap<PathBuf, u64>>,
     /// Serializes writes to `agents.json`, `templates.json`, and `schedules.json`.
@@ -97,9 +102,11 @@ impl ControlPlaneState {
     #[must_use = "the state must be passed to build_router"]
     pub fn new(config: ServeConfig) -> Self {
         let request_guard = RequestGuard::for_listener(config.port);
+        let dashboards = DashboardSet::with_ports(config.port, config.pixel_port, REVIEWER_PORT);
         Self {
             config,
             request_guard,
+            dashboards,
             forwarded_offsets: Mutex::new(HashMap::new()),
             store_lock: Mutex::new(()),
         }
@@ -261,6 +268,7 @@ pub fn build_router(state: Arc<ControlPlaneState>) -> Router {
     Router::new()
         .route("/", get(handle_index))
         .route("/api/pixel-office", get(handle_pixel_office))
+        .route("/api/dashboards", get(handle_dashboards))
         .route("/api/health", get(handle_health))
         .route("/api/harnesses", get(handle_harnesses))
         .route("/api/projects", get(handle_projects))
@@ -336,18 +344,24 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str>
 ///
 /// # Errors
 /// Returns an error if `host` is not a loopback name (the API is unauthenticated, so remote
-/// access goes through an SSH tunnel), if the state directories cannot be created, or if the TCP
-/// listener cannot bind to `host:port`.
+/// access goes through an SSH tunnel), if the TCP listener cannot bind to `host:port`, if the
+/// dashboard ports are not a valid set (a port of 0 or a port used twice), or if the state
+/// directories cannot be created.
 pub async fn run_serve(mut config: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     require_loopback_bind(&config.host)?;
-    fs::create_dir_all(&config.state_dir)?;
-    fs::create_dir_all(&config.workspaces_root)?;
 
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
-    // The origin allowlist is keyed on the port browsers see, so resolve `--port 0` first.
+    // The origin allowlist and the dashboard set are keyed on the port browsers see, so
+    // resolve `--port 0` first.
     config.port = listener.local_addr().map_or(config.port, |a| a.port());
     let bind_addr = format!("{}:{}", config.host, config.port);
     let state = Arc::new(ControlPlaneState::new(config));
+    // An invalid port configuration never serves a request. [R2.2]
+    if let Err(err) = &state.dashboards {
+        return Err(format!("invalid dashboard ports: {err}").into());
+    }
+    fs::create_dir_all(&state.config.state_dir)?;
+    fs::create_dir_all(&state.config.workspaces_root)?;
 
     spawn_pixel_bridge_loop(Arc::clone(&state));
 
@@ -485,6 +499,32 @@ async fn handle_pixel_office(State(state): State<Arc<ControlPlaneState>>) -> imp
             "token": Value::Null,
         }))
     }
+}
+
+/// `GET /api/dashboards`: every dashboard in registry order, with whether its port answers on
+/// this machine. Mission Control is the `current` one. [R6.1]
+async fn handle_dashboards(State(state): State<Arc<ControlPlaneState>>) -> Response {
+    let set = match &state.dashboards {
+        Ok(set) => set,
+        Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    };
+    let mut dashboards = Vec::with_capacity(set.services().len());
+    for service in set.services() {
+        let listening = tokio::time::timeout(
+            Duration::from_millis(250),
+            TcpStream::connect(("127.0.0.1", service.port)),
+        )
+        .await
+        .is_ok_and(|connected| connected.is_ok());
+        dashboards.push(json!({
+            "id": service.id.slug(),
+            "name": service.display_name,
+            "port": service.port,
+            "listening": listening,
+            "current": service.id == DashboardId::MissionControl,
+        }));
+    }
+    Json(json!({ "dashboards": dashboards })).into_response()
 }
 
 async fn handle_health(State(state): State<Arc<ControlPlaneState>>) -> impl IntoResponse {
@@ -2078,6 +2118,90 @@ mod tests {
             .unwrap();
         assert_eq!(res_tpl.status(), StatusCode::CREATED);
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    fn test_router_with_ports(tmp_dir: &Path, port: u16, pixel_port: u16) -> Router {
+        let peer =
+            PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap_or_else(|_| unreachable!());
+        build_router(Arc::new(ControlPlaneState::new(ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            pixel_port,
+            state_dir: tmp_dir.join("state"),
+            workspaces_root: tmp_dir.join("workspaces"),
+            peer,
+        })))
+    }
+
+    #[tokio::test]
+    async fn api_lists_dashboards_with_listening_state() {
+        let tmp = temp_state_dir();
+        let res = test_router(&tmp)
+            .oneshot(guarded_request(
+                "GET",
+                "/api/dashboards",
+                Some(OWN_HOST),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 65_536).await.unwrap();
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = val["dashboards"].as_array().unwrap();
+        let ids: Vec<&str> = entries.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["mission-control", "pixel-office", "reviewer"]);
+        let ports: Vec<u64> = entries
+            .iter()
+            .map(|d| d["port"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ports, [7420, 7421, 7430]);
+        for entry in entries {
+            assert!(entry["listening"].is_boolean(), "{entry}");
+            assert!(entry["name"].is_string(), "{entry}");
+            let is_mission_control = entry["id"] == "mission-control";
+            assert_eq!(entry["current"], is_mission_control, "{entry}");
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn api_dashboards_reports_invalid_port_configuration() {
+        let tmp = temp_state_dir();
+        let res = test_router_with_ports(&tmp, 7420, 7420)
+            .oneshot(guarded_request(
+                "GET",
+                "/api/dashboards",
+                Some(OWN_HOST),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error_message(res).await.contains("7420"));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn run_serve_refuses_duplicate_dashboard_ports_before_touching_disk() {
+        let tmp = temp_state_dir();
+        let peer =
+            PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap_or_else(|_| unreachable!());
+        let result = run_serve(ServeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            pixel_port: REVIEWER_PORT,
+            state_dir: tmp.join("state"),
+            workspaces_root: tmp.join("workspaces"),
+            peer,
+        })
+        .await;
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("invalid dashboard ports"), "{message}");
+        assert!(!tmp.join("state").exists());
         let _ = fs::remove_dir_all(&tmp);
     }
 

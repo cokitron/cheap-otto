@@ -79,6 +79,8 @@ pub const MISSION_CONTROL_HTML: &str = r####"<!DOCTYPE html>
   .pill.err { color: var(--err); border-color: rgba(248,81,73,0.35); }
   .pill.purple { color: var(--purple); border-color: rgba(188,140,255,0.35); }
   .hud-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  a.pill { color: var(--accent); text-decoration: none; }
+  a.pill:hover { color: var(--accent-hover); border-color: var(--accent); }
   .view-modes { display: flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 8px; border: 1px solid var(--border); }
   .view-modes button {
     background: transparent;
@@ -272,6 +274,7 @@ pub const MISSION_CONTROL_HTML: &str = r####"<!DOCTYPE html>
   <div class="brand">
     <span>🦀 cheap-otto</span>
     <span class="pill purple">M1 Mission Control</span>
+    <span class="hud-pills" id="siblingDashboards"></span>
   </div>
   <div class="hud-pills" id="hudPills">
     <span class="pill">Connecting to M1...</span>
@@ -564,6 +567,19 @@ async function loadPixelOffice() {
 }
 
 function reloadOfficeFrame() { loadPixelOffice(); }
+
+// Plain links to the other dashboards that are up. Navigation only: no dashboard calls
+// another's API, so no CORS is involved. A failed fetch leaves the header as it was.
+async function loadSiblingDashboards() {
+  try {
+    const data = await api('/api/dashboards');
+    const host = window.location.hostname || 'localhost';
+    const links = (data.dashboards || [])
+      .filter(d => d.listening && !d.current && Number.isInteger(d.port))
+      .map(d => `<a class="pill" href="http://${escapeHtml(host)}:${d.port}/" target="_blank" rel="noopener">${escapeHtml(d.name)} ↗</a>`);
+    document.getElementById('siblingDashboards').innerHTML = links.join('');
+  } catch (_) { /* leave the container empty */ }
+}
 
 async function loadHealth() {
   try {
@@ -986,6 +1002,7 @@ async function refreshAll() {
 
 (async function boot() {
   await loadPixelOffice();
+  loadSiblingDashboards();
   await loadHarnessesAndProjects();
   await refreshAll();
   setInterval(refreshAll, 3000);
