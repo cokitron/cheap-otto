@@ -102,8 +102,14 @@ pub fn run_ui_server(
     Ok(())
 }
 
+/// How long `code-reviewer ui` waits for its fallback tunnel to answer before giving up.
+const FALLBACK_TUNNEL_DEADLINE: Duration = Duration::from_secs(5);
+
 /// Starts or reuses an SSH local port-forward (`127.0.0.1:<port> -> <host>:127.0.0.1:<port>`)
 /// and opens the Internal CI Dashboard in the user's default browser.
+///
+/// The tunnel forwards only the Reviewer port: Pixel Office belongs to the single
+/// `cheap-otto ui` tunnel, and forwarding it here as well would collide with that one.
 pub fn open_tunneled_ui(
     workspace: &Path,
     host: &str,
@@ -111,10 +117,10 @@ pub fn open_tunneled_ui(
     port: u16,
     no_open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let local_addr = format!("127.0.0.1:{}", port);
+    let local_addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
     let url = format!("http://{}", local_addr);
 
-    if TcpStream::connect_timeout(&local_addr.parse()?, Duration::from_millis(350)).is_err() {
+    if TcpStream::connect_timeout(&local_addr, Duration::from_millis(350)).is_err() {
         // Ensure remote `com.cheapotto.code-reviewer.ui` (or detached `code-reviewer serve`) is running on M1
         let ensure_remote = format!(
             "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
@@ -129,38 +135,10 @@ pub fn open_tunneled_ui(
         );
         let _ = crate::m1::run_ssh_script(host, &ensure_remote);
 
-        println!(
-            "[ui] Opening background SSH tunnel http://127.0.0.1:{port} + pixel-agents :{pixel} -> {host}...",
-            port = port,
-            pixel = DEFAULT_PIXEL_PORT,
-            host = host,
-        );
-        let _child = Command::new("ssh")
-            .current_dir(workspace)
-            .args([
-                "-N",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ServerAliveInterval=30",
-                "-L",
-                &format!("127.0.0.1:{0}:127.0.0.1:{0}", port),
-                "-L",
-                &format!("127.0.0.1:{0}:127.0.0.1:{0}", DEFAULT_PIXEL_PORT),
-                host,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        for _ in 0..20 {
-            if TcpStream::connect_timeout(&local_addr.parse()?, Duration::from_millis(250)).is_ok()
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
+        println!("[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host}...");
+        let mut command = reviewer_fallback_tunnel_command(host, port);
+        let mut child = command.current_dir(workspace).spawn()?;
+        wait_for_fallback_tunnel(&mut child, &local_addr, port)?;
     }
 
     println!("[ui] Code Reviewer Dashboard ready at: {}", url);
@@ -168,6 +146,95 @@ pub fn open_tunneled_ui(
         open_browser(&url);
     }
     Ok(())
+}
+
+/// The `ssh` arguments for the fallback tunnel: one `-L` for the Reviewer port, nothing else.
+fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-N",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "BatchMode=yes",
+        "-L",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    args.push(format!("127.0.0.1:{port}:127.0.0.1:{port}"));
+    args.push(host.to_string());
+    args
+}
+
+/// The fallback `ssh` tunnel process, with no stdio and without `GH_TOKEN` or `GITHUB_TOKEN`.
+fn reviewer_fallback_tunnel_command(host: &str, port: u16) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args(reviewer_fallback_tunnel_args(host, port))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
+/// What one tick of the fallback tunnel poll decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackStep {
+    Ready,
+    Wait,
+    FailExited,
+    FailTimedOut,
+}
+
+/// Decides one poll tick. An open port wins; then an exited `ssh`; then the deadline.
+fn fallback_poll_step(port_open: bool, child_exited: bool, deadline_passed: bool) -> FallbackStep {
+    if port_open {
+        FallbackStep::Ready
+    } else if child_exited {
+        FallbackStep::FailExited
+    } else if deadline_passed {
+        FallbackStep::FailTimedOut
+    } else {
+        FallbackStep::Wait
+    }
+}
+
+/// Polls the local port until the tunnel answers. On failure the `ssh` child is killed if it is
+/// still running and always reaped, so no stray process is left holding the port.
+fn wait_for_fallback_tunnel(
+    child: &mut std::process::Child,
+    local_addr: &std::net::SocketAddr,
+    port: u16,
+) -> Result<(), String> {
+    let deadline = Instant::now() + FALLBACK_TUNNEL_DEADLINE;
+    loop {
+        let port_open = TcpStream::connect_timeout(local_addr, Duration::from_millis(250)).is_ok();
+        // A `try_wait` error means the child can no longer be tracked: treat it as gone.
+        let child_exited = !matches!(child.try_wait(), Ok(None));
+        let reason = match fallback_poll_step(port_open, child_exited, Instant::now() >= deadline) {
+            FallbackStep::Ready => return Ok(()),
+            FallbackStep::Wait => {
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            FallbackStep::FailExited => "ssh exited before the tunnel came up",
+            FallbackStep::FailTimedOut => "the tunnel did not answer within 5 s",
+        };
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        return Err(format!(
+            "could not tunnel the Reviewer dashboard on 127.0.0.1:{port}: {reason}; \
+             check the Mac with `cheap-otto dashboards status --execute`"
+        ));
+    }
 }
 
 fn open_browser(url: &str) {
@@ -1787,6 +1854,65 @@ mod tests {
     const OWN_HOST: &str = "127.0.0.1:7430";
     const OWN_ORIGIN: &str = "http://127.0.0.1:7430";
     const FOREIGN_ORIGIN: &str = "http://evil.example";
+
+    #[test]
+    fn fallback_tunnel_forwards_only_the_reviewer_port() {
+        let args = reviewer_fallback_tunnel_args("otto-mac", 7430);
+        let forwards: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.as_str() == "-L")
+            .map(|(i, _)| args.get(i + 1).cloned().unwrap_or_default())
+            .collect();
+        assert_eq!(forwards, vec!["127.0.0.1:7430:127.0.0.1:7430".to_string()]);
+        assert!(!args.iter().any(|arg| arg.contains("7421")));
+        for option in [
+            "ServerAliveCountMax=3",
+            "ConnectTimeout=10",
+            "ExitOnForwardFailure=yes",
+            "BatchMode=yes",
+        ] {
+            assert!(args.iter().any(|arg| arg == option), "missing {option}");
+        }
+        assert_eq!(args.first().map(String::as_str), Some("-N"));
+        assert_eq!(args.last().map(String::as_str), Some("otto-mac"));
+
+        let custom = reviewer_fallback_tunnel_args("otto-mac", 8430);
+        assert!(custom.contains(&"127.0.0.1:8430:127.0.0.1:8430".to_string()));
+        assert!(!custom.iter().any(|arg| arg.contains("7430")));
+
+        let cmd = reviewer_fallback_tunnel_command("otto-mac", 7430);
+        assert_eq!(cmd.get_program(), "ssh");
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(removed.contains(&"GH_TOKEN".to_string()));
+        assert!(removed.contains(&"GITHUB_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn fallback_poll_step_decides_ready_wait_exited_or_timed_out() {
+        use FallbackStep::{FailExited, FailTimedOut, Ready, Wait};
+        let cases = [
+            ((false, false, false), Wait),
+            ((false, false, true), FailTimedOut),
+            ((false, true, false), FailExited),
+            ((false, true, true), FailExited),
+            ((true, false, false), Ready),
+            ((true, false, true), Ready),
+            ((true, true, false), Ready),
+            ((true, true, true), Ready),
+        ];
+        for ((port_open, child_exited, deadline_passed), expected) in cases {
+            assert_eq!(
+                fallback_poll_step(port_open, child_exited, deadline_passed),
+                expected,
+                "port_open={port_open} child_exited={child_exited} deadline_passed={deadline_passed}"
+            );
+        }
+    }
 
     /// In-memory connection: the request is read from `input`, the response lands in `output`.
     struct FakeStream {
