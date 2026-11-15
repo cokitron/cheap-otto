@@ -1,5 +1,7 @@
 # Tasks: dashboards served from the M1
 
+Tracking issue: #6. Each task below has its own issue.
+
 Read `../README.md` (how to carry out a task), then `requirements.md` and `design.md`. Section numbers below, such as "design 3.3", refer to `design.md`.
 
 **Rules for every task**
@@ -21,7 +23,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 ### T0.1 Origin and host guard on both dashboard servers
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #7
 - **Covers:** R7.1
 - **Depends on:** nothing
 - **Status:** in progress in its own session; the PR is stacked on #4.
@@ -38,7 +40,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.1 Dashboard registry
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #8
 - **Covers:** R2.1, R2.2, R2.3
 - **Depends on:** nothing
 - **Files:** `src/dashboards.rs` (new), `src/lib.rs`
@@ -60,7 +62,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.2 Reserve the `dashboards` project name
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #9
 - **Covers:** R2.4
 - **Depends on:** T1.1
 - **Files:** `src/schedule.rs`
@@ -74,7 +76,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.3 LaunchAgent templates
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #10
 - **Covers:** R1.1, R1.2, R1.3, R1.4, R1.8
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`
@@ -92,7 +94,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.4 Install script and install plan
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #11
 - **Covers:** R1.5, R1.6, R1.7, R1.9, R4.4
 - **Depends on:** T1.3
 - **Files:** `src/dashboards.rs`, `tests/dashboard_scripts.rs` (new)
@@ -118,7 +120,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.5 Uninstall and restart plans
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #12
 - **Covers:** R8.2
 - **Depends on:** T1.4
 - **Files:** `src/dashboards.rs`, `tests/dashboard_scripts.rs`
@@ -135,7 +137,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.6 Status script and parser
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`, `tests/dashboard_scripts.rs`
@@ -155,7 +157,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.7 Tunnel spec, decision and record
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #14
 - **Covers:** R3.2, R3.3, R3.4
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`
@@ -172,7 +174,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.8 Stop writing `LocalForward` into the SSH config block
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #15
 - **Covers:** R3.8
 - **Depends on:** nothing
 - **Files:** `src/bridge.rs`, `tests/cli_integration.rs` (only if an assertion there mentions `LocalForward`)
@@ -192,7 +194,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T2.1 `dashboards` subcommands
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #16
 - **Covers:** R1.1, R4.4, R5.1 to R5.5, R8.2, R8.4
 - **Depends on:** T1.4, T1.5, T1.6
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
@@ -214,7 +216,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T2.2 Tunnel management
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #17
 - **Covers:** R3.1 to R3.7
 - **Depends on:** T1.7
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
@@ -231,7 +233,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T2.3 Rewrite `cheap-otto ui`
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #18
 - **Covers:** R3.1, R8.1
 - **Depends on:** T1.8, T2.1, T2.2
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
@@ -251,7 +253,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T3.1 `GET /api/dashboards`
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #19
 - **Covers:** R6.1
 - **Depends on:** T0.1, T1.1
 - **Files:** `src/server.rs`
@@ -269,7 +271,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T3.2 Links between dashboards in Mission Control
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #20
 - **Covers:** R6.2, R6.4
 - **Depends on:** T3.1
 - **Files:** `src/ui_assets.rs`
@@ -290,7 +292,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.1 `m1 sync` installs both binaries
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #21
 - **Covers:** R4.1
 - **Depends on:** nothing
 - **Files:** `crates/code-reviewer/src/m1.rs`
@@ -305,7 +307,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.2 Provisioning installs the dashboard services
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #22
 - **Covers:** R4.2, R4.3
 - **Depends on:** T2.1, T4.1
 - **Files:** `crates/code-reviewer/scripts/m1-provision.sh`
@@ -320,7 +322,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.3 `code-reviewer ui` never opens a second tunnel
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #23
 - **Covers:** R3.6, R3.9
 - **Depends on:** T0.1, T2.3
 - **Files:** `crates/code-reviewer/src/server.rs`
@@ -336,7 +338,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.4 The Pixel Office button starts the service, not an orphan
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #24
 - **Covers:** R1.2 (keeps Pixel Office under `launchd`)
 - **Depends on:** T0.1, T1.1
 - **Files:** `crates/code-reviewer/src/server.rs`
@@ -348,7 +350,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.5 `open-ui.ps1` becomes a wrapper
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #25
 - **Covers:** R3.9
 - **Depends on:** T4.3
 - **Files:** `crates/code-reviewer/scripts/open-ui.ps1`
@@ -361,7 +363,7 @@ Everything in this phase stays std-only and synchronous.
 ### T4.6 Shared ports, and a link back to Mission Control
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #26
 - **Covers:** R2.5, R6.3
 - **Depends on:** T0.1, T1.1
 - **Files:** `crates/code-reviewer/src/server.rs`, `crates/code-reviewer/src/ui_html.rs`, `tests/dashboard_ports.rs` (new, root crate)
@@ -379,7 +381,7 @@ Everything in this phase stays std-only and synchronous.
 ### T5.1 User documentation
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #27
 - **Covers:** R9.1
 - **Depends on:** T2.3, T4.3
 - **Files:** `README.md`, `docs/index.html`, `crates/code-reviewer/README.md`, `crates/code-reviewer/.claude/skills/update-m1/SKILL.md`, `crates/code-reviewer/.agents/skills/update-m1/SKILL.md`
@@ -397,7 +399,7 @@ Everything in this phase stays std-only and synchronous.
 ### T5.2 Agent documentation
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #28
 - **Covers:** R9.1
 - **Depends on:** T2.3, T4.2
 - **Files:** `CLAUDE.md`, `.claude/rules/05-crate-ecosystem-and-cli-patterns.md`, `.claude/rules/06-code-reviewer.md`, `.claude/rules/07-embedded-web-ui.md`, `specs/README.md`, `specs/m1-dashboards/README.md`
@@ -416,7 +418,7 @@ These tasks act on the real MacBook. An agent may prepare the commands and read 
 ### T6.1 Deploy and verify on the real Mac
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #29
 - **Covers:** R1.1 to R1.9, R3.1 to R3.9, R4.1 to R4.3, R5.1 to R5.3, R8.1
 - **Depends on:** every task in Phases 0 to 5
 - **LIVE**
@@ -437,7 +439,7 @@ These tasks act on the real MacBook. An agent may prepare the commands and read 
 ### T6.2 Reboot behaviour
 
 - [ ] Done
-- **Issue:** _not filed yet_
+- **Issue:** #30
 - **Covers:** R1.3, R5.3
 - **Depends on:** T6.1
 - **LIVE**

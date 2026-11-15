@@ -2,6 +2,8 @@
 
 **Status:** planned. No implementation task has started except the prerequisite (T0.1).
 
+**Tracking issue:** #6 (tasks are #7 to #30, label `m1-dashboards`, milestone "M1 dashboards").
+
 ## The goal in one paragraph
 
 cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (7421) and the Reviewer with Code Tender (7430). They should all run as `launchd` services on the MacBook and reach the Windows workstation through one SSH tunnel, started by one command. Today they are started three different ways and their tunnels fight over ports, so opening one can break another, and Mission Control does not survive a reboot.
@@ -57,6 +59,11 @@ Tasks on different branches of this tree can be done in parallel by different ag
 - The install script kills whatever listens on a dashboard's port on the Mac before starting the service. That only ever runs on the Mac, behind `--execute` or during a deploy.
 - The reviewer's own service (`com.cheapotto.code-reviewer.ui`) keeps being installed by `m1-provision.sh`. This spec reads its state and tunnels its port; it does not manage it.
 - A deploy (`code-reviewer m1 sync`) ships whatever is checked out. Only the owner runs it, from `main`.
+
+## Coordination with other open work
+
+- **PR #2 (governance)** edits `crates/code-reviewer/src/m1.rs`, `scripts/m1-provision.sh`, `src/server.rs` in the reviewer crate, `src/main.rs`, `CLAUDE.md` and `AGENTS.md`, and moves the Mac checkout default to `~/otto-workspaces/cheap-otto`. Phase 4 tasks touch the same files. Before starting T4.1 to T4.6, pull `main` and re-read those files; if PR #2 has merged, line references in `design.md` section 1 may have moved, and the function names are what to search for.
+- **The origin guard (T0.1)** edits both `server.rs` files. T3.1, T4.3, T4.4 and T4.6 start after it merges.
 
 ## Decisions waiting on the owner
 
