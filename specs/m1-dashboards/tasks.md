@@ -169,7 +169,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.7 Tunnel spec, decision and record
 
-- [ ] Done
+- [x] Done
+- PR: #47
 - **Issue:** #14
 - **Covers:** R3.2, R3.3, R3.4, R3.5, R3.6
 - **Depends on:** T1.1
