@@ -53,7 +53,7 @@ cargo run -p code-reviewer -- --help
   - branch `otto/<task-id>`, tmux session `otto-<task-id>` (`manual` is reserved for the human)
   - log `~/.cheap-otto/logs/<project>/<task-id>.log`, run ledger `~/.cheap-otto/runs/<project>/history.jsonl`
   - LaunchAgent label `com.cheapotto.<project>.<id>`
-  - dashboard LaunchAgent `com.cheapotto.dashboards.<id>` with log `~/.cheap-otto/logs/dashboards/<id>.log`, so `dashboards` is a reserved project name (`RESERVED_PROJECT_NAME`)
+  - managed dashboard LaunchAgents (Mission Control and Pixel Office) use `com.cheapotto.dashboards.<id>` with logs under `~/.cheap-otto/logs/dashboards/<id>.log`; the provisioner-owned Reviewer uses `com.cheapotto.code-reviewer.ui` and `~/.cheap-otto/logs/code-reviewer/ui-server.log`, so `dashboards` is a reserved project name (`RESERVED_PROJECT_NAME`)
 - **Local state.** A `.cheap-otto/` dir of pretty-printed JSON: `peer.json`, `state-backup.json`, `projects.json`, `agents.json`, `templates.json`, `schedules.json`, `tunnel.json` (the dashboard tunnel's pid and ports). Schemas grow additively (`#[serde(default)]` on new fields), because `restore` must load a backup written by an older build.
 
 ### `code-reviewer`: a synchronous appliance binary

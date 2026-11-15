@@ -88,7 +88,9 @@ cargo run -p code-reviewer -- doctor
 cargo run -p code-reviewer -- m1 --host otto-mac sync --sync-tokens
 
 # 4. Open the Web Dashboard GUI (`http://127.0.0.1:7430`) through the one shared tunnel that
-#    `cheap-otto ui` keeps for all three dashboards (it never opens a second one). A `--host` other
-#    than the peer in `.cheap-otto/peer.json`, or a non-default `--port`, gets a Reviewer-only tunnel.
+#    `cheap-otto ui` keeps for all three dashboards, but only when a paired peer is recorded in
+#    `peer.json` (in `./.cheap-otto`, the git repo root's `.cheap-otto` or `~/.cheap-otto`) and `--host`
+#    is omitted or names that peer. Otherwise it opens a Reviewer-only tunnel: a different host, a
+#    non-default `--port`, no recorded peer, or no `cheap-otto` binary.
 cargo run -p code-reviewer -- ui
 ```
