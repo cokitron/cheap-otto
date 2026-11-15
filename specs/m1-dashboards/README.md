@@ -11,7 +11,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 ## What "done" looks like
 
 - With a logged-in GUI session on the Mac and `pixel-agents` installed, `code-reviewer m1 sync` leaves both binaries and all three dashboard services installed on the Mac. Without `pixel-agents`, the Pixel Office is skipped and reported.
-- `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error only if the install step fails, which includes a service that never starts listening during install. Once the tunnel is up, a dashboard that is not listening is reported as a warning, not a failure.
+- `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error, and opens no browser, in two cases. The install step fails, which includes a service that never starts listening during install; the tunnel is then not started. Or the tunnel cannot be set up: the `ssh` process exits, a forward does not open within 5 s, or the ports are held by something `cheap-otto` did not record and so will not stop. Once the tunnel is up, a dashboard that is not listening is reported as a warning, not a failure.
 - `cheap-otto dashboards status --execute` says which dashboards are up and why one is not. A skipped or failed dashboard stays unavailable and is reported there.
 - Mission Control and the Reviewer link to each other. The Pixel Office page is third-party and unmodified, so it has no links.
 - A dashboard that crashes comes back by itself.
