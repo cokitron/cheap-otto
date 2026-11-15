@@ -218,13 +218,12 @@ enum FallbackStep {
     FailTimedOut,
 }
 
-/// Decides one poll tick. An exited `ssh` wins even over an open port, because the port may belong
-/// to another process when `ssh` failed to bind; then an open port; then the deadline.
+/// Decides one poll tick. An open port wins; then an exited `ssh`; then the deadline.
 fn fallback_poll_step(port_open: bool, child_exited: bool, deadline_passed: bool) -> FallbackStep {
-    if child_exited {
-        FallbackStep::FailExited
-    } else if port_open {
+    if port_open {
         FallbackStep::Ready
+    } else if child_exited {
+        FallbackStep::FailExited
     } else if deadline_passed {
         FallbackStep::FailTimedOut
     } else {
@@ -1972,8 +1971,8 @@ mod tests {
             ((false, true, true), FailExited),
             ((true, false, false), Ready),
             ((true, false, true), Ready),
-            ((true, true, false), FailExited),
-            ((true, true, true), FailExited),
+            ((true, true, false), Ready),
+            ((true, true, true), Ready),
         ];
         for ((port_open, child_exited, deadline_passed), expected) in cases {
             assert_eq!(
