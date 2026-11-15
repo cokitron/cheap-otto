@@ -1003,4 +1003,30 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
+
+    #[test]
+    fn example_config_round_trips_through_save_and_load() -> Result<(), ConfigError> {
+        // Guards the TOML serializer: what the dashboard writes with `save` must read back identically.
+        let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join("repos.example.toml");
+        let loaded = WorkspaceConfig::load(&example)?;
+
+        let dir = std::env::temp_dir().join(format!(
+            "code-reviewer-toml-roundtrip-{}",
+            std::process::id()
+        ));
+        let saved_path = dir.join("repos.toml");
+        loaded.save(&saved_path)?;
+        let reloaded = WorkspaceConfig::load(&saved_path)?;
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&reloaded).unwrap(),
+            "config written by `save` must read back identically"
+        );
+        assert!(!loaded.repos.is_empty(), "example config lists a repo");
+        Ok(())
+    }
 }
