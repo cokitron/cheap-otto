@@ -29,6 +29,8 @@ fn ssh_script_command(host: &str) -> Command {
         "-o",
         "BatchMode=yes",
         "-o",
+        "ConnectTimeout=10",
+        "-o",
         "ClearAllForwardings=yes",
         host,
         "sh",
@@ -477,6 +479,8 @@ mod tests {
             [
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ClearAllForwardings=yes",
                 "otto-mac",
