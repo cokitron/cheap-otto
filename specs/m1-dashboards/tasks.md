@@ -20,7 +20,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 ## PR plan
 
-The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 14) because its second half needs the new `ui`. T1.5 moved from PR 7 into PR 9 so that four PRs (6, 7, 10 and 12) could run in parallel. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
+The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 14) because its second half needs the new `ui`. T1.5 moved from PR 7 into PR 9 so that PRs 6, 10 and 12 can run in parallel. PR 7 follows PR 6, because T1.4 and T1.6 both edit `src/dashboards.rs` and `tests/dashboard_scripts.rs`. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
 
 | PR | Tasks | Branch | Needs |
 | --- | --- | --- | --- |
@@ -30,7 +30,7 @@ The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one the
 | 4 | T4.3 part a: reviewer fallback tunnel (merged in #44) | `fix/m1-dashboards-t4-3a-fallback-tunnel` | nothing |
 | 5 | T1.2 reserved name, T1.3 LaunchAgent templates (merged in #45→#41) | `feat/m1-dashboards-t1-2-t1-3-plists` | PR 1 |
 | 6 | T1.4 install script and plan | `feat/m1-dashboards-t1-4-install-script` | PR 5 |
-| 7 | T1.6 status script, parser and diagnosis | `feat/m1-dashboards-t1-6-status` | PR 1 |
+| 7 | T1.6 status script, parser and diagnosis | `feat/m1-dashboards-t1-6-status` | PR 6 |
 | 8 | T1.7 tunnel spec, decision and record (merged in #47) | `feat/m1-dashboards-t1-7-tunnel` | PR 1 |
 | 9 | T1.5 uninstall and restart, T2.1 `dashboards` subcommands | `feat/m1-dashboards-t1-5-t2-1-subcommands` | PRs 6, 7 |
 | 10 | T2.2 tunnel management | `feat/m1-dashboards-t2-2-tunnel` | PR 8 |
@@ -131,7 +131,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Steps:**
   1. Add `PIXEL_AGENTS_CONFIG_SNIPPET` as in design 3.3.
   2. Add `pub fn render_install_script(set: &DashboardSet) -> String` producing the script in design 3.3, in that order: header, GUI-session guard, legacy tmux cleanup, `install_service`, `wait_port`, Mission Control block, Pixel Office block. Labels and ports come from `set`. The header sets up `xml_escape` and the `HOME_XML` and `PIXEL_BIN_XML` values used to fill the plist placeholders, and `FAILED=0`. Before bootstrap, a port still held is freed by listener, waiting 5 s and then 2 s more for the port to be released, with `kill -9` as the last resort. If the port stays held, `install_service` prints the `cause=port-held` line with `last_exit` and `log`, sets `FAILED=1` and returns 1; each call site is `if install_service …; then wait_port …; fi`, so `wait_port` is skipped for that service. Because `set -e` is off inside an `if` condition, `install_service` checks `cat`, `mv` and `launchctl bootstrap` explicitly and reports `cause=plist-write-failed` or `cause=bootstrap-failed` the same way. The script ends with `exit 4` when `FAILED` is 1.
-  3. Add `DashboardPlan` and `pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. The spec is `CommandSpec::new("Install dashboard services on MacBook", "ssh", ["-p", <port>, <user@host>, <remote>])` with `remote = format!("/bin/sh -c {}", posix_single_quote(&script))`.
+  3. Add `DashboardPlan` and `pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. The spec is `CommandSpec::new("Install dashboard services on MacBook", "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-p", <port>, <user@host>, <remote>])` with `remote = format!("/bin/sh -c {}", posix_single_quote(&script))`.
   4. `display_steps` has one line per managed service: `Ensure LaunchAgent <label> -> 127.0.0.1:<port>`.
   5. Create `tests/dashboard_scripts.rs` with `#![forbid(unsafe_code)]`. Under `#[cfg(unix)]`, write the rendered script to a temp file and assert `sh -n <file>` exits 0.
 - **Tests:**
@@ -175,7 +175,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - [ ] Done
 - **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
-- **Depends on:** T1.1
+- **Depends on:** T1.1, T1.4 (same files as T1.4, so it follows PR 6)
 - **Files:** `src/dashboards.rs`, `tests/dashboard_scripts.rs`
 - **Steps:**
   1. Add `render_status_script(set)` and `build_status_spec(peer, set) -> CommandSpec`, printing the lines in design 3.4, including `last_exit` on every dashboard line. Use `BatchMode=yes` and `ConnectTimeout=3` like `PeerNode::build_ssh_probe_spec`.
@@ -378,7 +378,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.3 `code-reviewer ui` never opens a second tunnel
 
-- [ ] Part a done
+- [x] Part a done
+- PR: #44
 - [ ] Part b done
 - **Issue:** #23
 - **Covers:** R3.6, R3.9

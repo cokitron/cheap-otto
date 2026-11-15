@@ -575,7 +575,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:
 UID_NUM=$(id -u)
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/.cheap-otto/logs/dashboards"
-mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+# `set -e` would end the script here with exit 1 and no cause, so the failure is handled explicitly.
+if ! mkdir -p "$AGENTS_DIR" "$LOG_DIR"; then echo "error=dashboard-directories-not-created path=$AGENTS_DIR log=$LOG_DIR"; exit 4; fi
 FAILED=0
 # Values written into plist XML must be escaped; plain "$HOME" stays for shell use.
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -598,6 +599,11 @@ fi
 /// `install_service` and `wait_port`, the two shell functions every service block calls.
 /// [R1.5, R1.9, R1.10]
 const INSTALL_SCRIPT_FUNCTIONS: &str = r#"
+# launchd_last_exit <label>: what launchd last saw, for the failure reports ("-" when unknown).
+launchd_last_exit() {
+  launchctl print "gui/$UID_NUM/$1" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_'
+}
+
 # install_service <id> <label> <port>   (plist text on stdin)
 install_service() {
   id="$1"; label="$2"; port="$3"
@@ -606,7 +612,8 @@ install_service() {
   # This function is called as an `if` condition, and POSIX turns `set -e` off inside a condition,
   # so every step that can fail is checked here and reported with a cause.
   if ! cat > "$tmp"; then
-    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=plist-write-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; rm -f "$tmp"; return 1
   fi
   # [R1.5] Unchanged and loaded: leave it alone.
@@ -645,7 +652,7 @@ install_service() {
       # and return non-zero so the caller skips wait_port: the foreign listener would answer the
       # port probe and this service would be reported as listening.
       held=$(printf '%s' "$held" | tr '\n' ',')
-      last_exit=$(launchctl print "gui/$UID_NUM/$label" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+      last_exit=$(launchd_last_exit "$label")
       echo "dashboard=$id listening=0 cause=port-held pid=$held last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
       FAILED=1
       rm -f "$tmp"
@@ -653,27 +660,48 @@ install_service() {
     fi
   fi
   if ! mv "$tmp" "$plist"; then
-    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=plist-write-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; rm -f "$tmp"; return 1
   fi
   if ! launchctl bootstrap "gui/$UID_NUM" "$plist"; then
-    echo "dashboard=$id listening=0 cause=bootstrap-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=bootstrap-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; return 1
   fi
   echo "dashboard=$id action=installed"
 }
 
 # wait_port <id> <label> <port>
+# The LaunchAgent runs the binary directly, so the listener is the launchd service pid or its child.
+# A port that answers for any other process (a foreign listener) is not this dashboard.
 wait_port() {
   i=0
+  listeners=""
   while [ "$i" -lt 20 ]; do
-    if nc -z 127.0.0.1 "$3" 2>/dev/null; then echo "dashboard=$1 listening=1"; return 0; fi
+    if nc -z 127.0.0.1 "$3" 2>/dev/null; then
+      svc_pid=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null | awk '/^[ \t]*pid = /{print $3; exit}')
+      listeners=$(lsof -nP -iTCP:"$3" -sTCP:LISTEN -t 2>/dev/null || true)
+      if [ -n "$svc_pid" ]; then
+        for lpid in $listeners; do
+          parent=$(ps -o ppid= -p "$lpid" 2>/dev/null | tr -d ' ' || true)
+          if [ "$lpid" = "$svc_pid" ] || [ "$parent" = "$svc_pid" ]; then
+            echo "dashboard=$1 listening=1"; return 0
+          fi
+        done
+      fi
+    fi
     i=$((i + 1)); sleep 0.5
   done
   # [R1.10] A service that never listens is a failure the caller must be able to diagnose:
   # say why, where its log is, and what launchd last saw.
-  last_exit=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
-  echo "dashboard=$1 listening=0 cause=not-listening-after-10s last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  last_exit=$(launchd_last_exit "$2")
+  if [ -n "$listeners" ]; then
+    listeners=$(printf '%s' "$listeners" | tr '\n' ',')
+    echo "dashboard=$1 listening=0 cause=foreign-listener pid=$listeners last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  else
+    echo "dashboard=$1 listening=0 cause=not-listening-after-10s last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  fi
   FAILED=1
 }
 "#;
@@ -682,8 +710,9 @@ wait_port() {
 /// [R1.5, R1.6, R1.7, R1.9, R1.10]
 ///
 /// It runs under `/bin/sh` with `set -eu` and exits 0 when every step succeeded (skips are
-/// reported), 3 without a GUI session, and 4 when a service could not be installed or never
-/// listens; the other services are still attempted. Each service block is
+/// reported), 3 without a GUI session, and 4 when the dashboard directories cannot be created
+/// (at once) or when a service could not be installed or never listens (the other services are
+/// still attempted). Each service block is
 /// `if install_service <id> <label> <port> <<PLIST … PLIST then wait_port …; fi`, with the plist
 /// from [`render_service_plist_template`] in an unquoted heredoc, so the Mac's shell fills in the
 /// XML-escaped `$HOME_XML` and `$PIXEL_BIN_XML`. Ids are slugs, labels are rebuilt from the id
@@ -738,7 +767,7 @@ pub struct DashboardPlan {
     pub script: String,
     /// Human-readable steps for the dry-run printout.
     pub display_steps: Vec<String>,
-    /// `ssh -p <port> <user@host> /bin/sh -c '<script>'`.
+    /// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> /bin/sh -c '<script>'`.
     pub spec: CommandSpec,
 }
 
@@ -746,8 +775,9 @@ pub struct DashboardPlan {
 ///
 /// The remote command is `/bin/sh -c '<script>'`: the Mac's login shell is zsh and the script
 /// must run under `sh`, and [`posix_single_quote`] makes the whole script one safe argument.
-/// `display_steps` has one `Ensure LaunchAgent <label> -> 127.0.0.1:<port>` line per managed
-/// service.
+/// `BatchMode=yes` keeps an authentication prompt from stalling the install, and `CommandSpec`
+/// has no stdin channel, so the script travels as that argument. `display_steps` has one
+/// `Ensure LaunchAgent <label> -> 127.0.0.1:<port>` line per managed service.
 #[must_use = "the install plan should be printed or executed"]
 pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan {
     let script = render_install_script(set);
@@ -766,6 +796,10 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
         "Install dashboard services on MacBook",
         "ssh",
         [
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
             "-p".to_string(),
             peer.ssh_port.to_string(),
             peer.ssh_destination(),
@@ -1501,7 +1535,13 @@ mod tests {
             let branch = after(function, step);
             let end = branch.find("\n  fi\n").unwrap_or(branch.len());
             let branch = &branch[..end];
-            for expected in [cause, "FAILED=1", "return 1"] {
+            for expected in [
+                cause,
+                "launchd_last_exit",
+                "last_exit=${last_exit:--}",
+                "FAILED=1",
+                "return 1",
+            ] {
                 assert!(branch.contains(expected), "{step} lacks {expected}");
             }
         }
@@ -1511,6 +1551,43 @@ mod tests {
         let installed = function.find("action=installed").unwrap_or(0);
         assert!(bootstrap_check < installed);
         assert_eq!(script.matches("action=installed").count(), 1);
+    }
+
+    #[test]
+    fn install_script_reports_and_exits_four_when_the_directories_cannot_be_created() {
+        let script = render_install_script(&DashboardSet::standard());
+        let check = "if ! mkdir -p \"$AGENTS_DIR\" \"$LOG_DIR\"; then echo \"error=dashboard-directories-not-created path=$AGENTS_DIR log=$LOG_DIR\"; exit 4; fi\n";
+        assert!(script.contains(check), "{script}");
+        assert!(!script.contains("\nmkdir -p \"$AGENTS_DIR\""));
+        let helper = script.find("launchd_last_exit() {").unwrap_or(usize::MAX);
+        let install = script.find("install_service() {").unwrap_or(0);
+        assert!(helper < install);
+    }
+
+    #[test]
+    fn install_script_accepts_only_the_launchagent_listener_as_the_dashboard() {
+        let script = render_install_script(&DashboardSet::standard());
+        let function = shell_function(&script, "wait_port");
+        for expected in [
+            "launchctl print",
+            "lsof -nP -iTCP:",
+            "ps -o ppid=",
+            "cause=foreign-listener",
+            "cause=not-listening-after-10s",
+            "listening=1",
+            "FAILED=1",
+        ] {
+            assert!(function.contains(expected), "wait_port lacks {expected}");
+        }
+        for line in function
+            .lines()
+            .filter(|line| line.contains("cause=foreign-listener"))
+        {
+            assert!(line.contains("last_exit=") && line.contains("log=$LOG_DIR/"));
+        }
+        let probe = function.find("nc -z").unwrap_or(usize::MAX);
+        let success = function.find("listening=1").unwrap_or(0);
+        assert!(probe < success);
     }
 
     #[test]
@@ -1562,7 +1639,25 @@ mod tests {
         let set = DashboardSet::standard();
         let plan = build_install_plan(&peer, &set);
         assert_eq!(plan.spec.program, "ssh");
-        assert_eq!(plan.spec.args[..3], ["-p", "2222", "admin@192.0.2.10"]);
+        assert_eq!(
+            plan.spec.args[..6],
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-p",
+                "2222"
+            ]
+        );
+        assert_eq!(plan.spec.args[6], "admin@192.0.2.10");
+        let batch = plan.spec.args.iter().position(|arg| arg == "BatchMode=yes");
+        let destination = plan
+            .spec
+            .args
+            .iter()
+            .position(|arg| arg == "admin@192.0.2.10");
+        assert!(batch < destination);
         let remote = plan
             .spec
             .args

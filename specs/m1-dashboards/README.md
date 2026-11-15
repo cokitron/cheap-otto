@@ -1,6 +1,6 @@
 # m1-dashboards: every dashboard served from the Mac, one tunnel
 
-**Status:** planned, prerequisite done. T0.1 (the origin guard, #31) is on `main` through #4. No other task has started; every task whose dependencies are met can start.
+**Status:** in progress. Merged: T0.1 (the origin guard, #31, through #4), T1.1 (#41), T1.8 (#42), T4.1 (#43), T4.3 part a (#44), T1.2 and T1.3 (#45), T1.7 (#47), and T3.1, T3.2 and T4.6 (#48). T1.4 is in review in #51. Every other task whose dependencies are met can start.
 
 **Tracking issue:** #6 (tasks are #7 to #30, label `m1-dashboards`, milestone "M1 dashboards").
 
@@ -22,13 +22,13 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 1. [`../README.md`](../README.md): the protocol, and the ten steps for carrying out a task.
 2. [`requirements.md`](requirements.md): nine requirements with testable criteria, and what is out of scope.
 3. [`design.md`](design.md): the current state with evidence, the target, every interface, the decisions and the open questions.
-4. [`tasks.md`](tasks.md): 24 tasks across Phases 0–6 (six implementation phases plus the Phase 0 prerequisite), each with files, steps, test names and acceptance checks, and a PR plan that ships the open ones as 14 PRs inside the size budget in [`../README.md`](../README.md#pr-size-budget).
+4. [`tasks.md`](tasks.md): 24 tasks across Phases 0–6 (six implementation phases plus the Phase 0 prerequisite), each with files, steps, test names and acceptance checks, and a PR plan that ships the open ones as 15 PRs inside the size budget in [`../README.md`](../README.md#pr-size-budget).
 
 ## Where to start
 
 | If you are | Start with |
 | --- | --- |
-| An agent picking up work | Take the first row of the PR plan in `tasks.md` whose tasks are all unchecked there, whose issues are all open and unclaimed, and whose "needs" are merged. PRs 1 to 4 (T1.1, T1.8, T4.1 and T4.3 part a) need nothing; PRs 5, 8 and 11 follow as soon as PR 1 (T1.1) lands. |
+| An agent picking up work | Take the first row of the PR plan in `tasks.md` whose tasks are all unchecked there, whose issues are all open and unclaimed, and whose "needs" are merged. The "needs" column is the order of work: a row that needs another PR waits until that PR is merged. |
 | Reviewing the plan | `design.md` sections 1 (problems), 8 (decisions) and 9 (open questions) |
 | The owner | Answer the four open questions in `design.md` section 9 if you disagree with the defaults, and run the two **LIVE** tasks at the end |
 
@@ -51,7 +51,7 @@ Phase 5  T5.1 user docs (needs T2.3, T4.3), T5.2 agent docs (needs T2.3, T4.2)
 Phase 6  T6.1 LIVE deploy and verify ── T6.2 LIVE reboot check        (owner only)
 ```
 
-The PR plan in `tasks.md` turns this tree into 14 PRs. Rows on different branches of the tree can be done in parallel by different agents. Tasks that touch the same file (most of Phase 1 edits `src/dashboards.rs`; Phase 2 edits `src/main.rs`) are easier done one after another.
+The PR plan in `tasks.md` turns this tree into 15 PRs. Rows on different branches of the tree can be done in parallel by different agents. Tasks that touch the same file (most of Phase 1 edits `src/dashboards.rs`; Phase 2 edits `src/main.rs`) are easier done one after another.
 
 ## Safety for this spec
 

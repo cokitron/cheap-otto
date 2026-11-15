@@ -183,7 +183,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:
 UID_NUM=$(id -u)
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/.cheap-otto/logs/dashboards"
-mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+# `set -e` would end the script here with exit 1 and no cause, so the failure is handled explicitly.
+if ! mkdir -p "$AGENTS_DIR" "$LOG_DIR"; then echo "error=dashboard-directories-not-created path=$AGENTS_DIR log=$LOG_DIR"; exit 4; fi
 FAILED=0
 # Values written into plist XML must be escaped; plain "$HOME" stays for shell use.
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -202,6 +203,11 @@ if command -v tmux >/dev/null 2>&1; then
   tmux kill-session -t cheapotto-pixel 2>/dev/null || true
 fi
 
+# launchd_last_exit <label>: what launchd last saw, for the failure reports ("-" when unknown).
+launchd_last_exit() {
+  launchctl print "gui/$UID_NUM/$1" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_'
+}
+
 # install_service <id> <label> <port>   (plist text on stdin)
 install_service() {
   id="$1"; label="$2"; port="$3"
@@ -210,7 +216,8 @@ install_service() {
   # This function is called as an `if` condition, and POSIX turns `set -e` off inside a condition,
   # so every step that can fail is checked here and reported with a cause.
   if ! cat > "$tmp"; then
-    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=plist-write-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; rm -f "$tmp"; return 1
   fi
   # [R1.5] Unchanged and loaded: leave it alone.
@@ -248,7 +255,7 @@ install_service() {
       # and return non-zero so the caller skips wait_port: the foreign listener would answer the
       # port probe and this service would be reported as listening.
       held=$(printf '%s' "$held" | tr '\n' ',')
-      last_exit=$(launchctl print "gui/$UID_NUM/$label" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+      last_exit=$(launchd_last_exit "$label")
       echo "dashboard=$id listening=0 cause=port-held pid=$held last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
       FAILED=1
       rm -f "$tmp"
@@ -256,27 +263,48 @@ install_service() {
     fi
   fi
   if ! mv "$tmp" "$plist"; then
-    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=plist-write-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; rm -f "$tmp"; return 1
   fi
   if ! launchctl bootstrap "gui/$UID_NUM" "$plist"; then
-    echo "dashboard=$id listening=0 cause=bootstrap-failed log=$LOG_DIR/$id.log"
+    last_exit=$(launchd_last_exit "$label")
+    echo "dashboard=$id listening=0 cause=bootstrap-failed last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
     FAILED=1; return 1
   fi
   echo "dashboard=$id action=installed"
 }
 
 # wait_port <id> <label> <port>
+# The LaunchAgent runs the binary directly, so the listener is the launchd service pid or its child.
+# A port that answers for any other process (a foreign listener) is not this dashboard.
 wait_port() {
   i=0
+  listeners=""
   while [ "$i" -lt 20 ]; do
-    if nc -z 127.0.0.1 "$3" 2>/dev/null; then echo "dashboard=$1 listening=1"; return 0; fi
+    if nc -z 127.0.0.1 "$3" 2>/dev/null; then
+      svc_pid=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null | awk '/^[ \t]*pid = /{print $3; exit}')
+      listeners=$(lsof -nP -iTCP:"$3" -sTCP:LISTEN -t 2>/dev/null || true)
+      if [ -n "$svc_pid" ]; then
+        for lpid in $listeners; do
+          parent=$(ps -o ppid= -p "$lpid" 2>/dev/null | tr -d ' ' || true)
+          if [ "$lpid" = "$svc_pid" ] || [ "$parent" = "$svc_pid" ]; then
+            echo "dashboard=$1 listening=1"; return 0
+          fi
+        done
+      fi
+    fi
     i=$((i + 1)); sleep 0.5
   done
   # [R1.10] A service that never listens is a failure the caller must be able to diagnose:
   # say why, where its log is, and what launchd last saw.
-  last_exit=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
-  echo "dashboard=$1 listening=0 cause=not-listening-after-10s last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  last_exit=$(launchd_last_exit "$2")
+  if [ -n "$listeners" ]; then
+    listeners=$(printf '%s' "$listeners" | tr '\n' ',')
+    echo "dashboard=$1 listening=0 cause=foreign-listener pid=$listeners last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  else
+    echo "dashboard=$1 listening=0 cause=not-listening-after-10s last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  fi
   FAILED=1
 }
 
@@ -324,11 +352,11 @@ if [ "$FAILED" -ne 0 ]; then exit 4; fi
       echo "dashboard=pixel-office warning=pixel-agents-config-not-written"
   fi"#;
   ```
-- Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when a managed service could not be installed or never listens (port held, plist not written, bootstrap failed, or not listening after 10 s); the other services are still attempted. Nothing in `install_service` relies on `set -e`, because it is off inside an `if` condition. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].
+- Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when the dashboard directories cannot be created (at once) or when a managed service could not be installed or never listens (port held, plist not written, bootstrap failed, not listening after 10 s, or a foreign listener on the port); the other services are still attempted. Every failure report carries `last_exit` from `launchd_last_exit`, and `wait_port` reports `listening=1` only when a listener pid is the launchd service pid or its direct child. Nothing in `install_service` relies on `set -e`, because it is off inside an `if` condition. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].
 
 **Transports** [R4.4]:
 
-- From the workstation: `build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. Its `CommandSpec` is `ssh -p <port> <user@host> <remote>` where `remote` is `format!("/bin/sh -c {}", posix_single_quote(&script))`. Wrapping in `/bin/sh -c` matters: the Mac's login shell is zsh, and the script must run under `sh`. `posix_single_quote` (`src/worktree.rs`) makes the script one safe argument.
+- From the workstation: `build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. Its `CommandSpec` is `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> <remote>` (`BatchMode=yes` so an authentication prompt cannot stall the install; `CommandSpec` has no stdin channel, so the script stays in `remote`) where `remote` is `format!("/bin/sh -c {}", posix_single_quote(&script))`. Wrapping in `/bin/sh -c` matters: the Mac's login shell is zsh, and the script must run under `sh`. `posix_single_quote` (`src/worktree.rs`) makes the script one safe argument.
 - On the Mac: `cheap-otto dashboards install-script` prints the script; provisioning pipes it to `/bin/sh` (section 3.10).
 
 ```rust
