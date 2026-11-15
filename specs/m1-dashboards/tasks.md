@@ -6,7 +6,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 **Rules for every task**
 
-- One task, one branch, one PR. Branch name: `m1-dashboards/<task-id>-<slug>`, for example `m1-dashboards/t1-3-plist-templates`.
+- One task, one branch, one PR. Branch name: `<type>/m1-dashboards-<task-id>-<slug>`, for example `feat/m1-dashboards-t1-3-plist-templates`. `<type>` is a prefix CI accepts (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`); a branch starting with `m1-dashboards/` fails the PR governance check.
 - The gate must pass before you open the PR:
   ```bash
   cargo fmt --all -- --check
@@ -14,7 +14,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
   cargo test --workspace --all-targets --locked
   ```
 - Use the exact test names given. Add more tests if you need them; do not rename or drop the listed ones.
-- Never pass `--execute` or `--apply`, and never run `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui`. Only tasks marked **LIVE** touch the real MacBook, and only the owner runs them.
+- Outside a **LIVE** task, never pass `--execute` or `--apply` against the real MacBook or real GitHub repos, and never run live `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui` (`sync-docs` has no dry run). A test may pass `--execute` only with an isolated temp `--state-dir` and no live endpoint, as T2.2's `tunnel --stop --execute` test does. Only tasks marked **LIVE** touch the real MacBook, and only the owner runs them.
 - No CORS headers, no bind address other than `127.0.0.1`, no new dependencies, no `.unwrap()` or `.expect()` outside tests.
 - When done: tick the box here, add `PR: #NN` under the task, and close the issue from the PR.
 
@@ -150,15 +150,19 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Depends on:** T1.1
 - **Files:** `src/dashboards.rs`, `tests/dashboard_scripts.rs`
 - **Steps:**
-  1. Add `render_status_script(set)` and `build_status_spec(peer, set) -> CommandSpec`, printing the lines in design 3.4. Use `BatchMode=yes` and `ConnectTimeout=3` like `PeerNode::build_ssh_probe_spec`.
+  1. Add `render_status_script(set)` and `build_status_spec(peer, set) -> CommandSpec`, printing the lines in design 3.4, including `last_exit` on every dashboard line. Use `BatchMode=yes` and `ConnectTimeout=3` like `PeerNode::build_ssh_probe_spec`.
   2. Add `DashboardRemoteStatus`, `DashboardHostFacts`, `DashboardStatusReport` and `pub fn parse_status_output(raw: &str, set: &DashboardSet) -> DashboardStatusReport`.
-  3. The parser never panics: unknown lines, keys and ids are ignored; `pid=-` and unparsable pids become `None`; `autologin_user=-` becomes `None`.
+  3. The parser never panics: unknown lines, keys and ids are ignored; `pid=-` and unparsable pids become `None`; `autologin_user=-` and `last_exit=-` become `None`.
+  4. Add `DashboardDiagnosis`, `explain_unavailable` and `render_status_rows` as in design 3.4. `explain_unavailable` returns `None` for a listening dashboard and otherwise the first matching row of the table there, always with the log path.
 - **Tests:**
   - `status_script_is_read_only`: contains none of `bootstrap`, `bootout`, `kickstart`, `kill `, `rm `, `mv `.
   - `parses_status_lines_for_all_dashboards`: the four sample lines in design 3.4 give three dashboards and the host facts.
   - `ignores_unknown_lines_keys_and_ids`
   - `missing_host_line_yields_none`
   - `handles_empty_and_garbage_output_without_panicking`: `""`, `"\n\n"`, `"dashboard="`, `"dashboard=reviewer pid=abc loaded=maybe"`.
+  - `explains_every_unavailable_dashboard_with_reason_and_log`: one case per row of the table in design 3.4 (no GUI session; `cheap-otto` missing; `pixel-agents` missing; not loaded; loaded but not listening with a `last_exit`), each with the expected reason and log path; a missing `host` line skips the first three.
+  - `listening_dashboard_needs_no_explanation`
+  - `status_rows_explain_port_held_skipped_and_unloaded_dashboards`: feed `parse_status_output` the probe output a Mac would print after a port-held Mission Control install and a skipped Pixel Office, pass the report to `render_status_rows`, and assert each of those two rows carries a reason and a log path while the listening Reviewer row has neither. This is the end-to-end check for R5.1; it needs no Mac because the probe output is the input.
   - in `tests/dashboard_scripts.rs`: `rendered_status_script_passes_sh_syntax_check`
 - **Acceptance:** `cargo test -p cheap-otto --lib dashboards::tests` passes.
 
@@ -218,8 +222,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   1. Add `Commands::Dashboards { #[command(subcommand)] action: DashboardCommands }` and the enum with `List`, `Install`, `InstallScript`, `Status`, `Restart`, `Uninstall` (design 3.6). Every variant and flag gets a `///` help line. Shared flags: `--state-dir`, `--port`, `--pixel-port` (defaults from the registry constants; the Reviewer port is the `REVIEWER_PORT` constant, not a flag); `--execute` with `visible_alias = "apply"` on install, status, restart, uninstall; `--json` on list and status; `--id` on restart.
   2. One handler per subcommand taking one options struct, following the pattern of `run_delegate`; print the human-readable plan first unless `--json` is selected, then emit only JSON. Check `execute` only after the plan is printed.
   3. `install-script` prints `render_install_script` to stdout and nothing else (no banner), so it can be piped to `sh`.
-  4. `status` without `--execute`: print the probe command only. A dry run opens no socket, so it must not call `is_local_port_open` (design 3.6). With `--execute`: check which ports answer locally, run the probe with `capture_spec_stdout`, parse it, and print one row per dashboard with `loaded`, `pid`, `listening`, `tunnelled`. Print the warning for R5.3 when `autologin_user` is `None`, and the hints in design section 5 when a binary is missing or a service is loaded but not listening.
-  5. `status --json` prints one JSON object (`{"dashboards":[…],"host":…}`) and nothing else on stdout: no plan, banner or warning lines. Machine-readable mode skips the human-readable plan; any diagnostics go to stderr. Without `--execute`, `--json` prints the three registry entries with `loaded`, `pid`, `listening` and `tunnelled` all `null`, and `host` `null`.
+  4. `status` without `--execute`: print the probe command only. A dry run opens no socket, so it must not call `is_local_port_open` (design 3.6). With `--execute`: check which ports answer locally, run the probe with `capture_spec_stdout`, parse it, and print the rows from `render_status_rows`: `loaded`, `pid`, `listening`, `tunnelled`, and for every dashboard that is not listening its reason and log path (design 3.4). Print the warning for R5.3 when `autologin_user` is `None`.
+  5. `status --json` prints one JSON object (`{"dashboards":[…],"host":…}`) and nothing else on stdout: no plan, banner or warning lines. Machine-readable mode skips the human-readable plan; any diagnostics go to stderr. With `--execute`, each dashboard object also carries `reason` and `log`, both `null` when it is listening. Without `--execute`, `--json` prints the three registry entries with `loaded`, `pid`, `listening`, `tunnelled`, `reason` and `log` all `null`, and `host` `null`.
 - **Tests** in `tests/cli_integration.rs` (temp dir; create a peer first with `pair --host 192.168.1.42 --out-dir <tmp>`; dry runs open no socket, so no port override is needed and the fixed Reviewer port is never touched):
   - `dashboards_list_and_install_script_are_pure`: `list --json` parses and has three entries; `install-script` stdout starts with `set -eu` and contains both managed labels.
   - `dashboards_install_status_restart_uninstall_are_dry_runs_without_execute`: each exits 0, prints an `ssh` command, and the temp dir gains no `tunnel.json`.
@@ -456,7 +460,7 @@ These tasks act on the real MacBook. An agent may prepare the commands and read 
   5. `cargo run -p code-reviewer -- ui` → the reviewer opens and step 4 still shows one process.
   6. `ssh otto-mac true` prints no "Address already in use" or "cannot listen" warning.
   7. Idempotence: run `cargo run -p cheap-otto -- dashboards install --execute` twice; the second run prints `action=unchanged` for each installed service and the pids in `status` do not change.
-  8. KeepAlive: `cargo run -p code-reviewer -- m1 exec --cmd "pkill -f 'cheap-otto serve'"`, wait 15 seconds, then `dashboards status --execute` shows Mission Control `listening=yes` with a new pid.
+  8. KeepAlive: stop only the Mission Control job, with single quotes so `$(id -u)` runs on the Mac: `cargo run -p code-reviewer -- m1 exec --cmd 'launchctl kill SIGTERM gui/$(id -u)/com.cheapotto.dashboards.mission-control'`. Wait 15 seconds, then `dashboards status --execute` shows Mission Control `listening=yes` with a new pid. Do not use `pkill -f`: its pattern also matches the remote shell's own command line and any other `cheap-otto serve`.
   9. Links: Mission Control shows links to Pixel Office and Reviewer; the reviewer shows a link to Mission Control; each opens the right page.
   10. Stop and start: `dashboards tunnel --stop --execute` makes the three URLs unreachable; `ui --execute --no-open` brings them back.
 - **Acceptance:** all ten results observed. Paste the output of steps 2, 4 and 7 into the issue (remove host names and IPs first).

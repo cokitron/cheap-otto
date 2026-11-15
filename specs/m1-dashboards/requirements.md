@@ -75,7 +75,7 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 
 **User story:** As the operator, I want one command that tells me which dashboards are up and why one is not, so that I do not SSH in to find out.
 
-1. WHEN the operator runs the dashboard status command with the execute gate THEN the system SHALL report, for each dashboard: whether its LaunchAgent is loaded, its process id if running, whether its port is listening on the Mac, and whether its port answers on the workstation.
+1. WHEN the operator runs the dashboard status command with the execute gate THEN the system SHALL report, for each dashboard: whether its LaunchAgent is loaded, its process id if running, whether its port is listening on the Mac, and whether its port answers on the workstation. For every dashboard that is not listening on the Mac, the system SHALL also report why (binary not installed, no GUI session, LaunchAgent not loaded, or loaded but not listening, with `launchd`'s last exit status when there is one) and where its log is, so a service that failed or was skipped at install time is never shown as a bare "not loaded".
 2. The status command SHALL report whether `pixel-agents` and the `cheap-otto` binary are installed on the Mac, and whether automatic login is configured.
 3. IF automatic login is not configured THEN the status command SHALL warn that dashboards start only after the user logs in following a reboot.
 4. The status command SHALL offer `--json` output that contains the same facts and nothing else on stdout.
@@ -94,7 +94,7 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 
 **User story:** As the operator, I want a web page in my browser to be unable to drive my dashboards, so that browsing is not a way into the Mac.
 
-1. Every dashboard server this project builds SHALL reject state-changing requests whose `Origin` is not in its allowlist and requests whose `Host` is not a loopback name. (Delivered by the origin-guard change that precedes this spec; this spec must not weaken it.)
+1. Every dashboard server this project builds SHALL reject any request whose authority is not a loopback name, and SHALL reject a state-changing request that carries an `Origin` not on that server's allowlist. A request with no `Origin` header is not subject to the origin check. The authority is the `Host` header; Mission Control also accepts the HTTP/2 or absolute-form request authority when `Host` is absent, and the Reviewer reads only the `Host` header. (Delivered by the origin guard, T0.1. No task in this spec may change either server's contract.)
 2. No task in this spec SHALL add a CORS allow header or widen a bind address.
 
 ### R8. Existing commands keep working, and everything can be undone

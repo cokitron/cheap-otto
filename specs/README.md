@@ -22,8 +22,8 @@ specs/<feature>/
 Follow these steps exactly. They are written so that an agent with no other context gets the same result as an expert.
 
 1. **Read first:** `CLAUDE.md` (safety and commands), then the spec's `README.md`, `requirements.md` and `design.md`, then your task in `tasks.md`. The path-scoped rules in `.claude/rules/` apply to the files you touch.
-2. **Pick one task** whose dependencies are all checked off. Do not start a task that someone else has claimed in its GitHub issue.
-3. **Claim it:** comment on the task's GitHub issue that you are starting, and create a branch named `<feature>/<task-id>-<short-slug>` (for example `m1-dashboards/t1-3-plist-template`) from an up-to-date `main`.
+2. **Pick one task** that is still unchecked in `tasks.md`, whose issue is open and unclaimed (nobody has commented that they are starting it, and no open PR references it), and whose dependencies are all checked off. Skip anything that is done or claimed.
+3. **Claim it:** comment on the task's GitHub issue that you are starting, and create a branch from an up-to-date `main` named `<type>/<feature>-<task-id>-<short-slug>`, for example `feat/m1-dashboards-t1-3-plist-templates`. `<type>` must be one of the prefixes CI accepts (rule 06): `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci` or `perf`. A branch named `<feature>/…` fails the `PR Governance & Secret Guard` check.
 4. **Do only that task.** Touch the files it lists. The one exception is spec sync: if the implementation shows the design is wrong, also edit that spec's `design.md`, `requirements.md` and `tasks.md` in the same PR (protocol rule 4) and record why in the issue. If you find you must change anything else, stop and write down why in the issue; do not widen the change on your own.
 5. **Write the tests the task names**, with the exact test function names given. A bug fix or a new behaviour without a test is not done.
 6. **Run the gate** and read the output:

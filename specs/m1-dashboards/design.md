@@ -344,21 +344,22 @@ pub struct DashboardPlan {
 - `render_status_script(set)` / `build_status_spec(peer, set)`: read-only. [R5.5] It prints one line per dashboard and one `host` line:
 
 ```text
-dashboard=mission-control loaded=1 pid=812 listening=1
-dashboard=pixel-office loaded=0 pid=- listening=0
-dashboard=reviewer loaded=1 pid=640 listening=1
-host cheap_otto_bin=1 pixel_agents_bin=1 gui_session=1 autologin_user=admin
+dashboard=mission-control loaded=1 pid=812 listening=1 last_exit=-
+dashboard=pixel-office loaded=0 pid=- listening=0 last_exit=-
+dashboard=reviewer loaded=1 pid=- listening=0 last_exit=78:_EX_CONFIG
+host cheap_otto_bin=1 pixel_agents_bin=0 gui_session=1 autologin_user=admin
 ```
 
   - `loaded`: exit status of `launchctl print "gui/$UID_NUM/<label>"`.
   - `pid`: `launchctl print … | awk '/^[[:space:]]*pid = /{print $3; exit}'`, or `-`.
   - `listening`: `nc -z 127.0.0.1 <port>`.
+  - `last_exit`: `launchctl print … | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_'`, or `-`. The same expression the install script uses.
   - `autologin_user`: `defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null`, or `-`. [R5.2]
 - `parse_status_output(raw: &str, set: &DashboardSet) -> DashboardStatusReport` is pure and tolerant: it splits each line on whitespace into `key=value` tokens, ignores unknown lines, keys and ids, and treats a missing key as false or `None`.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DashboardRemoteStatus { pub id: DashboardId, pub loaded: bool, pub pid: Option<u32>, pub listening: bool }
+pub struct DashboardRemoteStatus { pub id: DashboardId, pub loaded: bool, pub pid: Option<u32>, pub listening: bool, pub last_exit: Option<String> }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DashboardHostFacts { pub cheap_otto_bin: bool, pub pixel_agents_bin: bool, pub gui_session: bool, pub autologin_user: Option<String> }
@@ -367,7 +368,30 @@ pub struct DashboardHostFacts { pub cheap_otto_bin: bool, pub pixel_agents_bin: 
 pub struct DashboardStatusReport { pub dashboards: Vec<DashboardRemoteStatus>, pub host: Option<DashboardHostFacts> }
 ```
 
-The CLI adds `tunnelled: bool` per dashboard (does the port answer on the workstation) and the warning for [R5.3].
+`status` never shows an unavailable dashboard without a reason. [R5.1] Two more pure functions do that:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardDiagnosis { pub reason: String, pub log: String }
+
+/// `None` when the dashboard is listening. Otherwise the first cause that applies, in this order.
+pub fn explain_unavailable(service: &DashboardService, status: &DashboardRemoteStatus, host: Option<&DashboardHostFacts>) -> Option<DashboardDiagnosis>
+
+/// One printable row per dashboard: loaded, pid, listening, tunnelled, and the diagnosis when there is one.
+pub fn render_status_rows(report: &DashboardStatusReport, set: &DashboardSet, tunnelled: &[(DashboardId, bool)]) -> Vec<String>
+```
+
+| Order | Condition | Reason |
+| --- | --- | --- |
+| 1 | `host.gui_session` is false | No GUI session for the Mac user; log in to the Mac desktop or enable automatic login |
+| 2 | Mission Control and `host.cheap_otto_bin` is false | `cheap-otto` is not installed on the Mac; run `code-reviewer m1 sync` |
+| 3 | Pixel Office and `host.pixel_agents_bin` is false | `pixel-agents` is not installed on the Mac, so the service was skipped |
+| 4 | `loaded` is false | The LaunchAgent is not loaded; run `cheap-otto dashboards install --execute` (for the Reviewer: `code-reviewer m1 sync`). This is also what a failed or port-held install leaves behind |
+| 5 | `loaded` is true and `listening` is false | Loaded but not listening, with `last_exit` when there is one |
+
+Rows 1 to 3 are skipped when the `host` line is missing. `log` is `~/.cheap-otto/logs/dashboards/<id>.log` for managed services and `~/.cheap-otto/logs/code-reviewer/ui-server.log` for the Reviewer; it is always given, so the operator knows where to look whatever the reason.
+
+The CLI passes its local port checks in as `tunnelled` and adds the warning for [R5.3].
 
 ### 3.5 Tunnel
 
