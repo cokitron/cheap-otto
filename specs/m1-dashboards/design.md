@@ -71,6 +71,10 @@ pub enum DashboardError {
     DuplicatePort(u16),
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
+    #[error(
+        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+    )]
+    UnexpectedServices,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +115,7 @@ pub struct DashboardSet { services: Vec<DashboardService> }   // private: built 
 ```
 
 - Labels: `com.cheapotto.dashboards.mission-control`, `com.cheapotto.dashboards.pixel-office`, and `REVIEWER_LAUNCHD_LABEL` for the reviewer. [R2.3]
-- `with_ports` rejects 0 and duplicates, and so does deserialization (through `TryFrom<DashboardSetFields>`, which also requires the three dashboards once each in registry order, else `DashboardError::UnexpectedServices`). The `services` field is private, so no set skips these checks. [R2.2]
+- `with_ports` rejects 0 and duplicates, and so does deserialization (through `TryFrom<DashboardSetFields>`). Deserialization also rejects any set that is not exactly the canonical registry output of `from_ports` for those ports, meaning the same `id` order, `display_name`, `launchd_label` and `manager`, else `DashboardError::UnexpectedServices`. The `services` field is private, so no set skips these checks. [R2.2]
 - Every public function that returns a value carries `#[must_use = "…"]`, as the rest of the core does.
 - `build_schedule_install_plan` (`src/schedule.rs`) gains a check: a project equal to `RESERVED_PROJECT_NAME` returns the new variant `ScheduleError::ReservedProjectName(String)`. [R2.4]
 
