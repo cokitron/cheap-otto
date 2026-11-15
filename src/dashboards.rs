@@ -294,7 +294,16 @@ fn loopback_forward(port: u16) -> String {
 /// nothing here is interpreted by a shell.
 #[must_use = "the tunnel command should be displayed or spawned"]
 pub fn build_tunnel_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec {
-    let ports = set.ports();
+    CommandSpec::new(
+        "Forward every dashboard port from the Mac to 127.0.0.1 on this workstation",
+        "ssh",
+        tunnel_args(&peer.ssh_destination(), peer.ssh_port, &set.ports()),
+    )
+}
+
+/// The tunnel's argv after the program, in the one order [`build_tunnel_spec`] spawns and
+/// [`command_line_is_recorded_tunnel`] verifies.
+fn tunnel_args(destination: &str, ssh_port: u16, ports: &[u16]) -> Vec<String> {
     let mut args = Vec::with_capacity(4 + TUNNEL_SSH_OPTIONS.len() * 2 + ports.len() * 2);
     args.push("-N".to_string());
     for option in TUNNEL_SSH_OPTIONS {
@@ -302,17 +311,13 @@ pub fn build_tunnel_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec {
         args.push(option.to_string());
     }
     args.push("-p".to_string());
-    args.push(peer.ssh_port.to_string());
-    for port in ports {
+    args.push(ssh_port.to_string());
+    for &port in ports {
         args.push("-L".to_string());
         args.push(loopback_forward(port));
     }
-    args.push(peer.ssh_destination());
-    CommandSpec::new(
-        "Forward every dashboard port from the Mac to 127.0.0.1 on this workstation",
-        "ssh",
-        args,
-    )
+    args.push(destination.to_string());
+    args
 }
 
 /// What `tunnel.json` in the state directory records about the tunnel cheap-otto started. [R3.4]
@@ -435,13 +440,13 @@ pub fn describe_tunnel_failure(
     )
 }
 
-/// True only when `command_line` (as `ps -o args=` or Win32 `CommandLine` reports it) is an `ssh`
-/// tunnel (`-N`) whose arguments include the record's destination and
-/// `127.0.0.1:<port>:127.0.0.1:<port>` for every recorded port, each as a whole argument.
+/// True only when `command_line` (as `ps -o args=` or Win32 `CommandLine` reports it) is `ssh`
+/// followed by exactly the argv [`build_tunnel_spec`] gives for the record: `-N`, the tunnel
+/// options, `-p <record.ssh_port>`, one `127.0.0.1:<port>:127.0.0.1:<port>` forward per recorded
+/// port in order, and the record's destination last, so no remote command can follow it.
 ///
-/// Guards against a recycled pid: after a reboot the recorded pid can belong to someone's
-/// interactive ssh session, which must never be signalled. A record with no ports never matches.
-/// [R3.5]
+/// Guards against a recycled pid: after a reboot the recorded pid can belong to someone's ssh
+/// session, which must never be signalled. A record with no ports never matches. [R3.5]
 #[must_use = "the result decides whether a recorded pid may be signalled"]
 pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord) -> bool {
     let line = command_line.trim();
@@ -456,14 +461,8 @@ pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord
         .split_whitespace()
         .map(|arg| arg.trim_matches('"'))
         .collect();
-    is_ssh
-        && !record.ports.is_empty()
-        && args.contains(&"-N")
-        && args.contains(&record.destination.as_str())
-        && record
-            .ports
-            .iter()
-            .all(|&port| args.contains(&loopback_forward(port).as_str()))
+    let expected = tunnel_args(&record.destination, record.ssh_port, &record.ports);
+    is_ssh && !record.ports.is_empty() && args == expected
 }
 
 #[cfg(test)]
@@ -913,6 +912,15 @@ mod tests {
             format!("python3 {args}"),
             format!("sshd {args}"),
             own.replace(" -N", ""),
+            // Another SSH port than the recorded one.
+            own.replace("-p 2222", "-p 22"),
+            // A remote command after the destination.
+            format!("{own} sleep 3600"),
+            // The right tokens, in another order.
+            own.replace("-N -o", "-o")
+                .replace("admin@192.0.2.10", "-N admin@192.0.2.10"),
+            // An extra forward the record does not list.
+            own.replace(" admin@", " -L 127.0.0.1:5173:127.0.0.1:5173 admin@"),
         ] {
             assert!(!command_line_is_recorded_tunnel(&line, &record), "{line}");
         }
