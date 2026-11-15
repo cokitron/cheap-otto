@@ -12,6 +12,7 @@
   - `ci/<scope-or-topic>` — GitHub Actions / CI pipeline updates
   - `perf/<scope-or-topic>` — measurable performance/memory improvements
   - `otto/<task-id>` — automated `cheap-otto` delegated worktree branches
+- **Small PRs:** a PR changes at most 400 lines (tests included, `Cargo.lock` excluded) and does one thing. Larger work is split into parts that each leave `main` green; `specs/README.md` (PR size budget) says how. Purely mechanical changes (lockfile, generated assets, renames, dependency bumps) may exceed this when the PR says so and contains nothing else.
 - **Squash-merge to `main`:** Pull Requests squash-merge into a single atomic Conventional Commit on `main` so history remains linear, bisectable, and changelog-ready.
 
 ## 2. Conventional Commits & PR Titles

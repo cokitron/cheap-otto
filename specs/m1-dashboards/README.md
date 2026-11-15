@@ -22,7 +22,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 1. [`../README.md`](../README.md): the protocol, and the ten steps for carrying out a task.
 2. [`requirements.md`](requirements.md): nine requirements with testable criteria, and what is out of scope.
 3. [`design.md`](design.md): the current state with evidence, the target, every interface, the decisions and the open questions.
-4. [`tasks.md`](tasks.md): 24 tasks across Phases 0–6 (six implementation phases plus the Phase 0 prerequisite), each with files, steps, test names and acceptance checks.
+4. [`tasks.md`](tasks.md): 24 tasks across Phases 0–6 (six implementation phases plus the Phase 0 prerequisite), each with files, steps, test names and acceptance checks. Five of them (T1.4, T1.6, T1.7, T2.1, T4.3) are split into parts so that every PR stays inside the size budget in [`../README.md`](../README.md#pr-size-budget): 27 small PRs before the two LIVE tasks.
 
 ## Where to start
 
@@ -37,21 +37,21 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 ```text
 Phase 0  T0.1 origin guard (done) ──────────────────────┐ (was the gate for tasks that edit the two server.rs files)
 Phase 1  T1.1 registry ─┬─ T1.2 reserved name            │
-                        ├─ T1.3 plists ── T1.4 install ── T1.5 uninstall/restart
-                        ├─ T1.6 status                   │
-                        └─ T1.7 tunnel       T1.8 ssh config (independent)
-Phase 2  T2.1 subcommands (needs T1.4, T1.5, T1.6)       │
+                        ├─ T1.3 plists ── T1.4a ── T1.4b install ── T1.5 uninstall/restart
+                        ├─ T1.6a ── T1.6b status         │
+                        └─ T1.7a ── T1.7b tunnel   T1.8 ssh config (independent)
+Phase 2  T2.1a list/install (needs T1.4) ── T2.1b status (needs T1.6) ── T2.1c restart/uninstall (needs T1.5)
          T2.2 tunnel management (needs T1.7)             │
          T2.3 rewrite ui (needs T1.8, T2.1, T2.2)        │
 Phase 3  T3.1 hub API (needs T0.1, T1.1) ── T3.2 links ◀─┘
-Phase 4  T4.1 both binaries (independent) ── T4.2 provisioning (needs T2.1, T4.1)
-         T4.3 reviewer ui (needs T0.1, T2.3) ── T4.5 open-ui.ps1
+Phase 4  T4.1 both binaries (independent) ── T4.2 provisioning (needs T2.1a, T4.1)
+         T4.3a fallback ── T4.3b delegate (needs T2.3) ── T4.5 open-ui.ps1
          T4.4 pixel button (needs T0.1, T1.1)    T4.6 ports + link (needs T0.1, T1.1)
 Phase 5  T5.1 user docs (needs T2.3, T4.3), T5.2 agent docs (needs T2.3, T4.2)
 Phase 6  T6.1 LIVE deploy and verify ── T6.2 LIVE reboot check        (owner only)
 ```
 
-Tasks on different branches of this tree can be done in parallel by different agents. Tasks that touch the same file (most of Phase 1 edits `src/dashboards.rs`; Phase 2 edits `src/main.rs`) are easier done one after another.
+Tasks on different branches of this tree can be done in parallel by different agents. A letter after a task id is one part of a split task: one PR, done in order. Tasks that touch the same file (most of Phase 1 edits `src/dashboards.rs`; Phase 2 edits `src/main.rs`) are easier done one after another.
 
 ## Safety for this spec
 

@@ -6,7 +6,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 **Rules for every task**
 
-- One task, one branch, one PR. Branch name: `<type>/m1-dashboards-<task-id>-<slug>`, for example `feat/m1-dashboards-t1-3-plist-templates`. `<type>` is a prefix CI accepts (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`); a branch starting with `m1-dashboards/` fails the PR governance check.
+- One task, or one part of a split task, per branch and PR, inside the PR size budget in `../README.md` (at most 400 changed lines, tests included, `Cargo.lock` excluded). Branch name: `<type>/m1-dashboards-<task-id>-<slug>`, for example `feat/m1-dashboards-t1-3-plist-templates`, or `feat/m1-dashboards-t1-4a-install-service` for a part. `<type>` is a prefix CI accepts (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`); a branch starting with `m1-dashboards/` fails the PR governance check.
 - The gate must pass before you open the PR:
   ```bash
   cargo fmt --all -- --check
@@ -17,6 +17,7 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 - Outside a **LIVE** task, never pass `--execute` or `--apply` against the real MacBook or real GitHub repos, and never run live `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui` (`sync-docs` has no dry run). A test may pass `--execute` only with an isolated temp `--state-dir` and no live endpoint, as T2.2's `tunnel --stop --execute` test does. Only tasks marked **LIVE** touch the real MacBook, and only the owner runs them.
 - No CORS headers, no bind address other than `127.0.0.1`, no new dependencies, no `.unwrap()` or `.expect()` outside tests.
 - When done: tick the box here, add `PR: #NN` under the task, and close the issue from the PR.
+- **Split tasks.** T1.4, T1.6, T1.7, T2.1 and T4.3 are too big for one PR, so each is split into parts (a, b, c) with their own checkbox, steps, tests and branch. Do the parts in order; each one leaves `main` green. The PR for an earlier part says `Implements specs/m1-dashboards T1.4 part a, part of #11`; the last part closes the issue. A dependency on a split task means all of its parts unless a part is named. If any other task runs past the budget, split it the same way (`../README.md`, PR size budget).
 
 ## Phase 0: prerequisite
 
@@ -95,7 +96,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.4 Install script and install plan
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
 - **Issue:** #11
 - **Covers:** R1.5, R1.6, R1.7, R1.9, R1.10, R4.4
 - **Depends on:** T1.3
@@ -121,6 +123,9 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
     - `install_script_escapes_xml_values_for_plists`: contains `sed -e 's/&/\&amp;/g'`.
     - `install_plan_wraps_script_for_remote_sh`: program is `ssh`; the last arg starts with `/bin/sh -c '`.
   - in `tests/dashboard_scripts.rs`: `rendered_install_script_passes_sh_syntax_check`
+- **Parts** (one PR each, in this order):
+  - **a. `install_service`** (`feat/m1-dashboards-t1-4a-install-service`): step 2 up to and including `install_service`: the header (`set -eu`, `xml_escape`, `HOME_XML`, `PIXEL_BIN_XML`, `FAILED=0`), the GUI-session guard, the legacy tmux cleanup and `install_service` with port freeing and its three `cause=` failure lines. No service blocks yet. Tests: `install_script_is_posix_and_guards_gui_session`, `install_script_skips_unchanged_services_and_reports_actions`, `install_script_frees_ports_by_listener_not_by_name`, `install_script_never_binds_non_loopback`, `install_script_waits_for_port_release_before_bootstrap`, `install_script_checks_each_step_because_errexit_is_off_in_conditions`, `install_script_escapes_xml_values_for_plists`.
+  - **b. Service blocks and install plan** (`feat/m1-dashboards-t1-4b-install-plan`): step 1, the rest of step 2 (`wait_port`, the Mission Control and Pixel Office blocks with their `if install_service …; then wait_port …; fi` call sites, the final `exit 4`), and steps 3 to 5. Tests: `install_script_skips_pixel_office_when_binary_missing`, `install_script_reports_port_held_with_diagnostics_and_skips_wait`, `install_script_exits_four_when_a_service_never_listens`, `install_script_reports_cause_log_and_last_exit_when_a_service_never_listens`, `install_plan_wraps_script_for_remote_sh`, `rendered_install_script_passes_sh_syntax_check`.
 - **Acceptance:**
   - `cargo test -p cheap-otto --lib dashboards::tests` passes.
   - On Linux or macOS, `cargo test -p cheap-otto --test dashboard_scripts` passes. On Windows it compiles and runs 0 tests.
@@ -144,7 +149,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.6 Status script and parser
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
 - **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
 - **Depends on:** T1.1
@@ -164,11 +170,15 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   - `listening_dashboard_needs_no_explanation`
   - `status_rows_explain_port_held_skipped_and_unloaded_dashboards`: feed `parse_status_output` the probe output a Mac would print after a port-held Mission Control install and a skipped Pixel Office, pass the report to `render_status_rows`, and assert each of those two rows carries a reason and a log path while the listening Reviewer row has neither. This is the end-to-end check for R5.1; it needs no Mac because the probe output is the input.
   - in `tests/dashboard_scripts.rs`: `rendered_status_script_passes_sh_syntax_check`
+- **Parts** (one PR each, in this order):
+  - **a. Status script and parser** (`feat/m1-dashboards-t1-6a-status-parser`): steps 1 to 3. Tests: `status_script_is_read_only`, `parses_status_lines_for_all_dashboards`, `ignores_unknown_lines_keys_and_ids`, `missing_host_line_yields_none`, `handles_empty_and_garbage_output_without_panicking`, `rendered_status_script_passes_sh_syntax_check` (create `tests/dashboard_scripts.rs` with `#![forbid(unsafe_code)]` if T1.4 part b has not landed).
+  - **b. Diagnosis** (`feat/m1-dashboards-t1-6b-diagnosis`): step 4. Tests: `explains_every_unavailable_dashboard_with_reason_and_log`, `listening_dashboard_needs_no_explanation`, `status_rows_explain_port_held_skipped_and_unloaded_dashboards`.
 - **Acceptance:** `cargo test -p cheap-otto --lib dashboards::tests` passes.
 
 ### T1.7 Tunnel spec, decision and record
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
 - **Issue:** #14
 - **Covers:** R3.2, R3.3, R3.4, R3.5, R3.6
 - **Depends on:** T1.1
@@ -189,6 +199,9 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   - `tunnel_failure_message_names_unanswered_ports_for_exit_and_timeout`: for both `ExitedEarly` and `TimedOut`, the message contains every unanswered port and the SSH test command.
   - `command_line_must_match_recorded_destination_and_forwards`: the recorded tunnel's own command line is true; an unrelated `ssh user@other-host`, the right host with one forward missing, an empty string and a non-ssh process are all false.
   - `tunnel_record_round_trips_as_json`
+- **Parts** (one PR each, in this order):
+  - **a. Spec, record and decision** (`feat/m1-dashboards-t1-7a-tunnel-decision`): from step 1 `build_tunnel_spec`, `TunnelRecord`, `TunnelDecision`, `recorded_tunnel_covers` and `decide_tunnel`; steps 2 to 4. Tests: `tunnel_spec_forwards_every_port_on_loopback_with_safe_options`, `decides_already_up_start_and_conflict`, `all_ports_answering_without_a_recorded_tunnel_is_a_conflict`, `recorded_tunnel_must_be_alive_ssh_and_cover_every_port`, `recorded_tunnel_for_another_peer_or_ssh_port_does_not_cover`, `tunnel_record_round_trips_as_json`.
+  - **b. Failure message and process check** (`feat/m1-dashboards-t1-7b-tunnel-failures`): from step 1 `TunnelFailure`, `describe_tunnel_failure` and `command_line_is_recorded_tunnel`; steps 5 and 6. Tests: `tunnel_failure_message_names_unanswered_ports_for_exit_and_timeout`, `command_line_must_match_recorded_destination_and_forwards`.
 - **Acceptance:** `cargo test -p cheap-otto --lib dashboards::tests` passes.
 
 ### T1.8 Stop writing `LocalForward` into the SSH config block
@@ -213,7 +226,9 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.1 `dashboards` subcommands
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
+- [ ] Part c done
 - **Issue:** #16
 - **Covers:** R1.1, R4.4, R5.1 to R5.5, R8.2, R8.4
 - **Depends on:** T1.4, T1.5, T1.6
@@ -230,6 +245,10 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   - `dashboards_status_json_stdout_is_json_only`: `status --json` (no `--execute`) exits 0 and the whole of stdout parses as one JSON object with a `dashboards` array of three entries.
   - `dashboards_restart_rejects_unknown_id`: `restart --id nope` exits non-zero and stderr names the three valid ids.
   - `dashboards_dry_runs_open_no_socket`: bind a `TcpListener` on `127.0.0.1:0`, set it non-blocking, pass its port as `--port`, run `status`, `install` and `uninstall` without `--execute`, then assert `accept()` returns `WouldBlock`: nothing connected.
+- **Parts** (one PR each, in this order):
+  - **a. `list`, `install-script` and `install`** (`feat/m1-dashboards-t2-1a-list-install`): needs T1.4 only. Step 1 with only the `List`, `InstallScript` and `Install` variants, then steps 2 and 3. Test: `dashboards_list_and_install_script_are_pure`. Acceptance: the `install-script | head -1` check.
+  - **b. `status`** (`feat/m1-dashboards-t2-1b-status`): needs T1.6. Add the `Status` variant; steps 4 and 5. Test: `dashboards_status_json_stdout_is_json_only`.
+  - **c. `restart` and `uninstall`** (`feat/m1-dashboards-t2-1c-restart-uninstall`): needs T1.5. Add the `Restart` and `Uninstall` variants. Tests: `dashboards_restart_rejects_unknown_id`, `dashboards_install_status_restart_uninstall_are_dry_runs_without_execute`, `dashboards_dry_runs_open_no_socket`. Acceptance: the `dashboards --help` check (six subcommands).
 - **Acceptance:**
   - `cargo test -p cheap-otto --test cli_integration dashboards_` passes.
   - `cargo run -q -p cheap-otto -- dashboards install-script | head -1` prints `set -eu`.
@@ -332,7 +351,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 - [ ] Done
 - **Issue:** #22
 - **Covers:** R4.2, R4.3
-- **Depends on:** T2.1, T4.1
+- **Depends on:** T2.1 part a, T4.1
 - **Files:** `crates/code-reviewer/scripts/m1-provision.sh`
 - **Steps:**
   1. Add section 8 from design 3.10 immediately before the final `echo "[m1-provision] Provisioning complete."` line.
@@ -345,7 +364,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.3 `code-reviewer ui` never opens a second tunnel
 
-- [ ] Done
+- [ ] Part a done
+- [ ] Part b done
 - **Issue:** #23
 - **Covers:** R3.6, R3.9
 - **Depends on:** T0.1, T2.3
@@ -361,6 +381,9 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
   - `delegation_is_skipped_for_custom_host_or_port`: a host other than the peer, or a port other than 7430, returns false; no host or the peer host on 7430 returns true.
   - `fallback_poll_step_decides_ready_wait_exited_or_timed_out`: all eight input combinations give the expected step.
   - `delegation_and_fallback_commands_strip_github_credentials`: for the version probe, the delegated `ui` command and the fallback tunnel command, `Command::get_envs()` shows both `GH_TOKEN` and `GITHUB_TOKEN` removed (the same assertion style as the existing `strip_github_credentials` test in `brains.rs`).
+- **Parts** (one PR each, in this order):
+  - **a. Fallback tunnel** (`fix/m1-dashboards-t4-3a-fallback-tunnel`): needs T0.1 only (done), so it can start now. Steps 1 and 5, and from step 4 `reviewer_fallback_tunnel_command` (through `strip_github_credentials`) and removing the `DEFAULT_PIXEL_PORT` forward. `open_tunneled_ui` always takes the fallback path for now. Tests: `fallback_tunnel_forwards_only_the_reviewer_port`, `fallback_poll_step_decides_ready_wait_exited_or_timed_out`.
+  - **b. Delegate to `cheap-otto ui`** (`feat/m1-dashboards-t4-3b-delegate-ui`): needs T2.3. Steps 2 and 3 and the rest of step 4. Tests: `delegation_is_skipped_for_custom_host_or_port`, `delegation_and_fallback_commands_strip_github_credentials`.
 - **Acceptance:** `cargo test -p code-reviewer server::tests` passes. Do not run `code-reviewer ui`.
 
 ### T4.4 The Pixel Office button starts the service, not an orphan

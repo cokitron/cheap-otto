@@ -28,6 +28,7 @@ To keep the codebase safe, deterministic, and easy to review for both humans and
   fix(code-reviewer): filter non-owner PRs in stage-1 tender poll
   chore(governance): configure cubic.yaml and OSS contribution rules
   ```
+- **Small PRs:** keep each PR to at most 400 changed lines (tests included, `Cargo.lock` excluded) and one concern, so it can be reviewed in one sitting. Check with `git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'`. Split bigger work into PRs that each leave `main` green; [`specs/README.md`](specs/README.md#pr-size-budget) explains how.
 - **Squash-Merge Policy:** Pull Requests squash-merge into `main` as a single clean Conventional Commit. Keep PRs focused so reviews stay fast and bisectable.
 
 ---
