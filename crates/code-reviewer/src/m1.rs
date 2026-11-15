@@ -103,7 +103,7 @@ pub fn push_bytes_to_m1(
 
 /// Full turnkey sync from local workstation to `otto-mac`:
 /// 1. Configures git remote `m1` & force-pushes `HEAD -> otto-sync`
-/// 2. Compiles, tests (`cargo test` + `clippy`), and installs `~/.cargo/bin/code-reviewer`
+/// 2. Compiles, tests (`cargo test` + `clippy`), and installs both `~/.cargo/bin/cheap-otto` and `~/.cargo/bin/code-reviewer`
 /// 3. Runs `scripts/m1-provision.sh` (CLI symlinks, global Claude/Antigravity skills, launchd wrapper, optional packages)
 /// 4. Optionally refreshes isolated GitHub account tokens (`--sync-tokens`) and bridges Drive docs (`--sync-drive`).
 pub fn sync_everything_to_m1(
@@ -173,9 +173,42 @@ pub fn sync_everything_to_m1(
         .into());
     }
 
-    // 2. Build, test, clippy, install binary, and run `scripts/m1-provision.sh` on M1
-    println!("[m1-sync] Building, testing, installing binary, and provisioning `otto-mac`...");
-    let build_and_provision = format!(
+    // 2. Build, test, clippy, install both binaries, and run `scripts/m1-provision.sh` on M1
+    println!("[m1-sync] Building, testing, installing binaries, and provisioning `otto-mac`...");
+    let build_and_provision = render_remote_build_script(
+        &remote_dir_expr,
+        opts.brew_pkgs,
+        opts.cargo_pkgs,
+        opts.npm_pkgs,
+    );
+    let out = run_ssh_script(opts.host, &build_and_provision)?;
+    for line in out.lines() {
+        println!("  {}", line);
+    }
+
+    // 3. Optionally sync GitHub tokens (`primary` & `secondary`) from local `gh` keyring
+    if opts.sync_tokens {
+        sync_github_tokens_to_m1(cfg, opts.host)?;
+    }
+
+    // 4. Optionally bridge any pending M1 PR review artifacts to Google Drive
+    if opts.sync_drive {
+        sync_m1_reviews_to_drive(workspace, cfg, opts.host, opts.remote_repo_path)?;
+    }
+
+    println!("[m1-sync] `otto-mac` is 100% up to date.");
+    Ok(())
+}
+
+/// Renders the POSIX `sh` script `sync_everything_to_m1` runs on the Mac after the push:
+/// check out `otto-sync` as `main`, run the test and clippy gate, `cargo install` the root
+/// `cheap-otto` crate and then `crates/code-reviewer`, and finally run `m1-provision.sh`.
+///
+/// Both binaries must be installed before provisioning, because the `launchd` services that
+/// provisioning sets up run `cheap-otto` as well as `code-reviewer`. The package lists are
+/// interpolated inside single quotes, so any `'` in them is dropped rather than escaped.
+fn render_remote_build_script(remote_dir_expr: &str, brew: &str, cargo: &str, npm: &str) -> String {
+    format!(
         "set -eu\n\
          export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
          cd \"{repo}\"\n\
@@ -195,27 +228,10 @@ pub fn sync_everything_to_m1(
          chmod +x \"$CR_ROOT/scripts/m1-provision.sh\" \"$CR_ROOT/scripts/m1-oauth-login.sh\" 2>/dev/null || true\n\
          BREW_PKGS='{brew}' CARGO_PKGS='{cargo}' NPM_PKGS='{npm}' REPO_ROOT=\"$CR_ROOT\" /bin/sh \"$CR_ROOT/scripts/m1-provision.sh\"\n",
         repo = remote_dir_expr,
-        brew = opts.brew_pkgs.replace('\'', ""),
-        cargo = opts.cargo_pkgs.replace('\'', ""),
-        npm = opts.npm_pkgs.replace('\'', ""),
-    );
-    let out = run_ssh_script(opts.host, &build_and_provision)?;
-    for line in out.lines() {
-        println!("  {}", line);
-    }
-
-    // 3. Optionally sync GitHub tokens (`primary` & `secondary`) from local `gh` keyring
-    if opts.sync_tokens {
-        sync_github_tokens_to_m1(cfg, opts.host)?;
-    }
-
-    // 4. Optionally bridge any pending M1 PR review artifacts to Google Drive
-    if opts.sync_drive {
-        sync_m1_reviews_to_drive(workspace, cfg, opts.host, opts.remote_repo_path)?;
-    }
-
-    println!("[m1-sync] `otto-mac` is 100% up to date.");
-    Ok(())
+        brew = brew.replace('\'', ""),
+        cargo = cargo.replace('\'', ""),
+        npm = npm.replace('\'', ""),
+    )
 }
 
 /// Transfers fresh `primary` and `secondary` GitHub tokens from local `gh auth token` to M1 `~/.code-reviewer/tokens/*.token` (`0600`).
@@ -449,6 +465,55 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"otto-mac:m1"), "b3R0by1tYWM6bTE=");
+    }
+
+    #[test]
+    fn remote_build_script_installs_both_binaries_before_provisioning() {
+        let script = render_remote_build_script("$HOME/otto-workspaces/cheap-otto", "", "", "");
+        let root = script
+            .find("cargo install --path . --locked --force")
+            .unwrap();
+        let reviewer = script
+            .find("cargo install --path crates/code-reviewer --locked --force")
+            .unwrap();
+        let provision = script.find("m1-provision.sh").unwrap();
+        assert!(root < reviewer, "root crate must be installed first");
+        assert!(
+            reviewer < provision,
+            "both installs must precede provisioning"
+        );
+    }
+
+    #[test]
+    fn remote_build_script_matches_the_pre_extraction_output() {
+        let script = render_remote_build_script("$HOME/repo", "gh jq", "ripgrep", "pnpm");
+        let expected = "set -eu\n\
+export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
+cd \"$HOME/repo\"\n\
+git checkout -- scripts/ crates/code-reviewer/scripts/ 2>/dev/null || true\n\
+git checkout -f -B main otto-sync\n\
+git reset --hard otto-sync\n\
+cargo test --workspace --all-targets --locked\n\
+cargo clippy --workspace --all-targets --all-features -- -D warnings\n\
+if [ -d crates/code-reviewer ]; then\n\
+cargo install --path . --locked --force\n\
+cargo install --path crates/code-reviewer --locked --force\n\
+CR_ROOT=\"$(pwd)/crates/code-reviewer\"\n\
+else\n\
+cargo install --path . --locked --force\n\
+CR_ROOT=\"$(pwd)\"\n\
+fi\n\
+chmod +x \"$CR_ROOT/scripts/m1-provision.sh\" \"$CR_ROOT/scripts/m1-oauth-login.sh\" 2>/dev/null || true\n\
+BREW_PKGS='gh jq' CARGO_PKGS='ripgrep' NPM_PKGS='pnpm' REPO_ROOT=\"$CR_ROOT\" /bin/sh \"$CR_ROOT/scripts/m1-provision.sh\"\n";
+        assert_eq!(script, expected);
+    }
+
+    #[test]
+    fn remote_build_script_drops_single_quotes_from_package_lists() {
+        let script = render_remote_build_script("$HOME/repo", "jq'; rm -rf ~ #", "-x'$(id)", "a'b");
+        assert!(script.contains("BREW_PKGS='jq; rm -rf ~ #'"));
+        assert!(script.contains("CARGO_PKGS='-x$(id)'"));
+        assert!(script.contains("NPM_PKGS='ab'"));
     }
 
     #[test]
