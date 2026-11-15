@@ -170,7 +170,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.6 Status script and parser
 
-- [ ] Done
+- [x] Done
 - **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
 - **Depends on:** T1.1
@@ -179,7 +179,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   1. Add `render_status_script(set)` and `build_status_spec(peer, set) -> CommandSpec`, printing the lines in design 3.4, including `last_exit` on every dashboard line. Use `BatchMode=yes` and `ConnectTimeout=3` like `PeerNode::build_ssh_probe_spec`.
   2. Add `DashboardRemoteStatus`, `DashboardHostFacts`, `DashboardStatusReport` and `pub fn parse_status_output(raw: &str, set: &DashboardSet) -> DashboardStatusReport`.
   3. The parser never panics: unknown lines, keys and ids are ignored; `pid=-` and unparsable pids become `None`; `autologin_user=-` and `last_exit=-` become `None`.
-  4. Add `DashboardDiagnosis`, `explain_unavailable` and `render_status_rows` as in design 3.4. `explain_unavailable` returns `None` for a listening dashboard and otherwise the first matching row of the table there, always with the log path.
+  4. Add `DashboardDiagnosis`, `explain_unavailable` and `render_status_rows` as in design 3.4. `explain_unavailable` returns `None` for a loaded and listening dashboard and otherwise the first matching row of the table there, always with the log path.
 - **Tests:**
   - `status_script_is_read_only`: contains none of `bootstrap`, `bootout`, `kickstart`, `kill `, `rm `, `mv `.
   - `parses_status_lines_for_all_dashboards`: the four sample lines in design 3.4 give three dashboards and the host facts.
