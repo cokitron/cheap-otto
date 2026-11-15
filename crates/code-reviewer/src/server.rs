@@ -232,7 +232,7 @@ fn wait_for_fallback_tunnel(
         let _ = child.wait();
         return Err(format!(
             "could not tunnel the Reviewer dashboard on 127.0.0.1:{port}: {reason}; \
-             check the Mac with `cheap-otto dashboards status --execute`"
+             check the Reviewer service with `code-reviewer m1 status`"
         ));
     }
 }
