@@ -6,6 +6,7 @@ mod diff;
 mod drive;
 mod github;
 mod m1;
+mod request_guard;
 mod server;
 mod state;
 mod tender;

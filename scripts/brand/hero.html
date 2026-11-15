@@ -1,0 +1,64 @@
+<!doctype html>
+<!--
+  Template for the README hero images and the GitHub social preview.
+  Rendered to PNG by scripts/brand/render.sh with headless Chrome:
+    ?k=night  -> .github/assets/readme-hero-dark.png   (1280x440 @2x)
+    ?k=paper  -> .github/assets/readme-hero-light.png  (1280x440 @2x)
+    ?k=social -> docs/assets/social-preview.png        (1280x640)
+  Logos load from ../../docs/assets/ (override with ?a=<url>/), fonts from Google Fonts (network needed at render time).
+-->
+<html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=block" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; overflow: hidden; }
+  body { font-family: "JetBrains Mono", monospace; }
+  .night { --bg: #080808; --ink: #ffffff; --muted: #8e8e8e; --chip: #121212; --line: #444; }
+  .paper { --bg: #f4f1e8; --ink: #0a0a0a; --muted: #5c5a52; --chip: #ebe7da; --line: #a8a290; }
+  .hero { width: 1280px; height: 440px; background: var(--bg); color: var(--ink); position: relative; padding: 48px 56px; display: grid; grid-template-columns: 1fr 340px; gap: 32px; align-items: center; }
+  .word { width: 600px; height: auto; display: block; }
+  .tag { font: 400 40px/.95 "Archivo Black"; white-space: nowrap; letter-spacing: -.03em; text-transform: uppercase; margin: 30px 0 16px; }
+  .sub { font-size: 15px; white-space: nowrap; color: var(--muted); font-weight: 700; letter-spacing: .02em; }
+  .chips { display: flex; gap: 10px; margin-top: 26px; flex-wrap: wrap; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border: 1.5px solid var(--line); background: var(--chip); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+  .chip i { width: 9px; height: 9px; display: inline-block; background: #4ADE80; }
+  .chip i.y { background: #F7D842; } .chip i.a { background: #DE9E1E; }
+  .slab { position: relative; height: 344px; background: #F7D842; border: 3px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); display: grid; place-items: end center; overflow: hidden; }
+  .slab img { width: 260px; image-rendering: pixelated; display: block; margin-bottom: -2px; }
+  .bubble { position: absolute; top: 26px; left: 24px; background: #fff; color: #0a0a0a; border: 2px solid #0a0a0a; box-shadow: 3px 3px 0 #0a0a0a; font: 800 22px/1 "JetBrains Mono"; padding: 8px 12px; }
+
+  .social { width: 1280px; height: 640px; background: #F7D842; color: #0a0a0a; padding: 60px 64px; position: relative; overflow: hidden; }
+  .social .word { width: 640px; }
+  .social h1 { font: 400 92px/.9 "Archivo Black"; letter-spacing: -.035em; text-transform: uppercase; margin-top: 46px; max-width: 760px; }
+  .social p { font-size: 22px; font-weight: 700; margin-top: 26px; max-width: 700px; line-height: 1.45; }
+  .social .otter { position: absolute; right: 64px; bottom: 0; width: 360px; image-rendering: pixelated; }
+  .social .bar { position: absolute; left: 0; right: 0; top: 0; height: 16px; background: #0a0a0a; }
+  .social .chips .chip { background: #0a0a0a; color: #fff; border-color: #0a0a0a; }
+  .social .url { position: absolute; right: 64px; top: 52px; font-weight: 800; font-size: 18px; background: #0a0a0a; color: #F7D842; padding: 8px 12px; }
+</style></head>
+<body>
+<div id="v"></div>
+<script>
+  var q = new URLSearchParams(location.search), kind = q.get('k');
+  if (['night', 'paper', 'social'].indexOf(kind) < 0) kind = 'night';
+  var A = (q.get('a') || '../../docs/assets/').replace(/[&<>"']/g, function (c) {
+    return '&#' + c.charCodeAt(0) + ';';
+  });
+  var v = document.getElementById('v');
+  if (kind === 'social') {
+    v.innerHTML = '<div class="social"><div class="bar"></div><img class="word" src="' + A + 'otto-wordmark-ink.svg"><span class="url">github.com/cokitron/cheap-otto</span>' +
+      '<h1>Put the old MacBook to work.</h1>' +
+      '<p>Cross-OS dev bridge · parallel agent worktree farm · overnight code reviewer. 100% reversible.</p>' +
+      '<div class="chips"><span class="chip"><i></i>Windows ⇄ macOS</span><span class="chip"><i class="y"></i>claude · agy · kiro</span><span class="chip"><i></i>78% battery cap</span></div>' +
+      '<img class="otter" src="' + A + 'otto-pixel.svg"></div>';
+  } else {
+    var dark = kind === 'night';
+    v.innerHTML = '<div class="hero ' + kind + '"><div>' +
+      '<img class="word" src="' + A + (dark ? 'otto-wordmark-white.svg' : 'otto-wordmark-ink.svg') + '">' +
+      '<div class="tag">Put the old MacBook to work.</div>' +
+      '<div class="sub">Cross-OS dev bridge · Parallel agent worktree farm · Overnight code reviewer</div>' +
+      '<div class="chips"><span class="chip"><i></i>otto-mac online</span><span class="chip"><i class="y"></i>4 agents working</span><span class="chip"><i class="a"></i>lid closed</span><span class="chip"><i></i>battery held at 78%</span></div>' +
+      '</div><div class="slab"><span class="bubble">o=o</span><img src="' + A + 'otto-pixel.svg"></div></div>';
+  }
+</script>
+</body></html>

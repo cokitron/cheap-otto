@@ -1,100 +1,97 @@
-# CLAUDE.md — `cheap-otto` Project Guidelines & Rust Engineering Standards
+# CLAUDE.md
 
-## 1. Project Overview
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**`cheap-otto`** turns a spare MacBook (especially fanless Apple Silicon M1/M2/M3 MacBook Airs, including units with broken screens) into a **Cross-OS Dev Bridge & Parallel Agent Worktree Farm** paired with your primary Windows workstation over LAN or Tailscale SSH.
+## What this is
 
-### Core Value Propositions & Invariants
-1. **Cross-OS Dev Bridge (`src/bridge.rs`):** Pairs Windows and macOS over standard SSH (`PeerNode`), syncs repositories via Git+SSH while excluding OS-specific build artifacts (`target/`, `node_modules/`), runs native macOS/ARM64 commands from Windows (`build_remote_exec`), and forwards localhost dev ports (`build_port_tunnel`).
-2. **Parallel Agent Worktree Farm (`src/worktree.rs`):** Offloads coding tasks (`ClaudeCode`, `Antigravity`, `KiroCli`, `CustomShell`) to isolated Git worktrees (`~/otto-workspaces/<project>/.otto-worktrees/<task-id>`) on dedicated branches (`otto/<task-id>`) inside detached `tmux` sessions, and fetches completed branches straight back into the Windows Git repository (`build_pull_plan`).
-3. **100% Reversible OS Changes (`src/macos.rs`):** Every host power/sleep modification (`pmset`) must first snapshot original settings to `.cheap-otto/state-backup.json` and generate deterministic, idempotent restore commands (`cheap-otto restore`).
-4. **Battery Swell Protection (`src/macos.rs`, `src/doctor.rs`):** Laptops plugged into AC power 24/7 must enforce a safe battery charge ceiling (`50..=100%`, default `78%`) and retain battery sleep (`5 min`) if AC power is lost.
-5. **Unified Memory & Passive Thermal Arbitration (`src/hardware.rs`, `src/arbiter.rs`):** Fanless laptops have strict thermal and unified RAM envelopes. The arbiter deterministically evicts cached local LLM weights on idle timeout, low memory, build/worktree startup, or `Serious`/`Critical` thermal pressure.
-6. **Cross-Platform Functional Core (`src/*.rs`):** All parsing, SSH/Git command generation, worktree planning, memory budgeting, and health evaluation are pure, deterministic Rust functions that compile and pass `cargo test` on **Windows, Linux, and macOS**.
+A Rust 2024 Cargo workspace that turns a spare, lid-closed MacBook (`otto-mac`, usually a fanless M1) into a second machine for a Windows workstation, over plain SSH on LAN or Tailscale.
 
----
+| Piece | Where | What it does |
+| --- | --- | --- |
+| `cheap-otto` | root package: `src/lib.rs` + `src/main.rs` | CLI for the dev bridge (`pair`, `sync`, `exec`, `shell`), the agent worktree farm (`delegate`, `inspect`, `ask`, `pull`), the `launchd` scheduler (`schedule`, `runs`), reversible power guardrails (`init`, `doctor`, `arbiter`, `restore`) and the Mission Control server (`serve`, `ui`, port 7420) |
+| `code-reviewer` | `crates/code-reviewer`, binary only | Autonomous multi-lens PR reviewer and Code Tender that run on the Mac, with a dashboard on port 7430 |
+| Site and brand | `docs/`, `.github/assets/`, `scripts/brand/` | Static GitHub Pages site (no build step), logo and hero images, and the scripts that generate them |
+| Governance | `CONTRIBUTING.md`, `SECURITY.md`, `cubic.yaml`, `.ai/`, `.github/` | PR-only `main`, the Cubic AI review config and the context files it reads, CI, issue and PR templates |
 
-## 2. Repository Structure & Module Map
+## Safety: the appliance is real
 
-```text
-cheap-otto/
-├── Cargo.toml                        # Unified workspace (`cheap-otto` + `crates/code-reviewer`)
-├── cubic.yaml                        # Schema-validated Cubic AI code review configuration
-├── CONTRIBUTING.md                   # PR-only main, Conventional Commits & verification rules
-├── SECURITY.md                       # Threat model & private vulnerability reporting policy
-├── CLAUDE.md                         # Primary instructions for Claude Code & AI agents
-├── AGENTS.md                         # Cross-agent rules entry point (Antigravity / Codex / Cursor)
-├── .ai/                              # Architecture & security context loaded by Cubic AI agents
-├── .claude/
-│   └── rules/
-│       ├── 01-rust-idioms-and-edition-2024.md
-│       ├── 02-security-and-appliance-safety.md
-│       ├── 03-architecture-and-testing.md
-│       ├── 04-clippy-formatting-and-docs.md
-│       ├── 05-crate-ecosystem-and-cli-patterns.md
-│       └── 06-git-workflow-and-governance.md
-├── crates/
-│   └── code-reviewer/                # Autonomous Multi-Lens CI Reviewer & Code Tender crate
-├── scripts/
-│   └── bootstrap-macos.sh            # Idempotent macOS SSH bootstrapper
-└── src/
-    ├── lib.rs                        # Library crate root exporting public modules
-    ├── main.rs                       # CLI binary entrypoint (clap derive) & I/O orchestration
-    ├── command.rs                    # CommandSpec: shell-free OS process specifications (program + args)
-    ├── workspace.rs                  # Multi-project Git discovery, config hierarchy & WorkspaceRegistry
-    ├── bridge.rs                     # Option 5: PeerNode, dirty-guarded WorkspaceSyncPlan, RemoteExec, PortTunnelPlan
-    ├── terminal.rs                   # Interactive M1 shell (`manual` tmux / zsh), live `attach`, and `logs`
-    ├── harness.rs                    # Multi-harness catalog (`claude`, `agy`, `kiro`, `custom`), `--model`/`--effort`, `stream-json` -> PixelHookPayload
-    ├── agent_session.rs              # Addressable per-agent session registry (`agents.json`), `inspect`, and stateful `ask` (`--resume`)
-    ├── template.rs                   # Repeatable task playbooks (`templates.json`) for one-click UI/CLI delegation & scheduling
-    ├── server.rs                     # `cheap-otto serve` (`axum` `:7420`) shared REST API + `pixel-agents` (`:7421`) event forwarder
-    ├── ui_assets.rs                  # Embedded single-page Mission Control Web GUI (Split/Office/Console views)
-    ├── worktree.rs                   # Option 1: AgentRunner, DelegatedWorktreePlan (remain-on-exit + tee logs), WorktreePullPlan
-    ├── schedule.rs                   # Reversible macOS launchd CI & autonomous agent scheduler + JSONL run ledger
-    ├── hardware.rs                   # HardwareProfile, CpuArch, ThermalLevel, MemoryBudget, sysctl/vm_stat parsers
-    ├── macos.rs                      # MacOsStateBackup, AppliancePowerPlan, pmset parser & command builder
-    ├── arbiter.rs                    # ArbiterPolicy, ArbiterSnapshot, ArbiterAction (RAM/thermal state machine)
-    └── doctor.rs                     # SystemProbeInput, RawTelemetrySnapshot, DoctorReport, 8-point checker
-```
+Assume the machine you are running on is paired with a live MacBook and live GitHub repos. Real state lives in `~/.cheap-otto/`, `~/.ssh/config`, `~/.code-reviewer/` and the gitignored `crates/code-reviewer/config/repos.toml`.
 
----
+- **`cheap-otto` is dry-run by default for OS and remote actions.** Those subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). Commands that only mutate local JSON, including `template add` and `template remove`, have no gate and write immediately. `pair --tunnel` opens a live tunnel. Pass side-effecting flags only when the user asked for that specific action.
+- **`code-reviewer` is live by default.** `poll`, `tend-poll`, `review`, `tend`, `sync-docs`, `ui` and mutating `m1 …` subcommands act on GitHub or the Mac at once. Use `--dry-run` on the first four. Only `doctor`, `status`, `m1 status` and `watch list` are read-only.
+- **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls both binaries and restarts the `launchd` jobs. Never run it unasked or from a feature branch.
+- **Dry runs still write state and may probe the Mac.** `init` and `pair` write directly to `--out-dir` (default `./.cheap-otto`) with no repo or home fallback. State-discovery commands such as `delegate` persist JSON into the state dir, which resolves `--state-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`. `doctor` and `init` read telemetry from the paired Mac over SSH. When you exercise the CLI, pass a temp `--out-dir` (`init`, `pair`) or `--state-dir` (the rest), and `--offline` on `init` and `doctor`.
 
-## 3. Essential Commands
-
-Always verify changes using the local Cargo toolchain before completing any task:
+## Commands
 
 ```bash
-# Compile check (fast feedback)
-cargo check --all-targets
-
-# Run the full unit and integration test suite
-cargo test
-
-# Lint with Clippy (zero warnings allowed)
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Verify formatting
+# The CI gate (.github/workflows/ci.yml runs it on Linux, macOS and Windows). Run all three before calling work done; together they take under a minute.
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --locked
 
-# Run CLI subcommands locally
-cargo run -- init --ram-gb 16 --battery-cap 78
-cargo run -- pair --host 192.168.1.42 --user admin --alias otto-mac
-cargo run -- sync --project cheap-otto
-cargo run -- exec --project cheap-otto --cmd "cargo test --all-targets"
-cargo run -- delegate --project cheap-otto --id fix-auth-race --agent claude --task "Fix auth token race"
-cargo run -- pull --project cheap-otto --id fix-auth-race
-cargo run -- doctor
-cargo run -- restore
+# One module, one test, one integration test
+cargo test -p cheap-otto --lib arbiter::tests
+cargo test -p code-reviewer tender::tests::quota_exhausted_errors_are_detected
+cargo test -p cheap-otto --test cli_integration schedule_lifecycle
+
+# Run a binary. Plain `cargo run -- …` fails at the repo root because both packages are default members.
+cargo run -p cheap-otto -- doctor --offline
+cargo run -p code-reviewer -- --help
 ```
 
----
+## Architecture
 
-## 4. Non-Negotiable Rust & Security Rules Summary
+### `cheap-otto`: plans are data, execution happens at the edge
 
-Detailed rules live in `.claude/rules/` and are loaded automatically:
-- **[01-rust-idioms-and-edition-2024.md](.claude/rules/01-rust-idioms-and-edition-2024.md):** Rust 2024 edition idioms, ownership, type-driven design, `thiserror` v2 error handling, `#[must_use]` annotations, and zero `.unwrap()`/`.expect()` in library code.
-- **[02-security-and-appliance-safety.md](.claude/rules/02-security-and-appliance-safety.md):** `#![forbid(unsafe_code)]`, saturating arithmetic (`saturating_sub`, `clamp`), defensive parser design for OS command output, shell/command injection prevention (`validate_safe_identifier`), and battery/thermal safety guardrails.
-- **[03-architecture-and-testing.md](.claude/rules/03-architecture-and-testing.md):** Functional Core / Imperative Shell separation, cross-platform testability, and `Result`-returning unit tests covering happy paths, boundary conditions, and error variants.
-- **[04-clippy-formatting-and-docs.md](.claude/rules/04-clippy-formatting-and-docs.md):** Clippy pedantic discipline, rustdoc standards, and pre-flight verification workflow.
-- **[05-crate-ecosystem-and-cli-patterns.md](.claude/rules/05-crate-ecosystem-and-cli-patterns.md):** Approved crate stack (`clap`, `serde`, `serde_json`, `thiserror`), CLI design conventions, and additive schema evolution.
-- **[06-git-workflow-and-governance.md](.claude/rules/06-git-workflow-and-governance.md):** Strictly PR-only `main`, short-lived prefixed branches (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`), Conventional Commits/PR titles, squash-merge policy, Cubic AI review rules (`cubic.yaml`), and Code Tender Stage-1 author allowlist (`tender_allowed_authors`) + fork isolation.
+- **Functional core.** Every module in `src/` except `main.rs` and `server.rs` is pure, with one deliberate exception: `harness::generate_session_uuid` reads the clock and entropy. The core parses text captured from the OS (`pmset -g custom`, `sysctl`, `vm_stat`) and returns typed plans: structs holding a `Vec<CommandSpec>` (`src/command.rs`: a `program` plus discrete `args`). There is no filesystem, process or network I/O in the core, which is why the suite passes on Windows, Linux and macOS with no Mac attached.
+- **Imperative shells.** `src/main.rs` is the synchronous one: clap parsing, loading and saving state JSON, printing plans, and `execute_command_spec` behind the `--execute` gate for CLI commands. `src/server.rs` is the async one for `serve` (axum, `127.0.0.1:7420` by default). It is a live privileged control plane: its REST handlers spawn local `tmux`, `/bin/sh`, `git` and `launchctl` commands with no `--execute` gate, and its terminal API can drive tmux sessions, so keep it reachable only through localhost or an SSH tunnel. Its REST API is shared by the embedded Mission Control page (`src/ui_assets.rs`) and by external agents; CLI `--json` output is the other machine interface.
+- **Remote work is an SSH command string.** The Mac's shell interprets it, so every interpolated value is validated (`validate_safe_identifier`, `validate_model_identifier`, `validate_session_identifier`) or quoted (`posix_single_quote`). The local process is always spawned with discrete args.
+- **Naming contract on the Mac.** Many modules depend on these, so change them everywhere or nowhere:
+  - workspace `~/otto-workspaces/<project>`, worktree `.otto-worktrees/<task-id>` inside it
+  - branch `otto/<task-id>`, tmux session `otto-<task-id>` (`manual` is reserved for the human)
+  - log `~/.cheap-otto/logs/<project>/<task-id>.log`, run ledger `~/.cheap-otto/runs/<project>/history.jsonl`
+  - LaunchAgent label `com.cheapotto.<project>.<id>`
+- **Local state.** A `.cheap-otto/` dir of pretty-printed JSON: `peer.json`, `state-backup.json`, `projects.json`, `agents.json`, `templates.json`, `schedules.json`. Schemas grow additively (`#[serde(default)]` on new fields), because `restore` must load a backup written by an older build.
+
+### `code-reviewer`: a synchronous appliance binary
+
+- **No async runtime, no HTTP/TLS stack.** `server.rs` is a hand-rolled `std::net` server. GitHub access goes through `gh` subprocesses with a per-account `GH_TOKEN`; agents run as `claude` and `agy` subprocesses.
+- **Review flow.** `poll` runs from `launchd` every two minutes with one batched GraphQL query, so idle ticks cost no AI tokens. `state.rs` picks the trigger (initial review, re-review after a push or reply, post-merge docs). Each PR gets a detached worker. `brains.rs` runs only the applicable brains `01`–`07`, in waves capped by `max_parallel_brains_per_pr`, in a read-only worktree pinned to the head SHA, then `08-adversarial-verifier` strikes unproven claims. `diff.rs` keeps only inline comments that land inside diff hunks, because one bad line makes GitHub reject the whole review. `github.rs` posts it in one call and the ledger goes to `~/.code-reviewer/state.json`.
+- **Code Tender (`tender.rs`) is the write path.** It fixes review feedback in writable PR worktrees, runs the repo's check command, has the other provider verify the diff, then pushes or stages a patch.
+- **Prompts are data.** `brains/<id>/PROMPT.md` with a `kb/` folder each, and `tender-agents/`.
+
+## Invariants
+
+1. Every macOS power change is reversible: snapshot to `state-backup.json` before generating a `pmset` change, and `restore` must reproduce the original exactly.
+2. The battery charge ceiling stays in `50..=100` (default 78) and the battery sleep fallback (`pmset -b sleep 5`) is always kept.
+3. Arbiter precedence: kill-switch first, then thermal `Serious` or worse, before any other rule.
+4. No `unsafe` (`#![forbid(unsafe_code)]` at every crate root) and no `.unwrap()`, `.expect()` or `panic!` outside tests. Both crates are at zero today.
+5. Servers default to `127.0.0.1`, but `cheap-otto serve --host` and `code-reviewer serve --bind` accept overrides; do not expose either server on a non-loopback address. Remote access goes through SSH tunnels.
+6. Tests need no Mac, no network and no wall-clock time.
+
+## Conventions
+
+- **Commits and PR titles:** Conventional Commits, `<type>(<scope>): <summary>` or `<type>: <summary>` (the scope is optional), with type one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`, `build`, `revert`. CI rejects a PR whose title does not match.
+- **Branches:** `main` is PR-only and squash-merged. Branch from `origin/main` with a prefix CI accepts: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/` or `claude/`. `dependabot/` is also accepted, for Dependabot's own branches.
+- **A PR merges only when** the four CI jobs pass (`PR Governance & Secret Guard`, and `Rust Gate` on three OSes), the Cubic AI review check passes, every review thread is resolved, and the branch is up to date with `main`.
+- **`main` deploys:** GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries.
+- **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
+- Rule 06 and `CONTRIBUTING.md` hold the full workflow; `SECURITY.md` says how to report a vulnerability.
+
+## Path-scoped rules
+
+`.claude/rules/` holds detailed rules that load when you touch matching files:
+
+| File | Loads for | Covers |
+| --- | --- | --- |
+| `01-rust-idioms-and-edition-2024.md` | Rust sources, manifests | Type-driven design, error enums, ownership, matching |
+| `02-security-and-appliance-safety.md` | Rust sources, shell and PowerShell scripts | Remote shell quoting, defensive parsing, power and battery guardrails, token isolation |
+| `03-architecture-and-testing.md` | `src/`, `tests/`, `crates/` | Core and shell split, test layout and naming, how to test without a Mac |
+| `04-clippy-formatting-and-docs.md` | Rust sources, manifests | Zero-warning policy, rustdoc, the completion checklist |
+| `05-crate-ecosystem-and-cli-patterns.md` | Manifests, `main.rs` files | Dependency policy, clap conventions, dry-run flags, state schema evolution |
+| `06-git-workflow-and-governance.md` | Always | PR-only `main`, branch prefixes, Conventional Commits, squash merges, Cubic AI review and Code Tender coexistence, public sanitization |
+| `07-code-reviewer.md` | `crates/code-reviewer/` | Review pipeline, brains and KBs, Code Tender limits, token handling, deploying to the Mac |
+| `08-embedded-web-ui.md` | `ui_assets.rs`, `ui_html.rs`, both `server.rs` | Self-contained embedded pages, API parity, the request guard, previewing safely |
+| `09-brand-and-pages-site.md` | `docs/`, `.github/assets/`, `scripts/brand/`, `README.md` | Brand tokens, logo rules, regenerating assets, Pages deploy |
+| `10-ci-and-release.md` | `.github/`, manifests | CI jobs and required checks, release tags and targets, what never goes in a commit |
