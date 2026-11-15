@@ -1,6 +1,6 @@
 # m1-dashboards: every dashboard served from the Mac, one tunnel
 
-**Status:** planned. The prerequisite (T0.1, the origin guard) is implemented in #31 and merged into PR #4's branch, but it is not on `main` yet. No other task has started.
+**Status:** planned, prerequisite done. T0.1 (the origin guard, #31) is on `main` through #4. No other task has started; every task whose dependencies are met can start.
 
 **Tracking issue:** #6 (tasks are #7 to #30, label `m1-dashboards`, milestone "M1 dashboards").
 
@@ -28,14 +28,14 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 
 | If you are | Start with |
 | --- | --- |
-| An agent picking up work | Pick the first unchecked, unclaimed task in `tasks.md` whose dependencies are all checked; skip tasks already claimed in their issue. T0.1 is in progress, so T1.1, T1.8 and T4.1 are currently available. |
+| An agent picking up work | Pick the first unchecked, unclaimed task in `tasks.md` whose dependencies are all checked; skip tasks already claimed in their issue. T0.1 is done, so T1.1, T1.8 and T4.1 are available now, and T4.4 and T4.6 follow as soon as T1.1 lands. |
 | Reviewing the plan | `design.md` sections 1 (problems), 8 (decisions) and 9 (open questions) |
 | The owner | Answer the four open questions in `design.md` section 9 if you disagree with the defaults, and run the two **LIVE** tasks at the end |
 
 ## Order of work
 
 ```text
-Phase 0  T0.1 origin guard ─────────────────────────────┐ (blocks only tasks that edit the two server.rs files)
+Phase 0  T0.1 origin guard (done) ──────────────────────┐ (was the gate for tasks that edit the two server.rs files)
 Phase 1  T1.1 registry ─┬─ T1.2 reserved name            │
                         ├─ T1.3 plists ── T1.4 install ── T1.5 uninstall/restart
                         ├─ T1.6 status                   │
@@ -63,7 +63,7 @@ Tasks on different branches of this tree can be done in parallel by different ag
 ## Coordination with other open work
 
 - **Governance (#2, merged)** moved the Mac checkout default to `~/otto-workspaces/cheap-otto`, made `m1 sync` install both binaries, and edited `crates/code-reviewer/src/m1.rs`, `crates/code-reviewer/scripts/m1-provision.sh`, `crates/code-reviewer/src/server.rs` and `src/main.rs`. Line references in `design.md` section 1 may have moved; search by function name. T4.1 shrank to making that deploy step testable.
-- **The origin guard (T0.1)** is implemented in #31, which is merged into `claude/project-rules` (PR #4), not into `main`. `tasks.md` keeps T0.1 unticked until #4 merges, and T3.1, T4.3, T4.4 and T4.6 wait for that. It edits both `server.rs` files and adds a `request_guard.rs` to each crate. For tests that follow: Mission Control accepts a loopback `Host` header, or the HTTP/2 or absolute-form request authority when `Host` is absent; the reviewer's parser reads only the `Host` header, so its tests must always send one.
+- **The origin guard (T0.1)** is on `main` (#31, merged through #4). It edits both `server.rs` files and adds a `request_guard.rs` to each crate. For tests that follow: Mission Control accepts a loopback `Host` header, or the HTTP/2 or absolute-form request authority when `Host` is absent; the reviewer's parser reads only the `Host` header, so its tests must always send one.
 - **Merging needs** what rule 10 lists: the three-OS Rust gate, the governance job, the Cubic review, every review thread resolved, and the branch up to date with `main`.
 
 ## Decisions waiting on the owner
@@ -79,4 +79,4 @@ All four have defaults, so no task is blocked. See `design.md` section 9.
 
 Add one line per merged PR, newest first.
 
-- _nothing merged into `main` yet_ (T0.1 is waiting in #4)
+- T0.1 origin and host guard: #31, merged into `main` through #4.

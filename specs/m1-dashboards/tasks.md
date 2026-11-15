@@ -22,16 +22,17 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 ### T0.1 Origin and host guard on both dashboard servers
 
-- [ ] Done
+- [x] Done
+- **PR:** #31, landed on `main` through #4
 - **Issue:** #7
 - **Covers:** R7.1
 - **Depends on:** nothing
-- **Status:** implemented in #31, which is merged into `claude/project-rules` (PR #4). It is **not on `main` yet**: this task is done when #4 merges, and until then the box stays unticked and the tasks that depend on T0.1 wait.
+- **Status:** done. #31 was merged into PR #4's branch and #4 is merged into `main`.
 - **Goal:** `cheap-otto serve` and `code-reviewer serve` reject state-changing requests from a foreign `Origin` and any request with a non-loopback `Host`; `CorsLayer::permissive()` is gone.
 - **Acceptance:**
   - #4, which carries #31, is merged into `main`.
   - `grep -n "CorsLayer::permissive" src/server.rs` prints nothing.
-- **Why it comes first:** T3.1, T4.3, T4.4 and T4.6 edit the same two `server.rs` files. Start them after #4 is on `main`.
+- **Why it came first:** T3.1, T4.3, T4.4 and T4.6 edit the same two `server.rs` files. They can start now.
 
 ## Phase 1: core planners (root crate, pure code)
 
