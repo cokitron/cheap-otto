@@ -392,11 +392,11 @@ pub fn render_status_rows(report: &DashboardStatusReport, set: &DashboardSet, tu
 | 1 | `host.gui_session` is false | No GUI session for the Mac user; log in to the Mac desktop or enable automatic login |
 | 2 | Mission Control and `host.cheap_otto_bin` is false | `cheap-otto` is not installed on the Mac; run `code-reviewer m1 sync` |
 | 3 | Pixel Office and `host.pixel_agents_bin` is false | `pixel-agents` is not installed on the Mac, so the service was skipped |
-| 4a | `loaded` is false and `listening` is true | Another process holds the port, which is what a port-held install leaves behind; find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`, then reinstall |
+| 4a | `loaded` is false and `listening` is true | Another process holds the port, which is what a port-held install leaves behind; find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`, then reinstall. [R5.1, R1.10] |
 | 4 | `loaded` is false | The LaunchAgent is not loaded; run `cheap-otto dashboards install --execute` (for the Reviewer: `code-reviewer m1 sync`). This is also what a failed or port-held install leaves behind |
 | 5 | `loaded` is true and `listening` is false | Loaded but not listening, with `last_exit` when there is one |
 
-Rows 1 to 3 are skipped when the `host` line is missing. Row 4a exists because `nc -z` still succeeds against a foreign listener, so a port-held Mission Control would otherwise look healthy. `log` is `~/.cheap-otto/logs/dashboards/<id>.log` for managed services and `~/.cheap-otto/logs/code-reviewer/ui-server.log` for the Reviewer; it is always given, so the operator knows where to look whatever the reason.
+Rows 1 to 3 are skipped when the `host` line is missing. Row 4a exists because `nc -z` still succeeds against a foreign listener, so a port-held Mission Control would otherwise look healthy. Per R5.1, `listening` is the raw port state on the Mac (the port accepts a connection, whichever process holds it), and `status` prints it as is next to the diagnosis. Per R1.10, only the install script never reports a port-held service as listening; it prints `listening=0 cause=port-held`. `log` is `~/.cheap-otto/logs/dashboards/<id>.log` for managed services and `~/.cheap-otto/logs/code-reviewer/ui-server.log` for the Reviewer; it is always given, so the operator knows where to look whatever the reason.
 
 The CLI passes its local port checks in as `tunnelled` and adds the warning for [R5.3].
 

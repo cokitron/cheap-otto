@@ -187,7 +187,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   - `ignores_unknown_lines_keys_and_ids`
   - `missing_host_line_yields_none`
   - `handles_empty_and_garbage_output_without_panicking`: `""`, `"\n\n"`, `"dashboard="`, `"dashboard=reviewer pid=abc loaded=maybe"`.
-  - `explains_every_unavailable_dashboard_with_reason_and_log`: one case per row of the table in design 3.4 (no GUI session; `cheap-otto` missing; `pixel-agents` missing; not loaded; loaded but not listening with a `last_exit`), each with the expected reason and log path; a missing `host` line skips the first three.
+  - `explains_every_unavailable_dashboard_with_reason_and_log`: one case per row of the table in design 3.4 (no GUI session; `cheap-otto` missing; `pixel-agents` missing; row 4a, not loaded but `listening` true, whose reason says another process holds the port and names the `lsof` command [R5.1, R1.10]; not loaded and not listening; loaded but not listening with a `last_exit`), each with the expected reason and log path; a missing `host` line skips the first three.
   - `listening_dashboard_needs_no_explanation`
   - `status_rows_explain_port_held_skipped_and_unloaded_dashboards`: feed `parse_status_output` the probe output a Mac would print after a port-held Mission Control install and a skipped Pixel Office, pass the report to `render_status_rows`, and assert each of those two rows carries a reason and a log path while the listening Reviewer row has neither. This is the end-to-end check for R5.1; it needs no Mac because the probe output is the input.
   - in `tests/dashboard_scripts.rs`: `rendered_status_script_passes_sh_syntax_check`

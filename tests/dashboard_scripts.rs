@@ -13,7 +13,14 @@ fn rendered_status_script_passes_sh_syntax_check() -> Result<(), Box<dyn std::er
         "cheap-otto-status-script-{}.sh",
         std::process::id()
     ));
-    std::fs::write(&path, &script)?;
+    // `create_new` refuses an existing path, so a planted symlink at the predictable name cannot
+    // redirect the write onto another file.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    std::io::Write::write_all(&mut file, script.as_bytes())?;
+    drop(file);
     let output = std::process::Command::new("sh")
         .arg("-n")
         .arg(&path)
