@@ -67,15 +67,16 @@ There are two layers, and they have different rules.
 ## 6. Network Exposure
 
 - `cheap-otto serve` defaults to `127.0.0.1:7420` and `code-reviewer serve` to `127.0.0.1:7430`. Port forwards are written `127.0.0.1:<port>:127.0.0.1:<port>`.
+- Both servers refuse to start unless the bind host is `127.0.0.1`, `localhost` or `::1` (`require_loopback_bind` in each `request_guard.rs`), so a wildcard or LAN `--host` / `--bind` is an error.
 - Never default a listener to `0.0.0.0`. Reaching a server from another machine means an SSH tunnel over LAN or Tailscale.
 - Neither server authenticates requests. The loopback binding keeps other machines out; a **request guard** keeps out web pages in the operator's browser, which can reach loopback. Both servers run it on every request before any route: `src/request_guard.rs` behind the `guard_request` middleware in `src/server.rs`, and `crates/code-reviewer/src/request_guard.rs` called from `handle_http_connection`. The two files mirror each other; change them together.
-  1. **Host.** `Host` must name the server: `127.0.0.1`, `localhost`, `[::1]`, or the specific non-loopback address given to `--host` / `--bind`. Anything else, or no `Host`, is `403` (DNS-rebinding defence). A wildcard bind (`0.0.0.0`, `::`) adds no name.
+  1. **Host.** `Host`, or for Mission Control the HTTP/2 or absolute-form request authority when `Host` is absent, must be `127.0.0.1`, `localhost` or `[::1]`. Anything else, or no usable authority, is `403` (DNS-rebinding defence). The dashboard reads only the `Host` header.
   2. **Origin.** A request that is not `GET`, `HEAD` or `OPTIONS` and carries an `Origin` must carry an allowlisted one, or it is `403`. The allowlist is the server's own origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), held in the server state (`ControlPlaneState::request_guard`, `ServerContext::guard`).
   3. **No `Origin` passes rule 2.** That is the CLI, `curl` and external agents.
   4. **Dashboard only:** a `POST` with a body must be `Content-Type: application/json`, or it is `415`. Its handlers parse any body as JSON, and `text/plain` is the one cross-origin body a browser sends without a preflight. Mission Control gets the same from axum's `Json` extractor.
 - Neither server sends CORS headers, so a foreign page can't read a response or pass a preflight. Don't add a CORS layer or an `Access-Control-Allow-*` header. To let one local dashboard call another's API, grow that server's allowlist with `RequestGuard::trust_loopback_port` (or `trust_origin` in the root crate) and answer CORS for exactly those origins.
 - The allowlist is keyed on the listening port, so a tunnel must keep the port (`127.0.0.1:<port>:127.0.0.1:<port>`). Through a remapped port the page loads but its `POST`s get `403`.
-- The guard is not authentication: any local process can still call the API. Keep validating identifiers in every handler that executes input (for example `POST /api/terminal/{session}`, which types into a tmux session). Widening the bind needs auth first.
+- The guard is not authentication: any local process can still call the API. Keep validating identifiers in every handler that executes input (for example `POST /api/terminal/{session}`, which types into a tmux session). A non-loopback bind is rejected; adding one would need authentication first.
 
 ---
 

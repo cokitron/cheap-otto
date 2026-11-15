@@ -1,7 +1,8 @@
 //! Request guard for `cheap-otto serve`: decides from a request's method, `Host` and `Origin`
 //! alone whether it may reach a handler.
 //!
-//! The control plane has no authentication. The loopback bind is the only barrier, and a web
+//! The control plane has no authentication. The loopback bind is the only barrier, so
+//! [`require_loopback_bind`] refuses any other `--host` before the server binds, and a web
 //! page open in the operator's browser can still send requests to loopback. The guard closes the
 //! two ways such a page gets in:
 //! - **DNS rebinding.** A hostile name re-pointed at `127.0.0.1` still sends its own name in
@@ -39,6 +40,27 @@ pub enum RequestGuardError {
     /// The value is not a bare web origin (`http://host[:port]` or `https://host[:port]`).
     #[error("`{0}` is not a web origin: expected `http://host[:port]` with no path")]
     InvalidOrigin(String),
+    /// The bind host is not a loopback name: the API is unauthenticated, so remote access must
+    /// go through an SSH tunnel.
+    #[error("`{0}` is not a loopback bind host: use 127.0.0.1, localhost or ::1 and an SSH tunnel")]
+    NonLoopbackBind(String),
+}
+
+/// Refuses any bind host that is not loopback.
+///
+/// Accepts `127.0.0.1`, `localhost` and `::1` (or `[::1]`), case-insensitively and with
+/// surrounding whitespace trimmed. Wildcards, other addresses, hostnames and the empty string
+/// are refused, because the control plane has no authentication and a LAN listener would let any
+/// client send an accepted `Host` with no `Origin`.
+///
+/// # Errors
+/// Returns [`RequestGuardError::NonLoopbackBind`] when `host` is anything else.
+#[must_use = "a non-loopback bind host must stop the server from starting"]
+pub fn require_loopback_bind(host: &str) -> Result<(), RequestGuardError> {
+    match host.trim().to_ascii_lowercase().as_str() {
+        "127.0.0.1" | "localhost" | "::1" | "[::1]" => Ok(()),
+        _ => Err(RequestGuardError::NonLoopbackBind(host.to_string())),
+    }
 }
 
 /// Allowlists of `Host` names and web origins for one local server.
@@ -54,15 +76,13 @@ pub struct RequestGuard {
 }
 
 impl RequestGuard {
-    /// Guard for a server listening on `bind_host:port`.
+    /// Guard for a loopback server listening on `port`.
     ///
     /// Accepts the loopback `Host` names and trusts the server's own loopback origins
-    /// (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`). A specific
-    /// non-loopback `bind_host` is added as a `Host` name together with its own origin, so a
-    /// server deliberately bound to a LAN address keeps serving its page. A wildcard bind
-    /// (`0.0.0.0`, `::`) names no host a client can address and adds nothing.
+    /// (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`). The bind
+    /// host is not a parameter: [`require_loopback_bind`] refuses everything else first.
     #[must_use = "the guard does nothing until the server evaluates requests with it"]
-    pub fn for_listener(bind_host: &str, port: u16) -> Self {
+    pub fn for_listener(port: u16) -> Self {
         let mut guard = Self {
             allowed_hosts: LOOPBACK_HOST_NAMES
                 .iter()
@@ -71,11 +91,6 @@ impl RequestGuard {
             trusted_origins: Vec::with_capacity(4),
         };
         guard.trust_loopback_port(port);
-        let bound = normalize_bind_host(bind_host);
-        if !bound.is_empty() && !is_wildcard_host(&bound) && !guard.allowed_hosts.contains(&bound) {
-            push_unique(&mut guard.trusted_origins, http_origin(&bound, port));
-            guard.allowed_hosts.push(bound);
-        }
         guard
     }
 
@@ -199,10 +214,6 @@ fn normalize_bind_host(host: &str) -> String {
     }
 }
 
-fn is_wildcard_host(host: &str) -> bool {
-    matches!(host, "0.0.0.0" | "[::]" | "[::0]")
-}
-
 fn http_origin(host: &str, port: u16) -> String {
     // Browsers omit the scheme's default port when they serialise an origin.
     if port == 80 {
@@ -220,7 +231,20 @@ fn normalize_origin(origin: &str) -> Option<String> {
         .or_else(|| value.strip_prefix("https://"))?;
     let clean = !authority.is_empty()
         && !authority.contains(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@'));
-    (clean && host_name_of(authority).is_some()).then(|| value.to_string())
+    if !(clean && host_name_of(authority).is_some()) {
+        return None;
+    }
+    // Browsers omit the scheme's default port when they serialise an origin.
+    let canonical = value
+        .strip_suffix(":80")
+        .filter(|_| value.starts_with("http://"))
+        .or_else(|| {
+            value
+                .strip_suffix(":443")
+                .filter(|_| value.starts_with("https://"))
+        })
+        .unwrap_or(value);
+    Some(canonical.to_string())
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {
@@ -234,7 +258,7 @@ mod tests {
     use super::*;
 
     fn guard() -> RequestGuard {
-        RequestGuard::for_listener("127.0.0.1", 7420)
+        RequestGuard::for_listener(7420)
     }
 
     #[test]
@@ -369,57 +393,80 @@ mod tests {
     }
 
     #[test]
-    fn keeps_serving_a_specific_non_loopback_bind_host() {
-        let guard = RequestGuard::for_listener("192.168.1.50", 7420);
-        assert_eq!(
-            guard.evaluate(
-                "POST",
-                Some("192.168.1.50:7420"),
-                Some("http://192.168.1.50:7420")
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            guard.evaluate(
-                "POST",
-                Some("127.0.0.1:7420"),
-                Some("http://localhost:7420")
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            guard.evaluate("GET", Some("192.168.1.51:7420"), None),
-            Err(GuardRejection::HostNotAllowed)
-        );
-    }
-
-    #[test]
-    fn wildcard_bind_adds_no_host_or_origin() {
-        for bind in ["0.0.0.0", "::", "[::]"] {
-            assert_eq!(RequestGuard::for_listener(bind, 7420), guard(), "{bind}");
-        }
-    }
-
-    #[test]
-    fn brackets_a_bare_ipv6_bind_host() {
-        let guard = RequestGuard::for_listener("fd7a::1", 7420);
-        assert_eq!(
-            guard.evaluate(
-                "POST",
-                Some("[fd7a::1]:7420"),
-                Some("http://[fd7a::1]:7420")
-            ),
-            Ok(())
-        );
-    }
-
-    #[test]
     fn omits_default_port_in_own_origin() {
-        let guard = RequestGuard::for_listener("127.0.0.1", 80);
+        let guard = RequestGuard::for_listener(80);
         assert_eq!(
             guard.evaluate("POST", Some("localhost"), Some("http://localhost")),
             Ok(())
         );
+    }
+
+    #[test]
+    fn accepts_loopback_bind_spellings() {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "LocalHost",
+            "::1",
+            "[::1]",
+            "  127.0.0.1  ",
+        ] {
+            assert_eq!(require_loopback_bind(host), Ok(()), "{host}");
+        }
+    }
+
+    #[test]
+    fn rejects_wildcard_lan_and_hostname_bind_hosts() {
+        for host in [
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "[::0]",
+            "[0:0:0:0:0:0:0:0]",
+            "192.168.1.50",
+            "100.101.102.103",
+            "127.0.0.2",
+            "otto.tailnet.example",
+            "localhost.evil.example",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                require_loopback_bind(host),
+                Err(RequestGuardError::NonLoopbackBind(host.to_string())),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalizes_default_ports_in_trusted_origins() -> Result<(), RequestGuardError> {
+        let mut guard = guard();
+        guard.trust_origin("http://Otto.example:80")?;
+        guard.trust_origin("https://otto.example:443/")?;
+        guard.trust_origin("http://[::1]:80")?;
+        guard.trust_origin("https://otto.example:80")?;
+        for origin in [
+            "http://otto.example",
+            "https://otto.example",
+            "http://[::1]",
+            "https://otto.example:80",
+        ] {
+            assert_eq!(
+                guard.evaluate("POST", Some("localhost:7420"), Some(origin)),
+                Ok(()),
+                "{origin}"
+            );
+        }
+        assert_eq!(
+            guard.evaluate(
+                "POST",
+                Some("localhost:7420"),
+                Some("http://otto.example:443")
+            ),
+            Err(GuardRejection::OriginNotAllowed)
+        );
+        Ok(())
     }
 
     #[test]
@@ -479,6 +526,6 @@ mod tests {
                 "{bad}"
             );
         }
-        assert_eq!(guard, RequestGuard::for_listener("127.0.0.1", 7420));
+        assert_eq!(guard, RequestGuard::for_listener(7420));
     }
 }

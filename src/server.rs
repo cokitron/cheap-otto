@@ -30,7 +30,7 @@ use crate::harness::{
     parse_stream_json_line, standard_efforts,
 };
 use crate::macos::{MacOsStateBackup, parse_pmset_batt_ac_power};
-use crate::request_guard::RequestGuard;
+use crate::request_guard::{RequestGuard, require_loopback_bind};
 use crate::schedule::{
     NewScheduleParams, ScheduleCadence, ScheduleRegistry, ScheduledWorkload,
     build_schedule_install_plan, parse_run_history_jsonl,
@@ -92,11 +92,11 @@ pub struct ControlPlaneState {
 
 impl ControlPlaneState {
     /// Builds the shared state for `config`. The request guard trusts only the server's own
-    /// origins on `config.host:config.port`; grow `request_guard` before serving to let
+    /// loopback origins on `config.port`; grow `request_guard` before serving to let
     /// another local dashboard call this API.
     #[must_use = "the state must be passed to build_router"]
     pub fn new(config: ServeConfig) -> Self {
-        let request_guard = RequestGuard::for_listener(&config.host, config.port);
+        let request_guard = RequestGuard::for_listener(config.port);
         Self {
             config,
             request_guard,
@@ -335,8 +335,11 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str>
 /// Starts `cheap-otto serve` on `host:port` alongside the background `pixel-agents` NDJSON hook forwarder.
 ///
 /// # Errors
-/// Returns an error if the TCP listener cannot bind to `host:port`.
+/// Returns an error if `host` is not a loopback name (the API is unauthenticated, so remote
+/// access goes through an SSH tunnel), if the state directories cannot be created, or if the TCP
+/// listener cannot bind to `host:port`.
 pub async fn run_serve(mut config: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
+    require_loopback_bind(&config.host)?;
     fs::create_dir_all(&config.state_dir)?;
     fs::create_dir_all(&config.workspaces_root)?;
 
@@ -2076,5 +2079,26 @@ mod tests {
         assert_eq!(res_tpl.status(), StatusCode::CREATED);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn run_serve_refuses_non_loopback_bind_hosts_before_touching_disk() {
+        for host in ["0.0.0.0", "192.168.1.50"] {
+            let tmp = temp_state_dir();
+            let peer =
+                PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap_or_else(|_| unreachable!());
+            let result = run_serve(ServeConfig {
+                host: host.to_string(),
+                port: 0,
+                pixel_port: 7421,
+                state_dir: tmp.join("state"),
+                workspaces_root: tmp.join("workspaces"),
+                peer,
+            })
+            .await;
+            assert!(result.is_err(), "{host}");
+            assert!(!tmp.join("state").exists(), "{host}");
+            let _ = fs::remove_dir_all(&tmp);
+        }
     }
 }

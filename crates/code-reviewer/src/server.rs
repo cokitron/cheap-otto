@@ -16,7 +16,7 @@ use crate::config::{
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
-use crate::request_guard::{RequestGuard, host_name_of, require_json_body};
+use crate::request_guard::{RequestGuard, host_name_of, require_json_body, require_loopback_bind};
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
     TenderTriggerDecision, TrackedPrState, evaluate_tender_trigger,
@@ -65,12 +65,13 @@ pub fn run_ui_server(
     config_path: &Path,
     bind_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    require_loopback_bind(&host_name_of(bind_addr).unwrap_or_default())?;
     let listener = TcpListener::bind(bind_addr)?;
     // The origin allowlist is keyed on the port browsers see, so read it back from the socket.
     let port = listener
         .local_addr()
         .map_or(DEFAULT_UI_PORT, |addr| addr.port());
-    let guard = RequestGuard::for_listener(&host_name_of(bind_addr).unwrap_or_default(), port);
+    let guard = RequestGuard::for_listener(port);
     println!(
         "[code-reviewer-ui] Dashboard listening on http://{} (workspace: {})",
         bind_addr,
@@ -232,7 +233,7 @@ impl<'a> RequestHead<'a> {
             } else if name.eq_ignore_ascii_case("origin") {
                 record_single_valued(&mut parsed.origin, value);
             } else if name.eq_ignore_ascii_case("content-type") {
-                parsed.content_type.get_or_insert(value);
+                record_single_valued(&mut parsed.content_type, value);
             } else if name.eq_ignore_ascii_case("content-length") {
                 parsed.content_length = value.parse::<usize>().unwrap_or(0);
             }
@@ -270,15 +271,6 @@ fn handle_http_connection<S: Read + Write>(
     let method = head.method;
     let content_len = head.content_length;
 
-    let mut body = body_part.into_bytes();
-    while body.len() < content_len && body.len() < 512_000 {
-        let mut extra = vec![0u8; 8192];
-        match stream.read(&mut extra) {
-            Ok(0) | Err(_) => break,
-            Ok(r) => body.extend_from_slice(&extra[..r]),
-        }
-    }
-
     // Nothing below this point runs for a request the guard refuses: not the page, not a route.
     let verdict = ctx
         .guard
@@ -293,6 +285,15 @@ fn handle_http_connection<S: Read + Write>(
             "application/json; charset=utf-8",
             &bytes,
         );
+    }
+
+    let mut body = body_part.into_bytes();
+    while body.len() < content_len && body.len() < 512_000 {
+        let mut extra = vec![0u8; 8192];
+        match stream.read(&mut extra) {
+            Ok(0) | Err(_) => break,
+            Ok(r) => body.extend_from_slice(&extra[..r]),
+        }
     }
 
     let body_str = String::from_utf8_lossy(&body[..body.len().min(content_len)]).to_string();
@@ -1725,7 +1726,7 @@ mod tests {
         ServerContext {
             config_path: workspace.join("config").join("repos.toml"),
             workspace,
-            guard: RequestGuard::for_listener("127.0.0.1", 7430),
+            guard: RequestGuard::for_listener(7430),
             probe_cache: Mutex::new(None),
         }
     }
@@ -1920,5 +1921,89 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("access-control-allow")
         );
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_content_type_headers() {
+        let raw = request(
+            "POST",
+            "/api/repos/add",
+            &[
+                ("Host", OWN_HOST),
+                ("Content-Type", "application/json"),
+                ("Content-Type", "text/plain"),
+            ],
+            "{}",
+        );
+        let (status, _) = exchange(&raw);
+        assert_eq!(status, 415);
+    }
+
+    #[test]
+    fn accepts_identical_duplicate_content_type_headers() {
+        let head = RequestHead::parse(
+            "POST / HTTP/1.1\r\nContent-Type: application/json\r\nContent-Type: application/json",
+        );
+        assert_eq!(head.content_type, Some("application/json"));
+        let raw = request(
+            "POST",
+            "/api/unknown-route",
+            &[
+                ("Host", OWN_HOST),
+                ("Content-Type", "application/json"),
+                ("Content-Type", "application/json"),
+            ],
+            "{}",
+        );
+        let (status, _) = exchange(&raw);
+        assert_ne!(status, 415);
+        assert_ne!(status, 403);
+    }
+
+    /// Counts `read` calls and serves the same bytes for the first one only.
+    struct CountingStream {
+        first: Vec<u8>,
+        reads: usize,
+        output: Vec<u8>,
+    }
+
+    impl Read for CountingStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.reads > 1 {
+                // Pretend the peer is still sending, so an unwanted body read would show up.
+                buf.fill(b'x');
+                return Ok(buf.len());
+            }
+            let n = self.first.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.first[..n]);
+            Ok(n)
+        }
+    }
+
+    impl Write for CountingStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn refused_cross_origin_post_reads_no_body() {
+        let head = format!(
+            "POST /api/repos/add HTTP/1.1\r\nHost: {OWN_HOST}\r\nOrigin: {FOREIGN_ORIGIN}\r\nContent-Type: application/json\r\nContent-Length: 400000\r\n\r\n"
+        );
+        let mut stream = CountingStream {
+            first: head.into_bytes(),
+            reads: 0,
+            output: Vec::new(),
+        };
+        handle_http_connection(&mut stream, &test_context()).unwrap();
+        assert_eq!(stream.reads, 1);
+        assert!(String::from_utf8_lossy(&stream.output).starts_with("HTTP/1.1 403 Forbidden\r\n"));
     }
 }

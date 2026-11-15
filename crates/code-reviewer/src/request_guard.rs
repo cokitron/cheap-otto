@@ -9,14 +9,22 @@
 //! - a `POST` with a body must be `application/json`, which a foreign page cannot send without
 //!   a CORS preflight this server never approves.
 //!
-//! Clients that send no `Origin` (`curl`, agents) are unaffected. Pure and std-only. It mirrors
-//! `src/request_guard.rs` in the root crate, which cannot be a dependency here because it would
-//! pull in the async stack; change the two together.
+//! Clients that send no `Origin` (`curl`, agents) are unaffected. This synchronous module avoids
+//! async runtimes, HTTP clients and TLS stacks. It mirrors `src/request_guard.rs` in the root
+//! crate, which cannot be a dependency here because it would pull in the async stack; change the
+//! two together.
 
 use thiserror::Error;
 
 /// Host names that always reach a loopback listener, as they appear in a `Host` header.
 pub const LOOPBACK_HOST_NAMES: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+/// Why a listener bind address was refused.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RequestGuardError {
+    #[error("refusing to bind {0:?}: the dashboard has no authentication and is loopback-only")]
+    NonLoopbackBind(String),
+}
 
 /// Why the guard refused a request.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +51,8 @@ impl GuardRejection {
 
 /// Allowlists of `Host` names and web origins for one listener, held in the server context.
 ///
-/// It starts with the server's own origins only. `trust_loopback_port` is the way to let
-/// another local dashboard send state-changing requests here.
+/// It starts with the server's own loopback origins only. `trust_loopback_port` is the way to
+/// let another local dashboard send state-changing requests here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestGuard {
     allowed_hosts: Vec<String>,
@@ -52,23 +60,18 @@ pub struct RequestGuard {
 }
 
 impl RequestGuard {
-    /// Guard for a server listening on `bind_host:port`: accepts the loopback `Host` names and
-    /// trusts the server's own loopback origins. A specific non-loopback `bind_host` is added
-    /// with its own origin; a wildcard bind (`0.0.0.0`, `::`) adds nothing.
-    pub fn for_listener(bind_host: &str, port: u16) -> Self {
+    /// Guard for a server listening on loopback `port`: accepts the loopback `Host` names and
+    /// trusts the server's own loopback origins. Callers must refuse a non-loopback bind first
+    /// with `require_loopback_bind`, because the guard is not authentication.
+    pub fn for_listener(port: u16) -> Self {
         let mut guard = Self {
             allowed_hosts: LOOPBACK_HOST_NAMES
                 .iter()
                 .map(|h| (*h).to_string())
                 .collect(),
-            trusted_origins: Vec::with_capacity(4),
+            trusted_origins: Vec::with_capacity(3),
         };
         guard.trust_loopback_port(port);
-        let bound = normalize_bind_host(bind_host);
-        if !bound.is_empty() && !is_wildcard_host(&bound) && !guard.allowed_hosts.contains(&bound) {
-            push_unique(&mut guard.trusted_origins, http_origin(&bound, port));
-            guard.allowed_hosts.push(bound);
-        }
         guard
     }
 
@@ -113,6 +116,18 @@ impl RequestGuard {
             return Err(GuardRejection::OriginNotAllowed);
         }
         Ok(())
+    }
+}
+
+/// Accepts only a loopback bind host (`127.0.0.1`, `localhost`, `::1` or `[::1]`, any case).
+///
+/// # Errors
+/// `RequestGuardError::NonLoopbackBind` for anything else, including the empty string and every
+/// wildcard spelling.
+pub fn require_loopback_bind(host: &str) -> Result<(), RequestGuardError> {
+    match host.trim().to_ascii_lowercase().as_str() {
+        "127.0.0.1" | "localhost" | "::1" | "[::1]" => Ok(()),
+        _ => Err(RequestGuardError::NonLoopbackBind(host.to_string())),
     }
 }
 
@@ -168,20 +183,6 @@ pub fn host_name_of(host_header: &str) -> Option<String> {
     (port_ok && name_ok).then(|| name.to_string())
 }
 
-fn normalize_bind_host(host: &str) -> String {
-    let trimmed = host.trim().to_ascii_lowercase();
-    // A bare IPv6 address is written in brackets in `Host` and in an origin.
-    if trimmed.contains(':') && !trimmed.starts_with('[') {
-        format!("[{trimmed}]")
-    } else {
-        trimmed
-    }
-}
-
-fn is_wildcard_host(host: &str) -> bool {
-    matches!(host, "0.0.0.0" | "[::]" | "[::0]")
-}
-
 fn http_origin(host: &str, port: u16) -> String {
     // Browsers omit the scheme's default port when they serialise an origin.
     if port == 80 {
@@ -202,7 +203,7 @@ mod tests {
     use super::*;
 
     fn guard() -> RequestGuard {
-        RequestGuard::for_listener("127.0.0.1", 7430)
+        RequestGuard::for_listener(7430)
     }
 
     #[test]
@@ -296,26 +297,30 @@ mod tests {
     }
 
     #[test]
-    fn keeps_serving_a_specific_non_loopback_bind_host() {
-        let guard = RequestGuard::for_listener("100.101.102.103", 7430);
-        assert_eq!(
-            guard.evaluate(
-                "POST",
-                Some("100.101.102.103:7430"),
-                Some("http://100.101.102.103:7430")
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            guard.evaluate("GET", Some("100.101.102.104:7430"), None),
-            Err(GuardRejection::HostNotAllowed)
-        );
+    fn accepts_only_loopback_bind_hosts() {
+        for host in ["127.0.0.1", "localhost", "LocalHost", " ::1 ", "[::1]"] {
+            assert_eq!(require_loopback_bind(host), Ok(()), "{host}");
+        }
     }
 
     #[test]
-    fn wildcard_bind_adds_no_host_or_origin() {
-        for bind in ["0.0.0.0", "::", "[::]"] {
-            assert_eq!(RequestGuard::for_listener(bind, 7430), guard(), "{bind}");
+    fn rejects_non_loopback_and_wildcard_bind_hosts() {
+        for host in [
+            "",
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "::0",
+            "[0:0:0:0:0:0:0:0]",
+            "192.168.1.50",
+            "100.101.102.103",
+            "example.com",
+        ] {
+            assert_eq!(
+                require_loopback_bind(host),
+                Err(RequestGuardError::NonLoopbackBind(host.to_string())),
+                "{host}"
+            );
         }
     }
 
