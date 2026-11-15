@@ -37,8 +37,8 @@ fi
 
 echo "==> [5/5] Building and running cheap-otto init..."
 if command -v cargo >/dev/null 2>&1; then
-  cargo run --release -- init --out-dir "${STATE_DIR}"
-  cargo run --release -- doctor
+  cargo run --release -p cheap-otto -- init --out-dir "${STATE_DIR}"
+  cargo run --release -p cheap-otto -- doctor
 else
   echo "  [info] Rust toolchain not installed yet on this Mac. Install via: curl https://sh.rustup.rs -sSf | sh"
 fi
