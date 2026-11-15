@@ -182,7 +182,7 @@ pub fn sync_everything_to_m1(
          git checkout -- scripts/ crates/code-reviewer/scripts/ 2>/dev/null || true\n\
          git checkout -f -B main otto-sync\n\
          git reset --hard otto-sync\n\
-         cargo test --workspace --all-targets\n\
+         cargo test --workspace --all-targets --locked\n\
          cargo clippy --workspace --all-targets --all-features -- -D warnings\n\
          if [ -d crates/code-reviewer ]; then\n\
            cargo install --path . --locked --force\n\
