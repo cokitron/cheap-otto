@@ -548,12 +548,61 @@ pub fn home_dir() -> PathBuf {
 pub fn runtime_kb_root(workspace_root: &Path) -> PathBuf {
     let config_dir = workspace_root.join("config");
     if config_dir.join("repos.toml").exists() || config_dir.join("repos.example.toml").exists() {
-        if let Ok(cfg) = WorkspaceConfig::load(&config_dir.join("repos.toml")) {
-            return expand_tilde(&cfg.state_dir).join("kb");
+        match WorkspaceConfig::load(&config_dir.join("repos.toml")) {
+            Ok(cfg) => return expand_tilde(&cfg.state_dir).join("kb"),
+            // Surface the failure: otherwise KB reads and `kb add` writes silently target the wrong overlay.
+            Err(e) => eprintln!(
+                "warning: failed to load repos.toml ({e}); falling back to ~/.code-reviewer/kb instead of the configured state_dir"
+            ),
         }
         return expand_tilde("~/.code-reviewer").join("kb");
     }
     workspace_root.join(".runtime-kb")
+}
+
+/// Writes (or appends to) a private runtime KB overlay file, creating its directories first.
+///
+/// On unix the overlay directory is forced to `0700` and the file to `0600` (including pre-existing
+/// overlays) because the overlay may hold private repository names and lessons.
+///
+/// # Errors
+/// Returns any I/O error from creating the directory, writing the file, or setting permissions.
+pub fn write_private_kb_file(path: &Path, contents: &str, append: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true);
+    if append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())
 }
 
 /// Merges a committed starter KB markdown file with a private runtime KB overlay, deduplicating headings and bullets.
@@ -893,5 +942,46 @@ mod tests {
             ("acme-org/web-app".to_string(), 42)
         );
         assert!(parse_pr_reference_input("acme-org/web-app").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_kb_file_locks_down_new_and_existing_overlays() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("otto_private_kb_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("tender").join("agent");
+        // Pre-existing overlay with loose permissions must be tightened.
+        fs::create_dir_all(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+        let file = dir.join("notes.md");
+        fs::write(&file, "old\n")?;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644))?;
+
+        write_private_kb_file(&file, "new\n", false)?;
+        write_private_kb_file(&file, "more\n", true)?;
+
+        assert_eq!(fs::read_to_string(&file)?, "new\nmore\n");
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_kb_root_falls_back_when_repos_toml_is_unparseable() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("otto_bad_repos_toml_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config"))?;
+        fs::write(root.join("config/repos.toml"), "not = [valid toml")?;
+
+        let kb = runtime_kb_root(&root);
+        assert!(
+            kb.ends_with(".code-reviewer/kb"),
+            "unexpected fallback {kb:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
     }
 }

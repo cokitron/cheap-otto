@@ -1824,6 +1824,12 @@ fn run_tender_poll(
     let initial_ledger = LedgerStore::load_or_default(&state_dir)?;
 
     for repo_cfg in &cfg.repos {
+        // Derived from the ledger independent of the allowlist: strict allowlists leave
+        // `explicit_watched_prs` empty by design, which must not skip watched PRs on tender-disabled repos.
+        let has_watched_open = initial_ledger
+            .tender_pull_requests
+            .values()
+            .any(|t| t.repo.eq_ignore_ascii_case(&repo_cfg.full_name) && t.watched && t.is_open);
         let explicit_watched_prs: Vec<u64> = if repo_cfg.tender_allowed_authors.is_empty() {
             initial_ledger
                 .tender_pull_requests
@@ -1836,7 +1842,7 @@ fn run_tender_poll(
         } else {
             Vec::new()
         };
-        if !repo_cfg.tender_enabled && explicit_watched_prs.is_empty() {
+        if !repo_cfg.tender_enabled && !has_watched_open {
             continue;
         }
         if let Some(filter) = only_repo
@@ -1874,6 +1880,9 @@ fn run_tender_poll(
                 &state_dir,
                 Some(&gh),
                 &snapshots,
+                poll_outcome
+                    .open_list_complete
+                    .then_some(poll_outcome.open_pr_numbers.as_slice()),
             );
         }
         let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
@@ -2202,6 +2211,9 @@ fn run_single_pr_tend(
             &state_dir,
             Some(&gh),
             &snapshots,
+            poll_outcome
+                .open_list_complete
+                .then_some(poll_outcome.open_pr_numbers.as_slice()),
         );
     }
     let snap = snapshots

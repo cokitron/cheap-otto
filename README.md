@@ -173,6 +173,6 @@ cargo run -p code-reviewer -- ui --host otto-mac
 
 `cheap-otto` follows a strict, open-source friendly **PR-only `main`** workflow documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md):
 
-- **Branch & Commit Hygiene:** Short-lived branches (`feat/*`, `fix/*`, `chore/*`, `docs/*`, `refactor/*`, `test/*`, `ci/*`) with **Conventional Commits** and **squash merges** into `main`, verified across Linux, macOS, and Windows in CI.
-- **Cubic AI Code Reviews (`/cubic.yaml`):** Every Pull Request is reviewed automatically by **Cubic AI** using repository-specific architecture and safety rules (`.ai/` + `.claude/rules/`).
+- **Branch & Commit Hygiene:** Short-lived branches (`feat/*`, `fix/*`, `chore/*`, `docs/*`, `refactor/*`, `test/*`, `ci/*`, `perf/*`) with **Conventional Commits** and **squash merges** into `main`, verified across Linux, macOS, and Windows in CI.
+- **Cubic AI Code Reviews (`/cubic.yaml`):** Every eligible non-draft Pull Request without the `skip-ai-review` label is reviewed automatically by **Cubic AI** using repository-specific architecture and safety rules (`.ai/` + `.claude/rules/`).
 - **Owner-Scoped Code Tender Isolation:** When paired with `crates/code-reviewer`, setting `enabled = false`, `tender_enabled = true`, `tender_allowed_authors = ["cokitron"]`, and `skip_fork_prs = true` ensures Cubic AI conducts all PR reviews while Code Tender only picks up the maintainer's own PRs—skipping external contributor and fork PRs directly at Stage-1 polling with zero thread queries or AI runs.

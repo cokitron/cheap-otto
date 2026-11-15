@@ -39,7 +39,7 @@ jobs:
           fi
           if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
             if ! printf '%s\n' "$HEAD_REF" | grep -Eq '^(feat|fix|chore|docs|refactor|test|ci|perf|otto|dependabot|claude)/[a-zA-Z0-9._/-]+$'; then
-              echo "::error::Same-repo branch '$HEAD_REF' must use an approved prefix (feat/, fix/, chore/, docs/, refactor/, test/, ci/, perf/, otto/, dependabot/)."
+              echo "::error::Same-repo branch '$HEAD_REF' must use an approved prefix (feat/, fix/, chore/, docs/, refactor/, test/, ci/, perf/, otto/, dependabot/, claude/)."
               exit 1
             fi
           fi
@@ -47,7 +47,7 @@ jobs:
       - name: Block tracked secrets and local runtime configs
         run: |
           set -eu
-          FORBIDDEN=$(git ls-files | grep -E '(^|/)\.env($|\.)|\.token$|\.pem$|\.key$|^peer\.json$|^state-backup\.json$|^crates/code-reviewer/config/repos\.toml$' | grep -vE '(^|/)\.env\.example$' || true)
+          FORBIDDEN=$(git ls-files | grep -E '(^|/)\.env($|\.)|\.token$|\.pem$|\.key$|(^|/)peer\.json$|(^|/)state-backup\.json$|^crates/code-reviewer/config/repos\.toml$' | grep -vE '(^|/)\.env\.example$' || true)
           if [ -n "$FORBIDDEN" ]; then
             echo "::error::Tracked secret or local runtime config detected:"
             printf '%s\n' "$FORBIDDEN"

@@ -581,6 +581,9 @@ fn dispatch_api(
                             &state_dir,
                             Some(&gh),
                             &snaps,
+                            outcome
+                                .open_list_complete
+                                .then_some(outcome.open_pr_numbers.as_slice()),
                         );
                         let ledger = LedgerStore::load_or_default(&state_dir).unwrap_or_default();
                         for snap in snaps {
@@ -760,6 +763,9 @@ fn dispatch_api(
                         &state_dir,
                         Some(&gh),
                         &snaps,
+                        outcome
+                            .open_list_complete
+                            .then_some(outcome.open_pr_numbers.as_slice()),
                     );
                     snaps.into_iter().find(|s| s.pr_number == pr_num)
                 }
@@ -1064,14 +1070,26 @@ fn dispatch_api(
                 #[serde(default)]
                 tender_enabled: Option<bool>,
                 #[serde(default)]
-                tender_allowed_authors: Vec<String>,
+                tender_allowed_authors: Option<Vec<String>>,
                 #[serde(default)]
-                review_allowed_authors: Vec<String>,
+                review_allowed_authors: Option<Vec<String>>,
                 #[serde(default)]
                 skip_fork_prs: Option<bool>,
             }
             let req: Req = serde_json::from_str(body).map_err(|e| e.to_string())?;
             let mut cfg = WorkspaceConfig::load(&ctx.config_path).map_err(|e| e.to_string())?;
+            // Omitted allowlist/fork fields keep the stored values; an empty review allowlist means everyone is allowed.
+            let stored = cfg
+                .repos
+                .iter()
+                .find(|r| r.full_name.eq_ignore_ascii_case(&req.full_name))
+                .cloned();
+            let clean_authors = |list: Vec<String>| -> Vec<String> {
+                list.into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            };
             cfg.upsert_repo(WatchedRepoConfig {
                 full_name: req.full_name,
                 default_branch: req.default_branch,
@@ -1093,19 +1111,28 @@ fn dispatch_api(
                 local_check_cmd: req.local_check_cmd.filter(|s| !s.trim().is_empty()),
                 enabled: req.enabled.unwrap_or(true),
                 tender_enabled: req.tender_enabled.unwrap_or(true),
-                tender_allowed_authors: req
-                    .tender_allowed_authors
-                    .into_iter()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-                review_allowed_authors: req
-                    .review_allowed_authors
-                    .into_iter()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-                skip_fork_prs: req.skip_fork_prs.unwrap_or(true),
+                tender_allowed_authors: req.tender_allowed_authors.map_or_else(
+                    || {
+                        stored
+                            .as_ref()
+                            .map(|r| r.tender_allowed_authors.clone())
+                            .unwrap_or_default()
+                    },
+                    clean_authors,
+                ),
+                review_allowed_authors: req.review_allowed_authors.map_or_else(
+                    || {
+                        stored
+                            .as_ref()
+                            .map(|r| r.review_allowed_authors.clone())
+                            .unwrap_or_default()
+                    },
+                    clean_authors,
+                ),
+                skip_fork_prs: req
+                    .skip_fork_prs
+                    .or_else(|| stored.as_ref().map(|r| r.skip_fork_prs))
+                    .unwrap_or(true),
             })
             .map_err(|e| e.to_string())?;
             cfg.save(&ctx.config_path).map_err(|e| e.to_string())?;

@@ -10,7 +10,7 @@ reviews:
   external_contributors_require_manual_review: false
   show_ai_feedback_buttons: true
   resolve_threads_when_addressed: true
-  merge_confidence_summary: true
+  merge_confidence: true
   auto_approve_behavior: disabled
   auto_approve: disabled
   ultrareview: manual

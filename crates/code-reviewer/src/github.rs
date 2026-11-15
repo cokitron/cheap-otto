@@ -105,7 +105,14 @@ pub struct TenderRepoPollOutcome {
     pub snapshots: Vec<TenderPrSnapshot>,
     pub skipped_authors: Vec<(u64, String)>,
     pub skipped_forks: Vec<u64>,
+    /// Every open PR number seen at Stage 1 (eligible or not), used to mark ledger entries closed.
+    pub open_pr_numbers: Vec<u64>,
+    /// `true` only when Stage 1 paged through the whole open-PR connection (no page cap or errors hit).
+    pub open_list_complete: bool,
 }
+
+/// Upper bound on Stage-1 pages (100 PRs each) so a pathological repo cannot stall a poll.
+const TENDER_STAGE1_MAX_PAGES: usize = 10;
 
 /// Filters Stage-1 open PR headers at poll time so Code Tender NEVER fetches review threads,
 /// comments, or dispatches runs for external contributors' PRs or cross-repository forks.
@@ -462,9 +469,10 @@ query($owner: String!, $name: String!) {
             .map_err(|_| GitHubError::InvalidRepo(repo_cfg.full_name.clone()))?;
 
         let stage1_query = r#"
-query($owner: String!, $name: String!) {
+query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    openPrs: pullRequests(states: [OPEN], first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    openPrs: pullRequests(states: [OPEN], first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
         title
@@ -476,20 +484,40 @@ query($owner: String!, $name: String!) {
   }
 }
 "#;
-        let stage1_payload = serde_json::json!({
-            "query": stage1_query,
-            "variables": {
-                "owner": owner,
-                "name": name,
+        let mut headers: Vec<TenderOpenPrHeader> = Vec::new();
+        let mut after: Option<String> = None;
+        let mut open_list_complete = false;
+        for _ in 0..TENDER_STAGE1_MAX_PAGES {
+            let stage1_payload = serde_json::json!({
+                "query": stage1_query,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "after": after,
+                }
+            });
+            let stage1_raw = self.run_gh(
+                account,
+                &["api", "graphql", "--input", "-"],
+                Some(&serde_json::to_vec(&stage1_payload)?),
+            )?;
+            let stage1_root: Value = serde_json::from_str(&stage1_raw)?;
+            headers.extend(parse_graphql_tender_headers(&stage1_root));
+            match parse_graphql_tender_next_cursor(&stage1_root) {
+                Some(cursor) => after = Some(cursor),
+                None => {
+                    // A response without `nodes` is malformed, never a proof that no PRs are open.
+                    open_list_complete = !tender_stage1_has_next_page(&stage1_root)
+                        && stage1_root["data"]["repository"]["openPrs"]["nodes"].is_array();
+                    break;
+                }
             }
-        });
-        let stage1_raw = self.run_gh(
-            account,
-            &["api", "graphql", "--input", "-"],
-            Some(&serde_json::to_vec(&stage1_payload)?),
-        )?;
-        let stage1_root: Value = serde_json::from_str(&stage1_raw)?;
-        let headers = parse_graphql_tender_headers(&stage1_root);
+        }
+        let open_pr_numbers: Vec<u64> = headers
+            .iter()
+            .map(|h| h.pr_number)
+            .filter(|&n| n > 0)
+            .collect();
         let (eligible_nums, skipped_authors, skipped_forks) =
             partition_tender_open_pr_headers(cfg, repo_cfg, &headers, explicit_watched_prs);
 
@@ -498,6 +526,8 @@ query($owner: String!, $name: String!) {
                 snapshots: Vec::new(),
                 skipped_authors,
                 skipped_forks,
+                open_pr_numbers,
+                open_list_complete,
             });
         }
 
@@ -581,6 +611,8 @@ query($owner: String!, $name: String!) {
             snapshots,
             skipped_authors,
             skipped_forks,
+            open_pr_numbers,
+            open_list_complete,
         })
     }
 
@@ -874,6 +906,24 @@ fn parse_graphql_tender_headers(root: &Value) -> Vec<TenderOpenPrHeader> {
         });
     }
     out
+}
+
+fn tender_stage1_has_next_page(root: &Value) -> bool {
+    root["data"]["repository"]["openPrs"]["pageInfo"]["hasNextPage"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
+/// Returns the `endCursor` to continue paging, or `None` when the connection is exhausted
+/// (or GitHub reported more pages without a usable cursor, which the caller treats as incomplete).
+fn parse_graphql_tender_next_cursor(root: &Value) -> Option<String> {
+    if !tender_stage1_has_next_page(root) {
+        return None;
+    }
+    root["data"]["repository"]["openPrs"]["pageInfo"]["endCursor"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
 }
 
 fn parse_aliased_tender_prs_response(root: &Value, pr_numbers: &[u64]) -> Vec<TenderPrSnapshot> {
@@ -1380,5 +1430,29 @@ gdocs_bin = "gdocs"
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].pr_number, 10);
         assert_eq!(snaps[0].author, "cokitron");
+    }
+
+    #[test]
+    fn stage1_cursor_continues_only_while_has_next_page_with_cursor() {
+        let more = serde_json::json!({"data": {"repository": {"openPrs": {
+            "pageInfo": {"hasNextPage": true, "endCursor": "abc"}, "nodes": []
+        }}}});
+        assert_eq!(
+            parse_graphql_tender_next_cursor(&more),
+            Some("abc".to_string())
+        );
+
+        let last = serde_json::json!({"data": {"repository": {"openPrs": {
+            "pageInfo": {"hasNextPage": false, "endCursor": "zzz"}, "nodes": []
+        }}}});
+        assert_eq!(parse_graphql_tender_next_cursor(&last), None);
+        assert!(!tender_stage1_has_next_page(&last));
+
+        // More pages reported without a cursor must stay "has next page" so the poll is flagged incomplete.
+        let broken = serde_json::json!({"data": {"repository": {"openPrs": {
+            "pageInfo": {"hasNextPage": true, "endCursor": null}, "nodes": []
+        }}}});
+        assert_eq!(parse_graphql_tender_next_cursor(&broken), None);
+        assert!(tender_stage1_has_next_page(&broken));
     }
 }

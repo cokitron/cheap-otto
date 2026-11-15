@@ -7,7 +7,7 @@
 - [ ] Governance / CI / Cubic AI config (`cubic.yaml`, `.github/`, `.ai/`, `.claude/`, docs)
 
 ## Safety & Invariant Checklist
-- [ ] PR title follows **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `perf:`)
+- [ ] PR title follows **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `perf:`, `build:`, `revert:`)
 - [ ] `#![forbid(unsafe_code)]` preserved; no `.unwrap()` / `.expect()` added in non-test production code
 - [ ] Subprocesses use shell-free argument arrays (`CommandSpec` / `.args(...)`); untrusted inputs are validated
 - [ ] Zero secrets, `.token` files, `config/repos.toml`, or private repository/org identifiers in tracked files

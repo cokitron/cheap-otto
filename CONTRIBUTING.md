@@ -21,6 +21,7 @@ To keep the codebase safe, deterministic, and easy to review for both humans and
   - `test/<topic>` — unit or integration test additions
   - `ci/<topic>` — GitHub Actions or CI gate updates
   - `perf/<topic>` — measurable runtime or memory optimization
+  - `otto/<task-id>` — automated `cheap-otto` delegated worktree branches
 - **Conventional Commits & PR Titles:** Both commit subjects and Pull Request titles **must** follow [Conventional Commits](https://www.conventionalcommits.org/):
   ```text
   feat(bridge): support custom SSH port in tunnel planner
@@ -63,7 +64,7 @@ cargo test --workspace --all-targets --locked
 
 - **Cubic AI (`/cubic.yaml`)** automatically reviews Pull Requests opened against `main` (including external contributor PRs) using repository-specific safety and architecture rules in `.claude/rules/` and `.ai/`.
 - When Cubic AI leaves inline review comments on your PR, please address valid findings with a new commit and test, or reply directly on the review thread explaining any intentional trade-off.
-- Note for contributors: the maintainer's local **Code Tender** daemon (`crates/code-reviewer`) is strictly locked down at poll time (`tender_allowed_authors = ["cokitron"]`, `skip_fork_prs = true`) so it **never** runs on, comments on, or touches external contributor or fork Pull Requests.
+- Note for contributors: the maintainer's local **Code Tender** daemon (`crates/code-reviewer`) is configured to act only on the maintainer's own Pull Requests (`tender_allowed_authors = ["cokitron"]`, `skip_fork_prs = true`), so it is not intended to run on or comment on external contributor or fork Pull Requests.
 
 ---
 

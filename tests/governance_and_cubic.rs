@@ -148,7 +148,7 @@ fn cubic_yaml_conforms_to_schema_budgets_and_tender_coexistence() -> Result<(), 
             })?;
             total_chars = total_chars.saturating_add(content.chars().count());
         }
-        if total_chars >= 10_000 {
+        if total_chars > 10_000 {
             return Err(format!(
                 "custom rule `{}` exceeds Cubic's 10,000-character budget ({} chars)",
                 rule.name, total_chars
@@ -198,7 +198,10 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
     ] {
         let content = fs::read_to_string(root.join(rust_entry))
             .map_err(|e| format!("failed reading {}: {}", rust_entry, e))?;
-        if !content.contains("#![forbid(unsafe_code)]") {
+        if !content
+            .lines()
+            .any(|l| l.trim() == "#![forbid(unsafe_code)]")
+        {
             return Err(format!(
                 "`{}` must enforce `#![forbid(unsafe_code)]`",
                 rust_entry

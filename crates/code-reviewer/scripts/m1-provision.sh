@@ -4,7 +4,13 @@
 set -eu
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.gemini/antigravity/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-REPO_ROOT="${REPO_ROOT:-$HOME/otto-workspaces/cheap-otto/crates/code-reviewer}"
+if [ -z "${REPO_ROOT:-}" ]; then
+  if [ -d "$HOME/otto-workspaces/cheap-otto/crates/code-reviewer" ]; then
+    REPO_ROOT="$HOME/otto-workspaces/cheap-otto/crates/code-reviewer"
+  else
+    REPO_ROOT="$HOME/otto-workspaces/code-reviewer"
+  fi
+fi
 
 echo "[m1-provision] Ensuring directory layout..."
 mkdir -p \
