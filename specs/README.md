@@ -32,7 +32,7 @@ git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'
 
 **Bundling.** Fewer, coherent PRs beat many tiny ones. When a spec is written, group its tasks into PRs in the PR plan: tasks that touch the same files or finish one feature go together while they fit the budget. Do not open a PR for a task the plan bundles with others.
 
-**Splitting.** Split a task only when it alone would not fit. Plan the split before you write code, not after. Cut at a seam that leaves `main` green: types and pure functions with their tests first, wiring and CLI after. In a binary crate (`src/main.rs`, `crates/code-reviewer`) a part must add code together with its caller, because clippy's `dead_code` lint fails the gate on an unused private item; public items in the root library (`src/lib.rs` and its modules) may land before their callers.
+**Splitting.** Split a task, or a row of the PR plan, only when that unit would not fit the budget; a row that runs over is split into separate rows. Plan the split before you write code, not after. Cut at a seam that leaves `main` green: types and pure functions with their tests first, wiring and CLI after. In a binary crate (`src/main.rs`, `crates/code-reviewer`) a part must add code together with its caller, because clippy's `dead_code` lint fails the gate on an unused private item; public items in the root library (`src/lib.rs` and its modules) may land before their callers.
 
 **Running over.** If a task grows past the budget while you work, stop at the nearest green seam and open that as part a. In the same PR, rewrite the task in `tasks.md` as parts (spec sync, step 4) and say so in the issue. Do not push through.
 

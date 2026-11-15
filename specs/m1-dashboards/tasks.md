@@ -16,11 +16,11 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 - Use the exact test names given. Add more tests if you need them; do not rename or drop the listed ones.
 - Outside a **LIVE** task, never pass `--execute` or `--apply` against the real MacBook or real GitHub repos, and never run live `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui` (`sync-docs` has no dry run). A test may pass `--execute` only with an isolated temp `--state-dir` and no live endpoint, as T2.2's `tunnel --stop --execute` test does. Only tasks marked **LIVE** touch the real MacBook, and only the owner runs them.
 - No CORS headers, no bind address other than `127.0.0.1`, no new dependencies, no `.unwrap()` or `.expect()` outside tests.
-- When done: tick the box of every task in the PR, add `PR: #NN` under each, and close each issue from the PR.
+- When done: tick the box of every task (or part) in the PR and add `PR: #NN` under each. The PR closes each task's issue, except for a part of a split task that is not the last part: that PR says `part of #NN`, and the last part closes the issue.
 
 ## PR plan
 
-The 22 open tasks before the LIVE rollout ship as 14 PRs. Small tasks on one theme share a PR; T4.3 is split because its second half needs the new `ui`. Take the first row whose "needs" are merged and whose issues nobody has claimed. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
+The 21 open tasks before the LIVE rollout ship as 14 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 13) because its second half needs the new `ui`. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
 
 | PR | Tasks | Branch | Needs |
 | --- | --- | --- | --- |

@@ -28,7 +28,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 
 | If you are | Start with |
 | --- | --- |
-| An agent picking up work | Take the first row of the PR plan in `tasks.md` whose "needs" are merged and whose issues nobody has claimed. PRs 1 to 4 (T1.1, T1.8, T4.1 and T4.3 part a) need nothing; PRs 5, 8 and 11 follow as soon as PR 1 (T1.1) lands. |
+| An agent picking up work | Take the first row of the PR plan in `tasks.md` whose tasks are all unchecked there, whose issues are all open and unclaimed, and whose "needs" are merged. PRs 1 to 4 (T1.1, T1.8, T4.1 and T4.3 part a) need nothing; PRs 5, 8 and 11 follow as soon as PR 1 (T1.1) lands. |
 | Reviewing the plan | `design.md` sections 1 (problems), 8 (decisions) and 9 (open questions) |
 | The owner | Answer the four open questions in `design.md` section 9 if you disagree with the defaults, and run the two **LIVE** tasks at the end |
 
