@@ -254,10 +254,30 @@ enum KbAction {
     },
 }
 
+const CLI_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
+    let spawned = std::thread::Builder::new()
+        .name("code-reviewer-cli".to_string())
+        .stack_size(CLI_STACK_SIZE_BYTES)
+        .spawn(|| run().map_err(|err| err.to_string()));
+
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("error: code-reviewer CLI worker thread panicked");
+                std::process::exit(1);
+            }
+        },
+        Err(err) => {
+            eprintln!("error: failed to spawn CLI thread: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
