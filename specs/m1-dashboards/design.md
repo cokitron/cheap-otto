@@ -115,7 +115,7 @@ pub struct DashboardSet { pub services: Vec<DashboardService> }
 
 ### 3.2 LaunchAgent templates
 
-`render_service_plist_template(service: &DashboardService, set: &DashboardSet) -> Option<String>` returns `None` for a service that cheap-otto does not manage. The text contains the literal `$HOME` (and `$PIXEL_BIN` for Pixel Office). It is a template: the install script writes it through an unquoted heredoc, so the Mac's shell fills those in. `launchd` itself does not expand variables, which is why the expansion happens at install time.
+`render_service_plist_template(service: &DashboardService, set: &DashboardSet) -> Option<String>` returns `None` for a service that cheap-otto does not manage. The text contains the literal placeholders `$HOME_XML` (in place of every `$HOME` inside the plist text) and, for Pixel Office, `$PIXEL_BIN_XML` (in place of `$PIXEL_BIN`). It is a template: the install script writes it through an unquoted heredoc, so the Mac's shell fills those in with XML-escaped values. `launchd` itself does not expand variables, which is why the expansion happens at install time.
 
 Mission Control template (Pixel Office differs only in label, log name and `ProgramArguments`):
 
@@ -129,11 +129,11 @@ Mission Control template (Pixel Office differs only in label, log name and `Prog
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:$HOME_XML/.cargo/bin:$HOME_XML/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>$HOME/.cargo/bin/cheap-otto</string>
+    <string>$HOME_XML/.cargo/bin/cheap-otto</string>
     <string>serve</string>
     <string>--host</string>
     <string>127.0.0.1</string>
@@ -143,7 +143,7 @@ Mission Control template (Pixel Office differs only in label, log name and `Prog
     <string>7421</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>$HOME</string>
+  <string>$HOME_XML</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -153,19 +153,19 @@ Mission Control template (Pixel Office differs only in label, log name and `Prog
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>
-  <string>$HOME/.cheap-otto/logs/dashboards/mission-control.log</string>
+  <string>$HOME_XML/.cheap-otto/logs/dashboards/mission-control.log</string>
   <key>StandardErrorPath</key>
-  <string>$HOME/.cheap-otto/logs/dashboards/mission-control.log</string>
+  <string>$HOME_XML/.cheap-otto/logs/dashboards/mission-control.log</string>
 </dict>
 </plist>
 ```
 
-Pixel Office `ProgramArguments`: `$PIXEL_BIN`, `--port`, `7421`, `--host`, `127.0.0.1`, `--no-terminal` (the flags `run_ui` passes today).
+Pixel Office `ProgramArguments`: `$PIXEL_BIN_XML`, `--port`, `7421`, `--host`, `127.0.0.1`, `--no-terminal` (the flags `run_ui` passes today).
 
 - Ports come from the `DashboardSet`, never from literals in the template code.
 - `KeepAlive` and `RunAtLoad` satisfy [R1.1, R1.2, R1.3]; the `127.0.0.1` arguments satisfy [R1.4]; the log paths satisfy [R1.8].
 - `ThrottleInterval` 10 keeps a crash loop from spinning.
-- The only interpolated values are ports (`u16`) and constant labels, so no escaping is needed. If a string ever becomes operator-supplied, pass it through `xml_escape` (`src/schedule.rs`; make it `pub(crate)`).
+- Ports (`u16`) and constant labels need no escaping. The shell values `$HOME_XML` and `$PIXEL_BIN_XML` are XML-escaped by the install script before they reach the heredoc (section 3.3), because a valid install path may contain `&`, `<` or `>`.
 
 ### 3.3 Install script
 
@@ -178,6 +178,10 @@ UID_NUM=$(id -u)
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/.cheap-otto/logs/dashboards"
 mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+FAILED=0
+# Values written into plist XML must be escaped; plain "$HOME" stays for shell use.
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+HOME_XML=$(xml_escape "$HOME")
 
 # [R1.7] LaunchAgents need the user's GUI session.
 if ! launchctl print "gui/$UID_NUM" >/dev/null 2>&1; then
@@ -215,6 +219,27 @@ install_service() {
     kill "$pid" 2>/dev/null || true
     echo "dashboard=$id stray_killed=$pid"
   done
+  # The killed listener may still be exiting; wait for the port to close before bootstrapping.
+  n=0
+  while [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ] && [ "$n" -lt 10 ]; do
+    n=$((n + 1)); sleep 0.5
+  done
+  held=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+  if [ -n "$held" ]; then
+    for pid in $held; do kill -9 "$pid" 2>/dev/null || true; done
+    n=0
+    while [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ] && [ "$n" -lt 4 ]; do
+      n=$((n + 1)); sleep 0.5
+    done
+    held=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+    if [ -n "$held" ]; then
+      # [R1.9] Return 0 so `set -e` does not abort the other services.
+      echo "dashboard=$id error=port-held pid=$held"
+      FAILED=1
+      rm -f "$tmp"
+      return 0
+    fi
+  fi
   mv "$tmp" "$plist"
   launchctl bootstrap "gui/$UID_NUM" "$plist"
   echo "dashboard=$id action=installed"
@@ -227,7 +252,9 @@ wait_port() {
     if nc -z 127.0.0.1 "$2" 2>/dev/null; then echo "dashboard=$1 listening=1"; return 0; fi
     i=$((i + 1)); sleep 0.5
   done
+  # [R1.10] A service that never listens is a failure the caller must see.
   echo "dashboard=$1 listening=0"
+  FAILED=1
 }
 
 # --- mission-control ---
@@ -243,6 +270,7 @@ fi
 # --- pixel-office ---  [R1.6]
 PIXEL_BIN=$(command -v pixel-agents 2>/dev/null || true)
 if [ -n "$PIXEL_BIN" ]; then
+  PIXEL_BIN_XML=$(xml_escape "$PIXEL_BIN")
   …pixel-agents config snippet, see below…
   install_service pixel-office com.cheapotto.dashboards.pixel-office 7421 <<PLIST
 …template…
@@ -251,9 +279,11 @@ PLIST
 else
   echo "dashboard=pixel-office action=skipped reason=pixel-agents-not-installed"
 fi
+
+if [ "$FAILED" -ne 0 ]; then exit 4; fi
 ```
 
-- The heredoc delimiter is unquoted (`<<PLIST`) on purpose, so `$HOME` and `$PIXEL_BIN` expand.
+- The heredoc delimiter is unquoted (`<<PLIST`) on purpose, so `$HOME_XML` and `$PIXEL_BIN_XML` expand. Shell paths used outside XML (the `$HOME/.cargo/bin/cheap-otto -x` test, `mkdir`) keep plain `$HOME`.
 - Strays are found by port with `lsof`, not by `pkill -f <pattern>`: the script's own text travels in the argv of the remote shell, so a pattern match would kill the installer.
 - The pixel-agents config snippet is the one `run_ui` runs today, moved here unchanged. Store it as a raw string constant so no brace escaping is needed:
   ```rust
@@ -262,7 +292,7 @@ fi
     node -e 'const fs=require("fs"),p=process.env.HOME+"/.pixel-agents/config.json";let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};c.standalone=Object.assign({},c.standalone,{watchAllSessions:true});c.hooksConsent=Object.assign({},c.hooksConsent,{claude:"granted"});fs.writeFileSync(p,JSON.stringify(c,null,2));'
   fi"#;
   ```
-- Exit codes: 0 when every step succeeded (skips are reported, not failures), 3 for no GUI session, non-zero from `set -e` if `launchctl bootstrap` fails.
+- Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when a managed service never listens or its port cannot be freed (other services are still attempted), non-zero from `set -e` if `launchctl bootstrap` fails. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].
 
 **Transports** [R4.4]:
 
@@ -318,7 +348,7 @@ The CLI adds `tunnelled: bool` per dashboard (does the port answer on the workst
 
 ```rust
 /// ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3
-///     -o BatchMode=yes -p <ssh_port> -L 127.0.0.1:P:127.0.0.1:P … <user@host>
+///     -o BatchMode=yes -o ConnectTimeout=10 -p <ssh_port> -L 127.0.0.1:P:127.0.0.1:P … <user@host>
 pub fn build_tunnel_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,7 +367,7 @@ pub fn decide_tunnel(local_ports: &[(u16, bool)]) -> TunnelDecision
 ```
 
 - The tunnel forwards every port in the set, whether or not that service is installed on the Mac. An SSH forward listens locally even when nothing answers remotely, so "every port answers locally" means "the tunnel is up". [R3.1, R3.2]
-- `BatchMode=yes` stops a detached process from hanging on a password prompt. The destination is `user@host`, not the alias. [R3.3]
+- `BatchMode=yes` stops a detached process from hanging on a password prompt, and `ConnectTimeout=10` stops it from hanging on an unreachable host. The destination is `user@host`, not the alias. [R3.3]
 - `tunnel.json` lives in the state directory on the workstation. [R3.4]
 
 The imperative part lives in `src/main.rs` as `ensure_dashboard_tunnel(state_dir, peer, set) -> Result<(), Box<dyn Error>>`:
@@ -345,7 +375,7 @@ The imperative part lives in `src/main.rs` as `ensure_dashboard_tunnel(state_dir
 1. Probe each port with `is_local_port_open` and call `decide_tunnel`.
 2. `AlreadyUp`: print it and return.
 3. `Conflict`: load `tunnel.json`. If its pid is alive **and is an ssh process**, terminate it, wait up to 2 s for the ports to close, and continue to step 4. Otherwise return an error naming `held` and printing how to find the holder: `netstat -ano | findstr :<port>` on Windows, `lsof -nP -iTCP:<port> -sTCP:LISTEN` elsewhere. [R3.5]
-4. `Start`: spawn the `CommandSpec` with null stdio, write `tunnel.json` with `child.id()`, then poll for up to 5 s. If every port answers, succeed. If `child.try_wait()` reports an exit, delete `tunnel.json` and return an error that says the tunnel exited and how to test SSH (`ssh -p <port> <user@host> true`). [R3.6]
+4. `Start`: spawn the `CommandSpec` with null stdio, write `tunnel.json` with `child.id()`, then poll for up to 5 s. If every port answers, succeed. If `child.try_wait()` reports an exit, delete `tunnel.json` and return the exit error with the SSH test command (`ssh -p <port> <user@host> true`). If the deadline passes with the child still alive, call `terminate_process(child.id())`, delete `tunnel.json` and return a timeout error that names the ports that did not answer and the SSH test command. [R3.6]
 
 Process helpers, also in `src/main.rs` (the reviewer's `state.rs` has the same idea around line 430):
 
@@ -380,10 +410,11 @@ Shared flags: `--state-dir`, `--port` (Mission Control), `--pixel-port`, `--revi
 1. Resolve the state dir and peer; build `DashboardSet::with_ports(port, pixel_port, reviewer_port)`.
 2. Build the install plan and the tunnel spec. Print the peer, the three URLs, the plan's `display_steps` and the tunnel command.
 3. Without `--execute`: print the hint and return.
-4. Run the install plan with `execute_command_spec`. The script's `dashboard=… action=…` lines go to the terminal.
+4. Run the install plan with `execute_command_spec`. The script's `dashboard=… action=…` lines go to the terminal. If it exits non-zero, return the error immediately (the script's `error=` and `dashboard=…` lines are already on the terminal) and do not touch the ssh config, tunnel or browser. [R3.10]
 5. If `peer.json` exists, rewrite the managed `~/.ssh/config` block (now without forwards, section 3.8).
 6. `ensure_dashboard_tunnel`.
-7. Unless `--no-open`, open `http://localhost:<port>` for `--open <id>` (default `mission-control`).
+7. Run the status probe (`build_status_spec` + `parse_status_output`) and print a warning for every dashboard with `listening=false`, naming `~/.cheap-otto/logs/dashboards/<id>.log` for managed ones. The warning is non-blocking. [R3.10]
+8. Unless `--no-open`, open `http://localhost:<port>` for `--open <id>` (default `mission-control`).
 
 The inline tmux startup script and the hand-rolled `ssh -N` in today's `run_ui` are deleted. [R3.1, R8.1]
 
@@ -395,7 +426,7 @@ This changes behaviour: a plain `ssh otto-mac` no longer forwards 3000, 5173 and
 
 ### 3.9 Mission Control: hub API and links
 
-- `GET /api/dashboards` in `build_router` (`src/server.rs`). The handler builds the set from `state.config.port`, `state.config.pixel_port` and `REVIEWER_PORT`, probes `127.0.0.1:<port>` for each with a 250 ms timeout (the pattern `handle_pixel_office` uses), and returns:
+- `GET /api/dashboards` in `build_router` (`src/server.rs`). The server builds the `DashboardSet` with `with_ports` from `state.config.port`, `state.config.pixel_port` and `REVIEWER_PORT` during startup and refuses to start on an invalid configuration (port 0 or duplicate). The handler returns HTTP 500 with `{"error":"…"}` if it ever sees an invalid set; it never falls back to default ports. For a valid set it probes `127.0.0.1:<port>` for each with a 250 ms timeout (the pattern `handle_pixel_office` uses), and returns:
   ```json
   {"dashboards":[
     {"id":"mission-control","name":"Mission Control","port":7420,"listening":true,"current":true},
@@ -443,7 +474,7 @@ All changes stay std-only (rule 05).
 - Every generated listener argument is `127.0.0.1`; tests assert `0.0.0.0` never appears in a plist or script. [R1.4]
 - The install script is assembled from constants and `u16` ports. It takes no operator text, so there is nothing to inject. `--id` values are parsed into `DashboardId` before any command is built.
 - The install script kills processes by port. That is deliberate and visible: each kill prints `stray_killed=<pid>`.
-- The tunnel uses `BatchMode=yes` and discrete args. The terminate helper refuses to kill a pid whose image is not ssh.
+- The tunnel uses `BatchMode=yes`, `ConnectTimeout=10` and discrete args. The terminate helper refuses to kill a pid whose image is not ssh.
 - `status` reads `autoLoginUser`; nothing in this spec writes login settings.
 
 ## 5. Failure handling
@@ -453,9 +484,10 @@ All changes stay std-only (rule 05).
 | No GUI session on the Mac | Install script prints `error=no-gui-session` and a hint, exits 3; the CLI returns the error. [R1.7] |
 | `cheap-otto` not installed on the Mac | Mission Control skipped with `reason=cheap-otto-not-installed`; CLI adds "run `code-reviewer m1 sync`". |
 | `pixel-agents` not installed | Pixel Office skipped with a reason; other services installed. [R1.6] |
-| Service installed but port never listens | `listening=0`; CLI points at `~/.cheap-otto/logs/dashboards/<id>.log`. |
+| Service never listens | Install script prints `listening=0`, still attempts the other services, and exits 4; `ui` stops before the tunnel and browser and points at `~/.cheap-otto/logs/dashboards/<id>.log`. [R1.10, R3.10] |
+| Port still held after `kill -9` | Install script prints `dashboard=<id> error=port-held pid=<pid>`, skips that service without bootstrapping, and exits 4. [R1.9] |
 | Workstation port held by a foreign process | Error naming the ports and the command to find the holder; nothing is killed. [R3.5] |
-| Tunnel exits early | Error with the SSH test command; `tunnel.json` removed; no browser. [R3.6] |
+| Tunnel exits early or times out | Error with the SSH test command (a timeout also names the ports that did not answer); a live child is terminated; `tunnel.json` removed; no browser. [R3.6] |
 | Mac unreachable | `execute_command_spec` returns the SSH failure; nothing else runs. |
 | Dashboard install fails during provisioning | Warning; reviewer deploy continues. [R4.3] |
 

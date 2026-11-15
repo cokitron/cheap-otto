@@ -34,7 +34,8 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 6. IF `pixel-agents` is not installed on the Mac THEN the install command SHALL skip the Pixel Office service, report that it was skipped and why, and still install the other services.
 7. IF the Mac has no GUI session for the user THEN the install command SHALL fail with a message that names the cause and the fix, and SHALL NOT report success.
 8. The system SHALL write each managed service's output to `~/.cheap-otto/logs/dashboards/<id>.log` on the Mac.
-9. WHEN the install command (re)installs a service THEN it SHALL first stop the legacy tmux sessions `cheapotto-serve` and `cheapotto-pixel` and any stray process holding that service's port, so the service can bind.
+9. WHEN the install command (re)installs a service THEN it SHALL first stop the legacy tmux sessions `cheapotto-serve` and `cheapotto-pixel` and any stray process holding that service's port, so the service can bind. The install command SHALL then wait until the port is free (up to 5 s, then force-kill, then wait 2 s) before bootstrapping, and IF the port is still held THEN it SHALL report it, skip that service and fail.
+10. IF a managed service is not listening on its port within 10 s after bootstrap, or its port cannot be freed, THEN the install command SHALL report the service and cause, continue with the remaining services, and exit non-zero (exit code 4). Skipped services (R1.6) are not failures.
 
 ### R2. One registry
 
@@ -52,13 +53,14 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 
 1. WHEN the operator runs `cheap-otto ui` with the execute gate THEN the system SHALL make every installed dashboard reachable on the workstation at `http://127.0.0.1:<port>` through exactly one SSH tunnel process.
 2. WHEN every dashboard port already answers on the workstation THEN the system SHALL NOT start another tunnel.
-3. The tunnel SHALL be spawned with discrete arguments, `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, and a loopback bind on both ends of every forward.
+3. The tunnel SHALL be spawned with discrete arguments, `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `ConnectTimeout=10`, and a loopback bind on both ends of every forward.
 4. WHEN the system starts a tunnel THEN it SHALL record the process id, ports, destination and start time in `tunnel.json` in the state directory.
 5. IF some dashboard ports answer on the workstation and others do not THEN the system SHALL stop the tunnel it recorded (if that process is alive) and start a new one; IF the ports are held by a process it did not record THEN it SHALL fail, name the ports, and print the command that finds the holder.
-6. IF the tunnel process exits before the ports answer THEN the system SHALL report failure and SHALL NOT print that the dashboards are ready or open a browser.
+6. IF the tunnel process exits, or has not opened every forward within 5 s, THEN the system SHALL terminate the process if still running, remove `tunnel.json`, report failure naming the ports that did not answer, and SHALL NOT print that the dashboards are ready or open a browser.
 7. The operator SHALL be able to see the tunnel's state and stop it with a command.
 8. The managed `Host` block that `cheap-otto` writes into `~/.ssh/config` SHALL NOT contain `LocalForward` lines, and rewriting the block SHALL remove any that an older version wrote.
 9. `code-reviewer ui` and `open-ui.ps1` SHALL NOT forward the Pixel Office port and SHALL NOT start a tunnel when the Reviewer port already answers on the workstation.
+10. WHEN `cheap-otto ui` runs with the execute gate THEN it SHALL stop before starting the tunnel or opening a browser if the install step failed, and after the tunnel is up it SHALL probe each dashboard's state on the Mac and warn for any dashboard that is not listening.
 
 ### R4. One deploy
 
@@ -101,8 +103,8 @@ This spec makes the three dashboards one managed set: each runs as a `launchd` s
 
 1. `cheap-otto ui --execute` SHALL remain the one command that leaves Mission Control open in the browser, and SHALL keep accepting `--port`, `--pixel-port`, `--state-dir` and `--no-open`.
 2. WHEN the operator runs the dashboard uninstall command with the execute gate THEN the system SHALL unload and delete only the managed dashboard LaunchAgents.
-3. `cheap-otto restore --unload-schedules` SHALL continue to remove every `com.cheapotto.*` LaunchAgent, including the dashboard services.
-4. Every new side-effecting command SHALL be a dry run without the execute gate and SHALL print the full plan first.
+3. WHEN the operator runs `cheap-otto restore --unload-schedules --apply` (adding `--remote` to act on the paired MacBook over SSH) THEN the system SHALL continue to remove every `com.cheapotto.*` LaunchAgent, including the dashboard services; WITHOUT `--apply` it SHALL only print the plan.
+4. Every new side-effecting command SHALL be a dry run without the execute gate and SHALL print the full plan first, except that with `--json` stdout SHALL contain only the JSON document.
 
 ### R9. The change is documented where people and agents look
 

@@ -33,7 +33,7 @@ Follow these steps exactly. They are written so that an agent with no other cont
    cargo test --workspace --all-targets
    ```
    Then run every acceptance check in the task and compare with the expected result.
-7. **Stay off the live appliance.** Never pass `--execute` or `--apply`, and never run `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend` or `ui`, unless the task is marked **LIVE** and the owner has told you to run it. Exercise the CLI as a dry run with a temp `--state-dir`. Preview pages with the servers in `.claude/launch.json`.
+7. **Stay off the live appliance.** Never pass `--execute` or `--apply`, and never run `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend` or `ui`, unless the task is marked **LIVE** and the owner has told you to run it. Exercise the CLI as a dry run with a temp `--state-dir`. Preview pages with the servers in `.claude/launch.json`. The same exemption applies as in the definition of done: issue comments, branch pushes and PRs are normal coordination, not live operations.
 8. **Update the spec:** tick the task's checkbox in `tasks.md` and add one line under it with the PR number. If you changed the design, update `design.md`.
 9. **Open a PR** against `main` with a Conventional Commit title. The description says which task it implements (`Implements specs/<feature> T1.3, closes #NN`), what changed, and pastes the gate result and the acceptance check output. Do not merge it yourself unless the owner asked.
 10. **If you are blocked** (a check fails for a reason outside the task, the design contradicts the code, a dependency is missing): stop, leave the branch as it is, and write in the issue what you tried, what you saw (exact output) and what decision you need. Do not guess and do not weaken a test to get past it.
@@ -42,7 +42,7 @@ Follow these steps exactly. They are written so that an agent with no other cont
 
 - Every acceptance check in the task passes, and the three gate commands pass.
 - No new `unsafe`, `.unwrap()`, `.expect()` or `panic!` outside tests; no new dependency unless the task says so.
-- Nothing ran against the real MacBook or real GitHub repos, unless the task is **LIVE** and the owner approved it.
+- Nothing was executed on or deployed to the real MacBook, and no `code-reviewer` command (`m1 …`, `poll`, `tend-poll`, `review`, `tend`, `ui`) acted on real GitHub repos, unless the task is **LIVE** and the owner approved it. Commenting on the task's issue and opening the PR are expected and are not covered by this rule.
 - Docs that describe the changed behaviour are updated in the same PR when the task lists them.
 - `tasks.md` shows the task as done with its PR number, and the issue is closed by the PR.
 

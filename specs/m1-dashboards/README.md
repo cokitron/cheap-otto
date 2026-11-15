@@ -10,9 +10,9 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 
 ## What "done" looks like
 
-- `code-reviewer m1 sync` leaves both binaries and all three dashboard services installed on the Mac.
-- `cheap-otto ui --execute` on the workstation makes all three reachable through a single `ssh` process and opens Mission Control.
-- `cheap-otto dashboards status --execute` says which dashboards are up and why one is not.
+- With a logged-in GUI session on the Mac and `pixel-agents` installed, `code-reviewer m1 sync` leaves both binaries and all three dashboard services installed on the Mac. Without `pixel-agents`, the Pixel Office is skipped and reported.
+- `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error if an installed service fails to listen.
+- `cheap-otto dashboards status --execute` says which dashboards are up and why one is not. A skipped or failed dashboard stays unavailable and is reported there.
 - Each dashboard links to the others.
 - A dashboard that crashes comes back by itself.
 - `cheap-otto dashboards uninstall --execute` removes what this added.
@@ -22,7 +22,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 1. [`../README.md`](../README.md): the protocol, and the ten steps for carrying out a task.
 2. [`requirements.md`](requirements.md): nine requirements with testable criteria, and what is out of scope.
 3. [`design.md`](design.md): the current state with evidence, the target, every interface, the decisions and the open questions.
-4. [`tasks.md`](tasks.md): 24 tasks in six phases, each with files, steps, test names and acceptance checks.
+4. [`tasks.md`](tasks.md): 24 tasks across Phases 0–6 (six implementation phases plus the Phase 0 prerequisite), each with files, steps, test names and acceptance checks.
 
 ## Where to start
 
@@ -47,7 +47,7 @@ Phase 3  T3.1 hub API (needs T0.1, T1.1) ── T3.2 links ◀─┘
 Phase 4  T4.1 both binaries (independent) ── T4.2 provisioning (needs T2.1)
          T4.3 reviewer ui (needs T0.1, T2.3) ── T4.5 open-ui.ps1
          T4.4 pixel button (needs T0.1, T1.1)    T4.6 ports + link (needs T0.1, T1.1)
-Phase 5  T5.1 user docs, T5.2 agent docs (need T2.3 and Phase 4)
+Phase 5  T5.1 user docs (needs T2.3, T4.3), T5.2 agent docs (needs T2.3, T4.2)
 Phase 6  T6.1 LIVE deploy and verify ── T6.2 LIVE reboot check        (owner only)
 ```
 
@@ -62,7 +62,7 @@ Tasks on different branches of this tree can be done in parallel by different ag
 
 ## Coordination with other open work
 
-- **PR #2 (governance)** edits `crates/code-reviewer/src/m1.rs`, `scripts/m1-provision.sh`, `src/server.rs` in the reviewer crate, `src/main.rs`, `CLAUDE.md` and `AGENTS.md`, and moves the Mac checkout default to `~/otto-workspaces/cheap-otto`. Phase 4 tasks touch the same files. Before starting T4.1 to T4.6, pull `main` and re-read those files; if PR #2 has merged, line references in `design.md` section 1 may have moved, and the function names are what to search for.
+- **PR #2 (governance)** edits `crates/code-reviewer/src/m1.rs`, `crates/code-reviewer/scripts/m1-provision.sh`, `crates/code-reviewer/src/server.rs`, `src/main.rs`, `CLAUDE.md` and `AGENTS.md`, and moves the Mac checkout default to `~/otto-workspaces/cheap-otto`. Phase 4 tasks touch the same files. Before starting T4.1 to T4.6, pull `main` and re-read those files; if PR #2 has merged, line references in `design.md` section 1 may have moved, and the function names are what to search for.
 - **The origin guard (T0.1)** edits both `server.rs` files. T3.1, T4.3, T4.4 and T4.6 start after it merges.
 
 ## Decisions waiting on the owner
