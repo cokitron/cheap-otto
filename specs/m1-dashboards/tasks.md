@@ -40,7 +40,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.1 Dashboard registry
 
-- [ ] Done
+- [x] Done
+- PR: #41
 - **Issue:** #8
 - **Covers:** R2.1, R2.2, R2.3
 - **Depends on:** nothing
