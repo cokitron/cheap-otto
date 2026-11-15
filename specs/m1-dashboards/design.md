@@ -72,7 +72,7 @@ pub enum DashboardError {
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
     #[error(
-        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+        "a dashboard set must match the registry apart from ports: mission-control, pixel-office and reviewer once each, in that order, with the registry's names, labels and managers"
     )]
     UnexpectedServices,
 }

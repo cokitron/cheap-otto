@@ -31,9 +31,10 @@ pub enum DashboardError {
     /// A dashboard id given on the command line or in a request is not known.
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
-    /// A deserialized set does not list each dashboard exactly once, in registry order.
+    /// A deserialized set differs from the registry in anything but ports: ids, order, names,
+    /// LaunchAgent labels or managers.
     #[error(
-        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+        "a dashboard set must match the registry apart from ports: mission-control, pixel-office and reviewer once each, in that order, with the registry's names, labels and managers"
     )]
     UnexpectedServices,
 }
