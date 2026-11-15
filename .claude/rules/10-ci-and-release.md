@@ -15,7 +15,7 @@ Runs on pushes to `main` and on every pull request. A newer push to the same PR 
 
 | Job | Runs on | What it checks |
 | --- | --- | --- |
-| `PR Governance & Secret Guard` | Ubuntu | The PR title is a Conventional Commit; a same-repo branch uses an approved prefix (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/`, `dependabot/`, `claude/`); no tracked `.env*`, `*.token`, `*.pem`, `*.key`, `peer.json`, `state-backup.json` or `crates/code-reviewer/config/repos.toml` |
+| `PR Governance & Secret Guard` | Ubuntu | The PR title is a Conventional Commit; a same-repo branch uses an approved prefix (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/`, `dependabot/`, `claude/`); no tracked `.env` or `.env.*` (the template `.env.example` is allowed), `*.token`, `*.pem`, `*.key`, `peer.json`, `state-backup.json` or `crates/code-reviewer/config/repos.toml` |
 | `Rust Gate (ubuntu-latest)`, `(macos-latest)`, `(windows-latest)` | each OS | `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo test --workspace --all-targets --locked`; Ubuntu also runs `cargo fmt --all -- --check` |
 
 - The gate runs on all three OSes, so a path separator, a line ending or a shell assumption fails the PR. Build paths with `Path::join`, never assert on separators, and gate OS-specific branches with `cfg`.

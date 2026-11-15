@@ -14,7 +14,7 @@ An autonomous PR reviewer and review-feedback fixer that runs on the Mac under `
 - **Workspace resolution:** `--workspace` (default `.`) may point at the repo root or at `crates/code-reviewer`; the binary finds `brains/` either way and reads `config/repos.toml` beside it. That file is gitignored and holds real org and account names: never print it into a commit, PR or log.
 - **Everything under `m1` touches the Mac.** In particular `m1 sync`:
   1. force-pushes local `HEAD` to the Mac's repo (`~/otto-workspaces/cheap-otto` by default) as `otto-sync`, then checks it out as `main` with a hard reset;
-  2. runs `cargo test --workspace --all-targets` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` there;
+  2. runs `cargo test --workspace --all-targets --locked` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` there;
   3. `cargo install`s both binaries (`cheap-otto` and `code-reviewer`) and runs `scripts/m1-provision.sh`, which rewrites the `launchd` jobs (`com.cheapotto.code-reviewer.pr-poller`, `.ui`, `.code-tender`) and copies this crate's skills into the Mac's global `~/.claude/skills` and `~/.gemini/antigravity/skills`.
   So whatever is checked out locally becomes production. Run it only when asked, from the commit the user wants deployed.
 - Prefer `code-reviewer m1 exec|push-file|status` to hand-written `ssh` strings: they go over stdin and survive PowerShell quoting.
@@ -43,7 +43,12 @@ launchd (120s) → poll: one batched GraphQL query per repo, no LLM call when no
 
 The only component that writes to other people's branches. Its limits are load-bearing:
 
-- Acts only on repos with `tender_enabled`, and only on PRs whose author passes the allowlist: the repo's `tender_allowed_authors` when set, otherwise the global `tender.allowed_authors`, otherwise the two configured accounts. An unknown author fails closed.
+- **Who it may tend** (`is_tender_author_allowed` in `config.rs`, applied by `run_tender_poll` in `main.rs`):
+  1. If the repo sets `tender_allowed_authors`, only those authors are tended, watched PR or not.
+  2. With no per-repo list, a PR the operator explicitly watched (ledger entry with `watched`) is tended whoever wrote it. Watching a PR is an explicit override.
+  3. With no per-repo list and no watch, the author must be in the global `tender.allowed_authors`; when that is empty too, the author must be `accounts.primary`, `accounts.secondary` or the repo's `forced_account`.
+  4. `tender_enabled = false` skips a repo's PRs **unless the PR is explicitly watched**, so the flag is not an unconditional off switch.
+  5. In the author checks an empty or `unknown` author fails closed, and `*` in a list allows everyone.
 - Fork PRs (`isCrossRepository`) are skipped at poll time, before any review thread is fetched, any worktree is touched or any LLM runs. `.ai/security-and-tender-boundaries.md` is the authoritative statement of these boundaries; keep it and the code in step.
 - The reviewer has its own per-repo filters: `review_allowed_authors` and `skip_fork_prs`.
 - Ignores resolved threads, clean pass reviews and anything carrying its own marker.
@@ -71,7 +76,7 @@ The only component that writes to other people's branches. Its limits are load-b
 
 ## 6. Tokens and subprocess environment
 
-- GitHub access is `gh` with a per-account `GH_TOKEN` read from `~/.code-reviewer/tokens/<user>.token` (`github.rs`). It never mutates the global `gh` login. Token files are operator-provisioned: `code-reviewer m1 …` writes them on the Mac with mode 600 (`m1.rs`). Nothing validates file or directory permissions when a token is read, so a looser mode is not detected.
+- GitHub access is `gh` with a per-account `GH_TOKEN` read from `<accounts.tokens_dir>/<user>.token` (`github.rs`; the default directory is `~/.code-reviewer/tokens`). It never mutates the global `gh` login. Token files are operator-provisioned: `code-reviewer m1 …` writes them on the Mac with mode 600 (`m1.rs`). Nothing validates file or directory permissions when a token is read, so a looser mode is not detected.
 - **One helper strips tokens:** `strip_github_credentials` (`brains.rs`) removes `GH_TOKEN` and `GITHUB_TOKEN` from a `Command`. It is called for every LLM agent spawn (`invoke_agent_cli`, `invoke_tender_cli`), the runner auth probes (`is_runner_authenticated`), and Code Tender's dependency install and check commands (`install_worktree_js_deps_if_lockfile_diverged`, `run_local_check_gate`).
 - **Not stripped today:** the formatters run by `auto_format_modified_files` (`cargo fmt`, `prettier`) inherit the ambient environment. A new spawn site for an agent, a repo command or a formatter must call the helper.
 - **Pre-commit guard:** `find_forbidden_modified_files` (`tender.rs`) reads `git status --porcelain` and rejects paths by name only: basename `.env`, `.env.*` (except `.env.example`), paths ending `.token`, `.pem` or `.key`, paths containing `.git/`, and `peer.json`. It does **not** detect submodule or gitlink changes, so a changed gitlink can pass and be staged. Extend the guard (for example by checking gitlink mode `160000` entries) rather than working around it.

@@ -2,8 +2,10 @@
 paths:
   - "src/ui_assets.rs"
   - "src/server.rs"
+  - "src/request_guard.rs"
   - "crates/code-reviewer/src/ui_html.rs"
   - "crates/code-reviewer/src/server.rs"
+  - "crates/code-reviewer/src/request_guard.rs"
   - ".claude/launch.json"
 ---
 
@@ -40,12 +42,12 @@ Neither server authenticates requests. The loopback bind keeps other machines ou
 2. **Host.** `Host`, or for Mission Control the HTTP/2 or absolute-form request authority when `Host` is absent, must be `127.0.0.1`, `localhost` or `[::1]`. Anything else, or no usable authority, is `403` (DNS-rebinding defence). The dashboard reads only the `Host` header.
 3. **Origin.** A request that is not `GET`, `HEAD` or `OPTIONS` and carries an `Origin` must carry an allowlisted one, or it is `403`. The allowlist is the server's own origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), held in the server state (`ControlPlaneState::request_guard`, `ServerContext::guard`).
 4. **No `Origin` passes rule 3.** That is the CLI, `curl` and external agents.
-5. **Dashboard only:** a `POST` with a body must be `Content-Type: application/json`, or it is `415`. Its handlers parse any body as JSON, and `text/plain` is the one cross-origin body a browser sends without a preflight. Mission Control gets the same from axum's `Json` extractor.
+5. **Dashboard only:** a `POST` that carries a body must be `Content-Type: application/json`, or it is `415`. This is the guard's policy, enforced before routing, whether or not the handler reads the body. The reason: a browser sends `text/plain`, `application/x-www-form-urlencoded` and `multipart/form-data` bodies cross-origin without a preflight, and a JSON content type is what forces one. Body-less `POST`s are covered by the Origin rule. Mission Control gets the JSON requirement from axum's `Json` extractor on the routes that take a body.
 
 What follows for page and API work:
 
-- Keep `fetch` paths relative. Neither server sends CORS headers, so a foreign page can't read a response or pass a preflight; don't add a CORS layer or an `Access-Control-Allow-*` header.
-- To let one local dashboard call another's API, grow that server's allowlist with `RequestGuard::trust_loopback_port` (or `trust_origin` in the root crate) and answer CORS for exactly those origins.
+- Keep `fetch` paths relative. Neither server sends CORS headers today, so a foreign page can't read a response or pass a preflight. Never add a general or wildcard CORS layer.
+- The one exception: to let one local dashboard call another's API, grow that server's allowlist with `RequestGuard::trust_loopback_port` (or `trust_origin` in the root crate) and answer CORS for exactly those allowlisted origins, nothing wider.
 - Send `Content-Type: application/json` with every body. Both pages' `api()` helpers do.
 - The allowlist is keyed on the listening port, so a tunnel must keep the port (`127.0.0.1:<port>:127.0.0.1:<port>`). Through a remapped port the page loads but its `POST`s get `403`.
 - A new route is guarded automatically. In `oneshot` tests send a loopback `Host` header (see `guarded_request` in the `src/server.rs` tests), or the answer is `403`.
