@@ -63,14 +63,15 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.1 Dashboard registry
 
-- [ ] Done
+- [x] Done
+- PR: #41
 - **Issue:** #8
 - **Covers:** R2.1, R2.2, R2.3
 - **Depends on:** nothing
 - **Files:** `src/dashboards.rs` (new), `src/lib.rs`
 - **Steps:**
   1. Create `src/dashboards.rs` with a `//!` module header and the constants, `DashboardError`, `DashboardId`, `ServiceManager`, `DashboardService` and `DashboardSet` exactly as in design 3.1.
-  2. Implement `DashboardId::all`, `slug`, `display_name`, `parse`, and `DashboardSet::standard`, `with_ports`, `get`, `ports`, `managed`. `standard()` calls `with_ports` with the three constants.
+  2. Implement `DashboardId::all`, `slug`, `display_name`, `parse`, and `DashboardSet::standard`, `with_ports`, `get`, `ports`, `managed`. `standard()` builds from the three constants through the private constructor that `with_ports` uses after validating, so it needs no `.expect()`; a test proves the constants pass `with_ports`.
   3. Mission Control and Pixel Office use `ServiceManager::CheapOtto` and the label `com.cheapotto.dashboards.<slug>`. Reviewer uses `ServiceManager::CodeReviewerProvisioner` and `REVIEWER_LAUNCHD_LABEL`.
   4. Add `pub mod dashboards;` to `src/lib.rs` (keep the list alphabetical).
 - **Tests** in `src/dashboards.rs`:
@@ -85,21 +86,23 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.2 Reserve the `dashboards` project name
 
-- [ ] Done
+- [x] Done
+- PR: #45
 - **Issue:** #9
 - **Covers:** R2.4
 - **Depends on:** T1.1
 - **Files:** `src/schedule.rs`
 - **Steps:**
   1. Add the variant `ReservedProjectName(String)` to `ScheduleError` with the message `project name '{0}' is reserved for dashboard services`.
-  2. In `build_schedule_install_plan`, after the project name is validated, return that error when it equals `crate::dashboards::RESERVED_PROJECT_NAME`.
+  2. In `build_schedule_install_plan`, after the project name is validated, return that error when it equals `crate::dashboards::RESERVED_PROJECT_NAME`, ignoring ASCII case (APFS file names are case-insensitive).
 - **Tests** in `src/schedule.rs`:
   - `rejects_schedule_for_reserved_dashboards_project`
 - **Acceptance:** `cargo test -p cheap-otto --lib schedule::tests` passes and includes the new test.
 
 ### T1.3 LaunchAgent templates
 
-- [ ] Done
+- [x] Done
+- PR: #45
 - **Issue:** #10
 - **Covers:** R1.1, R1.2, R1.3, R1.4, R1.8
 - **Depends on:** T1.1
@@ -298,13 +301,14 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T3.1 `GET /api/dashboards`
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #19
 - **Covers:** R6.1
 - **Depends on:** T0.1, T1.1
 - **Files:** `src/server.rs`
 - **Steps:**
-  1. Add the route to `build_router` and a handler that returns the JSON in design 3.9. The `serve` startup in `src/server.rs` calls `DashboardSet::with_ports(config.port, config.pixel_port, REVIEWER_PORT)` before binding and returns its error, so an invalid port configuration never starts a server. Keep the resulting set in the app state; the handler returns HTTP 500 with `{"error":"<message>"}` on `Err` and never falls back to `standard()`.
+  1. Add the route to `build_router` and a handler that returns the JSON in design 3.9. The `serve` startup in `src/server.rs` calls `DashboardSet::with_ports(config.port, config.pixel_port, REVIEWER_PORT)` once the listener has resolved `--port 0`, and returns its error before it creates any directory or serves a request, so an invalid port configuration never starts a server. Keep the resulting set in the app state; the handler returns HTTP 500 with `{"error":"<message>"}` on `Err` and never falls back to `standard()`.
   2. Probe each port with `tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(("127.0.0.1", port)))`.
   3. `current` is true for Mission Control.
   4. Add the route to the module's `//!` header list.
@@ -317,7 +321,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T3.2 Links between dashboards in Mission Control
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #20
 - **Covers:** R6.2, R6.4
 - **Depends on:** T3.1
@@ -338,7 +343,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.1 `m1 sync` installs both binaries
 
-- [ ] Done
+- [x] Done
+- **PR:** #43
 - **Issue:** #21
 - **Covers:** R4.1
 - **Depends on:** nothing
@@ -422,7 +428,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.6 Shared ports, and a link back to Mission Control
 
-- [ ] Done
+- [x] Done
+- PR: #48
 - **Issue:** #26
 - **Covers:** R2.5, R6.3
 - **Depends on:** T0.1, T1.1

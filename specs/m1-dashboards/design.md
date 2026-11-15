@@ -71,6 +71,10 @@ pub enum DashboardError {
     DuplicatePort(u16),
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
+    #[error(
+        "a dashboard set must match the registry apart from ports: mission-control, pixel-office and reviewer once each, in that order, with the registry's names, labels and managers"
+    )]
+    UnexpectedServices,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +104,9 @@ pub struct DashboardService {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DashboardSet { pub services: Vec<DashboardService> }
+#[serde(try_from = "DashboardSetFields")]   // deserializing runs the same checks as with_ports
+pub struct DashboardSet { services: Vec<DashboardService> }   // private: built only through validation
+// DashboardSet::services(&self) -> &[DashboardService]
 // DashboardSet::standard() -> Self
 // DashboardSet::with_ports(mission_control: u16, pixel_office: u16, reviewer: u16) -> Result<Self, DashboardError>
 // DashboardSet::get(&self, id: DashboardId) -> Option<&DashboardService>
@@ -109,9 +115,9 @@ pub struct DashboardSet { pub services: Vec<DashboardService> }
 ```
 
 - Labels: `com.cheapotto.dashboards.mission-control`, `com.cheapotto.dashboards.pixel-office`, and `REVIEWER_LAUNCHD_LABEL` for the reviewer. [R2.3]
-- `with_ports` rejects 0 and duplicates. [R2.2]
+- `with_ports` rejects 0 and duplicates, and so does deserialization (through `TryFrom<DashboardSetFields>`). Deserialization also rejects any set that is not exactly the canonical registry output of `from_ports` for those ports, meaning the same `id` order, `display_name`, `launchd_label` and `manager`, else `DashboardError::UnexpectedServices`. The `services` field is private, so no set skips these checks. [R2.2]
 - Every public function that returns a value carries `#[must_use = "…"]`, as the rest of the core does.
-- `build_schedule_install_plan` (`src/schedule.rs`) gains a check: a project equal to `RESERVED_PROJECT_NAME` returns the new variant `ScheduleError::ReservedProjectName(String)`. [R2.4]
+- `build_schedule_install_plan` (`src/schedule.rs`) gains a check: a project equal to `RESERVED_PROJECT_NAME`, ignoring ASCII case because APFS file names are case-insensitive (`Dashboards` would overwrite the same plist file), returns the new variant `ScheduleError::ReservedProjectName(String)`. A schedule whose label would be `REVIEWER_LAUNCHD_LABEL` (project `code-reviewer`, id `ui`, any case) returns `ScheduleError::ReservedLaunchdLabel(String)`. `build_schedule_remove_plan` and `build_schedule_kickstart_spec` run the same check, so only the dashboard paths boot out or kick a dashboard LaunchAgent. [R2.4]
 
 ### 3.2 LaunchAgent templates
 
