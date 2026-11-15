@@ -31,6 +31,11 @@ pub enum DashboardError {
     /// A dashboard id given on the command line or in a request is not known.
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
+    /// A deserialized set does not list each dashboard exactly once, in registry order.
+    #[error(
+        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+    )]
+    UnexpectedServices,
 }
 
 /// Identifies one dashboard.
@@ -117,13 +122,57 @@ pub struct DashboardService {
 }
 
 /// The full set of dashboards, in [`DashboardId::all`] order.
+///
+/// The field is private and deserialization goes through [`DashboardSet::try_from`], so every
+/// set that exists has passed the same checks as [`DashboardSet::with_ports`]. [R2.2]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "DashboardSetFields")]
 pub struct DashboardSet {
-    /// One entry per dashboard.
-    pub services: Vec<DashboardService>,
+    services: Vec<DashboardService>,
+}
+
+/// The shape of a serialized [`DashboardSet`], before validation.
+#[derive(Deserialize)]
+struct DashboardSetFields {
+    services: Vec<DashboardService>,
+}
+
+impl TryFrom<DashboardSetFields> for DashboardSet {
+    type Error = DashboardError;
+
+    fn try_from(fields: DashboardSetFields) -> Result<Self, Self::Error> {
+        let ids: Vec<DashboardId> = fields.services.iter().map(|service| service.id).collect();
+        if ids != DashboardId::all() {
+            return Err(DashboardError::UnexpectedServices);
+        }
+        let ports: Vec<u16> = fields.services.iter().map(|service| service.port).collect();
+        validate_ports(&ports)?;
+        Ok(Self {
+            services: fields.services,
+        })
+    }
+}
+
+/// Rejects port 0 and any port used twice. [R2.2]
+fn validate_ports(ports: &[u16]) -> Result<(), DashboardError> {
+    for (index, port) in ports.iter().enumerate() {
+        if *port == 0 {
+            return Err(DashboardError::InvalidPort(*port));
+        }
+        if ports[..index].contains(port) {
+            return Err(DashboardError::DuplicatePort(*port));
+        }
+    }
+    Ok(())
 }
 
 impl DashboardSet {
+    /// Every dashboard, in [`DashboardId::all`] order.
+    #[must_use = "returns every dashboard entry"]
+    pub fn services(&self) -> &[DashboardService] {
+        &self.services
+    }
+
     /// The three dashboards on their default ports.
     #[must_use = "returns the default dashboard set"]
     pub fn standard() -> Self {
@@ -143,15 +192,7 @@ impl DashboardSet {
         pixel_office: u16,
         reviewer: u16,
     ) -> Result<Self, DashboardError> {
-        let ports = [mission_control, pixel_office, reviewer];
-        for (index, port) in ports.iter().enumerate() {
-            if *port == 0 {
-                return Err(DashboardError::InvalidPort(*port));
-            }
-            if ports[..index].contains(port) {
-                return Err(DashboardError::DuplicatePort(*port));
-            }
-        }
+        validate_ports(&[mission_control, pixel_office, reviewer])?;
         Ok(Self::from_ports(mission_control, pixel_office, reviewer))
     }
 
@@ -217,7 +258,7 @@ mod tests {
     #[test]
     fn standard_set_lists_three_dashboards_with_default_ports() -> Result<(), DashboardError> {
         let set = DashboardSet::standard();
-        let ids: Vec<DashboardId> = set.services.iter().map(|service| service.id).collect();
+        let ids: Vec<DashboardId> = set.services().iter().map(|service| service.id).collect();
         assert_eq!(ids, DashboardId::all());
         assert_eq!(set.ports(), [7420, 7421, 7430]);
         assert_eq!(
@@ -304,6 +345,45 @@ mod tests {
         assert_eq!(json["services"][0]["manager"], "cheap-otto");
         let back: DashboardSet = serde_json::from_value(json)?;
         assert_eq!(back, set);
+        Ok(())
+    }
+
+    #[test]
+    fn deserializing_validates_ports_and_services_like_with_ports() -> Result<(), serde_json::Error>
+    {
+        let good = serde_json::to_value(DashboardSet::standard())?;
+        let parse = |value: serde_json::Value| serde_json::from_value::<DashboardSet>(value);
+
+        let mut zero = good.clone();
+        zero["services"][1]["port"] = serde_json::json!(0);
+        let err = parse(zero).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("invalid dashboard port 0"), "{err}");
+
+        let mut duplicate = good.clone();
+        duplicate["services"][2]["port"] = serde_json::json!(7420);
+        let err = parse(duplicate)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("dashboard port 7420 is used twice"), "{err}");
+
+        let mut missing = good.clone();
+        if let Some(services) = missing["services"].as_array_mut() {
+            services.pop();
+        }
+        let err = parse(missing)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("once each, in that order"), "{err}");
+
+        let mut reordered = good.clone();
+        if let Some(services) = reordered["services"].as_array_mut() {
+            services.swap(0, 1);
+        }
+        assert!(parse(reordered).is_err());
+
+        assert_eq!(parse(good)?, DashboardSet::standard());
         Ok(())
     }
 }

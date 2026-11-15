@@ -100,7 +100,9 @@ pub struct DashboardService {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DashboardSet { pub services: Vec<DashboardService> }
+#[serde(try_from = "DashboardSetFields")]   // deserializing runs the same checks as with_ports
+pub struct DashboardSet { services: Vec<DashboardService> }   // private: built only through validation
+// DashboardSet::services(&self) -> &[DashboardService]
 // DashboardSet::standard() -> Self
 // DashboardSet::with_ports(mission_control: u16, pixel_office: u16, reviewer: u16) -> Result<Self, DashboardError>
 // DashboardSet::get(&self, id: DashboardId) -> Option<&DashboardService>
@@ -109,7 +111,7 @@ pub struct DashboardSet { pub services: Vec<DashboardService> }
 ```
 
 - Labels: `com.cheapotto.dashboards.mission-control`, `com.cheapotto.dashboards.pixel-office`, and `REVIEWER_LAUNCHD_LABEL` for the reviewer. [R2.3]
-- `with_ports` rejects 0 and duplicates. [R2.2]
+- `with_ports` rejects 0 and duplicates, and so does deserialization (through `TryFrom<DashboardSetFields>`, which also requires the three dashboards once each in registry order, else `DashboardError::UnexpectedServices`). The `services` field is private, so no set skips these checks. [R2.2]
 - Every public function that returns a value carries `#[must_use = "…"]`, as the rest of the core does.
 - `build_schedule_install_plan` (`src/schedule.rs`) gains a check: a project equal to `RESERVED_PROJECT_NAME` returns the new variant `ScheduleError::ReservedProjectName(String)`. [R2.4]
 
