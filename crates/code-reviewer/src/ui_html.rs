@@ -963,6 +963,7 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
     <div class="topbar-right">
       <span class="status-chip" id="pill-poll-mode"><span class="sq-dot"></span>2M AUTO-WATCH</span>
       <span class="status-chip" id="pill-system" title="AI Runners &amp; Host Power"><span class="sq-dot"></span>CLAUDE · AGY · M1</span>
+      <a class="btn secondary" id="mission-control-link" href="#" target="_blank" rel="noopener" title="Open Mission Control (cheap-otto serve)">MISSION CONTROL ↗</a>
       <button class="secondary" id="btn-split-pixel" onclick="toggleSplitPixel()" title="Dock Pixel Agents Office side-by-side">SPLIT OFFICE</button>
       <button id="primary-poll-btn" onclick="triggerPrimaryAction()">↻ SYNC PULLS</button>
     </div>
@@ -3549,6 +3550,11 @@ pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
         ctx.fillText(`${st.label} [${st.runner.toUpperCase()}]`, dx + 6, dy + 76);
       });
     }
+
+    // Plain navigation to Mission Control on its shared port (DEFAULT_MISSION_CONTROL_PORT,
+    // from src/dashboards.rs); no cross-origin API call is made.
+    document.getElementById('mission-control-link').href =
+      'http://' + (window.location.hostname || '127.0.0.1') + ':7420/';
 
     switchApp(detectInitialApp(), false);
     loadPixelOffice(false);

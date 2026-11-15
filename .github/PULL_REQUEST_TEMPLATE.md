@@ -7,6 +7,7 @@
 - [ ] Governance / CI / Cubic AI config (`cubic.yaml`, `.github/`, `.ai/`, `.claude/`, docs)
 
 ## Safety & Invariant Checklist
+- [ ] Within the size budget (`git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'`): at most 600 changed lines excluding `Cargo.lock` and one theme, or a purely mechanical change that says so in the description
 - [ ] PR title follows **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `perf:`, `build:`, `revert:`)
 - [ ] `#![forbid(unsafe_code)]` preserved; no `.unwrap()` / `.expect()` added in non-test production code
 - [ ] Subprocesses use shell-free argument arrays (`CommandSpec` / `.args(...)`); untrusted inputs are validated

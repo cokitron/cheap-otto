@@ -34,9 +34,10 @@ pub enum DashboardError {
     /// A dashboard id given on the command line or in a request is not known.
     #[error("unknown dashboard '{0}' (expected mission-control, pixel-office or reviewer)")]
     UnknownDashboard(String),
-    /// A deserialized set does not list each dashboard exactly once, in registry order.
+    /// A deserialized set differs from the registry in anything but ports: ids, order, names,
+    /// LaunchAgent labels or managers.
     #[error(
-        "a dashboard set must list mission-control, pixel-office and reviewer once each, in that order"
+        "a dashboard set must match the registry apart from ports: mission-control, pixel-office and reviewer once each, in that order, with the registry's names, labels and managers"
     )]
     UnexpectedServices,
 }
@@ -259,6 +260,92 @@ impl DashboardSet {
 
 fn managed_label(id: DashboardId) -> String {
     format!("com.cheapotto.{RESERVED_PROJECT_NAME}.{}", id.slug())
+}
+
+/// `PATH` for the dashboard LaunchAgents: `launchd` starts jobs with a minimal one.
+const SERVICE_PATH_XML: &str = "/opt/homebrew/bin:/usr/local/bin:$HOME_XML/.cargo/bin:$HOME_XML/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// Renders the LaunchAgent plist for a dashboard that cheap-otto manages. [R1.1, R1.2, R1.3, R1.4, R1.8]
+///
+/// Returns `None` for the Reviewer, whose LaunchAgent `m1-provision.sh` installs. The text is a
+/// template for an unquoted heredoc in the install script: `$HOME_XML` and, for the Pixel Office,
+/// `$PIXEL_BIN_XML` stay literal, and the Mac's shell fills them with XML-escaped values, because
+/// `launchd` expands no variables. Only `service.id` is read: ports come from `set` and the label
+/// is rebuilt from the id, because `DashboardService` fields are public and a hand-built value
+/// must not put its own text into the heredoc or the XML.
+#[must_use = "the plist template should be written by the install script"]
+pub fn render_service_plist_template(
+    service: &DashboardService,
+    set: &DashboardSet,
+) -> Option<String> {
+    let port = set.get(service.id)?.port;
+    let program_arguments: Vec<String> = match service.id {
+        DashboardId::MissionControl => {
+            let pixel_port = set.get(DashboardId::PixelOffice)?.port;
+            vec![
+                "$HOME_XML/.cargo/bin/cheap-otto".to_string(),
+                "serve".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                port.to_string(),
+                "--pixel-port".to_string(),
+                pixel_port.to_string(),
+            ]
+        }
+        // The flags `run_ui` passes to `pixel-agents` today.
+        DashboardId::PixelOffice => vec![
+            "$PIXEL_BIN_XML".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+            "--host".to_string(),
+            "127.0.0.1".to_string(),
+            "--no-terminal".to_string(),
+        ],
+        DashboardId::Reviewer => return None,
+    };
+    let label = managed_label(service.id);
+    let log = format!(
+        "$HOME_XML/.cheap-otto/logs/dashboards/{}.log",
+        service.id.slug()
+    );
+    let arguments: String = program_arguments
+        .iter()
+        .map(|argument| format!("    <string>{argument}</string>\n"))
+        .collect();
+    Some(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{SERVICE_PATH_XML}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+{arguments}  </array>
+  <key>WorkingDirectory</key>
+  <string>$HOME_XML</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>{log}</string>
+  <key>StandardErrorPath</key>
+  <string>{log}</string>
+</dict>
+</plist>
+"#
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -598,6 +685,103 @@ mod tests {
         assert!(parse(reordered).is_err());
 
         assert_eq!(parse(good)?, DashboardSet::standard());
+        Ok(())
+    }
+
+    fn template(set: &DashboardSet, id: DashboardId) -> String {
+        set.get(id)
+            .and_then(|service| render_service_plist_template(service, set))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn mission_control_plist_keeps_alive_and_binds_loopback() {
+        let plist = template(&DashboardSet::standard(), DashboardId::MissionControl);
+        assert!(plist.contains("<string>com.cheapotto.dashboards.mission-control</string>"));
+        assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
+        assert!(plist.contains("<string>127.0.0.1</string>"));
+        assert!(plist.contains(
+            "<string>$HOME_XML/.cheap-otto/logs/dashboards/mission-control.log</string>"
+        ));
+        assert!(plist.contains("<string>serve</string>\n    <string>--host</string>"));
+        assert!(plist.contains("<key>ThrottleInterval</key>\n  <integer>10</integer>"));
+        assert!(!plist.contains("0.0.0.0"));
+        assert!(!plist.contains('\r'));
+    }
+
+    #[test]
+    fn pixel_office_plist_uses_resolved_binary_placeholder() {
+        let plist = template(&DashboardSet::standard(), DashboardId::PixelOffice);
+        assert!(plist.contains("<string>com.cheapotto.dashboards.pixel-office</string>"));
+        assert!(plist.contains("<array>\n    <string>$PIXEL_BIN_XML</string>"));
+        assert!(plist.contains("<string>--no-terminal</string>"));
+        assert!(plist.contains("<string>--port</string>\n    <string>7421</string>"));
+        assert!(plist.contains("<string>--host</string>\n    <string>127.0.0.1</string>"));
+        assert!(plist.contains("logs/dashboards/pixel-office.log</string>"));
+        assert!(!plist.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn plist_templates_use_escaped_placeholders_not_raw_home() {
+        let set = DashboardSet::standard();
+        for id in [DashboardId::MissionControl, DashboardId::PixelOffice] {
+            let plist = template(&set, id);
+            assert!(plist.contains("$HOME_XML"), "{id:?}");
+            let rest = plist.replace("$HOME_XML", "").replace("$PIXEL_BIN_XML", "");
+            assert!(!rest.contains("$HOME"), "{id:?}: {rest}");
+            assert!(!rest.contains("$PIXEL_BIN"), "{id:?}: {rest}");
+            assert!(!rest.contains('$'), "{id:?}: {rest}");
+        }
+    }
+
+    #[test]
+    fn reviewer_has_no_template_because_provisioner_manages_it() {
+        let set = DashboardSet::standard();
+        assert_eq!(
+            set.get(DashboardId::Reviewer)
+                .and_then(|service| render_service_plist_template(service, &set)),
+            None
+        );
+        assert_eq!(
+            set.managed()
+                .filter_map(|service| render_service_plist_template(service, &set))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn plist_ports_follow_the_set() -> Result<(), DashboardError> {
+        let set = DashboardSet::with_ports(8420, 8421, 8430)?;
+        let mission_control = template(&set, DashboardId::MissionControl);
+        assert!(mission_control.contains("<string>--port</string>\n    <string>8420</string>"));
+        assert!(
+            mission_control.contains("<string>--pixel-port</string>\n    <string>8421</string>")
+        );
+        assert!(!mission_control.contains("7420"));
+        assert!(!mission_control.contains("7421"));
+        let pixel_office = template(&set, DashboardId::PixelOffice);
+        assert!(pixel_office.contains("<string>8421</string>"));
+        assert!(!pixel_office.contains("7421"));
+        Ok(())
+    }
+
+    #[test]
+    fn plist_label_comes_from_the_id_not_from_the_service_text() -> Result<(), DashboardError> {
+        let set = DashboardSet::standard();
+        let mut service = set
+            .get(DashboardId::MissionControl)
+            .cloned()
+            .ok_or(DashboardError::UnexpectedServices)?;
+        service.launchd_label = "x'; rm -rf ~ #$(id)</string><string>-evil".to_string();
+        service.port = 9999;
+        let plist = render_service_plist_template(&service, &set).unwrap_or_default();
+        assert!(plist.contains("<string>com.cheapotto.dashboards.mission-control</string>"));
+        assert!(plist.contains("<string>7420</string>"));
+        assert!(!plist.contains("rm -rf"));
+        assert!(!plist.contains("$(id)"));
+        assert!(!plist.contains("9999"));
         Ok(())
     }
 
