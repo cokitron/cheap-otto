@@ -171,6 +171,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 ### T1.6 Status script and parser
 
 - [x] Done
+- PR: #52
 - **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
 - **Depends on:** T1.1
