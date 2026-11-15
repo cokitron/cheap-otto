@@ -22,22 +22,29 @@ pub struct M1SyncOptions<'a> {
     pub npm_pkgs: &'a str,
 }
 
+/// Builds the piped `ssh <host> sh -s` command with GitHub tokens removed from its environment.
+fn ssh_script_command(host: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ClearAllForwardings=yes",
+        host,
+        "sh",
+        "-s",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
 /// Runs a POSIX `sh -s` script on `otto-mac` over SSH stdin so PowerShell / Windows quoting
 /// and UTF-8 BOMs never corrupt multi-line commands or special characters.
 pub fn run_ssh_script(host: &str, script: &str) -> Result<String, String> {
-    let mut child = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ClearAllForwardings=yes",
-            host,
-            "sh",
-            "-s",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut child = ssh_script_command(host)
         .spawn()
         .map_err(|e| format!("failed to spawn `ssh`: {}", e))?;
 
@@ -457,6 +464,34 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_ssh_script_command_strips_github_credentials() {
+        let cmd = ssh_script_command("otto-mac");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ClearAllForwardings=yes",
+                "otto-mac",
+                "sh",
+                "-s"
+            ]
+        );
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(removed.contains(&"GH_TOKEN".to_string()), "{cmd:?}");
+        assert!(removed.contains(&"GITHUB_TOKEN".to_string()), "{cmd:?}");
+    }
 
     #[test]
     fn encodes_rfc4648_base64_accurately() {
