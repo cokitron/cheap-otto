@@ -8,7 +8,8 @@ use crate::brains::{
 };
 use crate::config::{
     AgentsConfig, CliRunner, TenderDeliveryMode, WatchedRepoConfig, WorkspaceConfig, expand_tilde,
-    home_dir, normalize_repo_input, repo_fs_slug,
+    home_dir, merge_kb_markdown, normalize_repo_input, repo_fs_slug, runtime_kb_root,
+    strip_committed_kb_lines, write_private_kb_file,
 };
 use crate::github::GitHubClient;
 use crate::state::{
@@ -833,44 +834,6 @@ pub fn load_repo_app_context(workdir: &Path, local_checkout: Option<&Path>) -> S
     }
 }
 
-/// Ensures `tender-agents/kb/*.md` and per-agent `kb/lessons.md` exist with non-destructive defaults.
-pub fn ensure_tender_kb_scaffold(workspace_root: &Path) {
-    let shared_dir = workspace_root.join("tender-agents").join("kb");
-    let _ = fs::create_dir_all(&shared_dir);
-    let defaults = [
-        (
-            "patterns-fixed.md",
-            "# Code Tender KB — Verified Fix Patterns\n\n- `[*]` Always pair behavior fixes with a targeted regression test covering the failure mode.\n",
-        ),
-        (
-            "check-recipes.md",
-            "# Code Tender KB — Local Verification & Check Recipes\n\n- `[*]` Run the project's typechecker, linter, and tests locally before finalizing edits.\n",
-        ),
-        (
-            "do-not-repeat.md",
-            "# Code Tender KB — Anti-Regression & Do-Not-Repeat Rules\n\n- `[*]` Never guess contracts from the diff alone—verify full definitions in the local app checkout.\n",
-        ),
-    ];
-    for (name, content) in defaults {
-        let path = shared_dir.join(name);
-        if !path.exists() {
-            let _ = fs::write(path, content);
-        }
-    }
-
-    for agent_id in TENDER_AGENTS {
-        let agent_kb = workspace_root
-            .join("tender-agents")
-            .join(agent_id)
-            .join("kb");
-        let _ = fs::create_dir_all(&agent_kb);
-        let lessons = agent_kb.join("lessons.md");
-        if !lessons.exists() {
-            let _ = fs::write(lessons, format!("# `{}` Agent Lessons\n\n", agent_id));
-        }
-    }
-}
-
 fn filter_kb_for_repo(raw: &str, repo_full_name: &str) -> String {
     let repo_tag = format!("[{}]", repo_full_name.to_ascii_lowercase());
     let kept: Vec<&str> = raw
@@ -891,40 +854,99 @@ fn filter_kb_for_repo(raw: &str, repo_full_name: &str) -> String {
     kept.join("\n")
 }
 
-/// Loads Code Tender's dedicated Knowledge Base (`patterns-fixed`, `check-recipes`, `do-not-repeat` + agent lessons).
+pub fn read_merged_tender_kb_file(
+    workspace_root: &Path,
+    committed_rel: &str,
+    overlay_rel: &str,
+) -> String {
+    let base_raw = fs::read_to_string(workspace_root.join(committed_rel)).unwrap_or_default();
+    let overlay_raw =
+        fs::read_to_string(runtime_kb_root(workspace_root).join(overlay_rel)).unwrap_or_default();
+    merge_kb_markdown(&base_raw, &overlay_raw)
+}
+
+pub fn load_tender_agent_lessons(workspace_root: &Path, agent_id: &str) -> String {
+    read_merged_tender_kb_file(
+        workspace_root,
+        &format!("tender-agents/{agent_id}/kb/lessons.md"),
+        &format!("tender/{agent_id}/lessons.md"),
+    )
+}
+
+pub fn save_tender_agent_lessons(
+    workspace_root: &Path,
+    agent_id: &str,
+    content: &str,
+) -> Result<(), String> {
+    if !TENDER_AGENTS.contains(&agent_id) {
+        return Err(format!("unknown tender agent `{}`", agent_id));
+    }
+    let committed_path = workspace_root
+        .join("tender-agents")
+        .join(agent_id)
+        .join("kb/lessons.md");
+    let base_raw = fs::read_to_string(committed_path).unwrap_or_default();
+    let stripped = strip_committed_kb_lines(&base_raw, content);
+    let overlay_path = runtime_kb_root(workspace_root)
+        .join("tender")
+        .join(agent_id)
+        .join("lessons.md");
+    write_private_kb_file(&overlay_path, &stripped, false).map_err(|e| e.to_string())
+}
+
+/// Loads Code Tender's dedicated Knowledge Base (`patterns-fixed`, `check-recipes`, `do-not-repeat` + agent lessons),
+/// merging committed universal rules with the private runtime KB overlay in `<state_dir>/kb/tender/`.
 pub fn load_tender_kb_bundle(
     workspace_root: &Path,
     agent_id: &str,
     repo_full_name: &str,
 ) -> String {
-    ensure_tender_kb_scaffold(workspace_root);
-    let root = workspace_root.join("tender-agents");
     let sections = [
-        ("Verified Fix Patterns", root.join("kb/patterns-fixed.md")),
-        ("Local Check Recipes", root.join("kb/check-recipes.md")),
-        ("Do-Not-Repeat Guardrails", root.join("kb/do-not-repeat.md")),
+        (
+            "Verified Fix Patterns",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/patterns-fixed.md",
+                "tender/kb/patterns-fixed.md",
+            ),
+        ),
+        (
+            "Local Check Recipes",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/check-recipes.md",
+                "tender/kb/check-recipes.md",
+            ),
+        ),
+        (
+            "Do-Not-Repeat Guardrails",
+            read_merged_tender_kb_file(
+                workspace_root,
+                "tender-agents/kb/do-not-repeat.md",
+                "tender/kb/do-not-repeat.md",
+            ),
+        ),
         (
             "Agent-Specific Lessons",
-            root.join(agent_id).join("kb/lessons.md"),
+            load_tender_agent_lessons(workspace_root, agent_id),
         ),
     ];
 
     let mut out = String::new();
-    for (title, path) in sections {
-        if let Ok(raw) = fs::read_to_string(&path) {
-            let filtered = filter_kb_for_repo(&raw, repo_full_name);
-            if !filtered.trim().is_empty() {
-                out.push_str(&format!(
-                    "### {title}\n{}\n\n",
-                    truncate_chars(filtered.trim(), 3_000)
-                ));
-            }
+    for (title, raw) in sections {
+        let filtered = filter_kb_for_repo(&raw, repo_full_name);
+        if !filtered.trim().is_empty() {
+            out.push_str(&format!(
+                "### {title}\n{}\n\n",
+                truncate_chars(filtered.trim(), 3_000)
+            ));
         }
     }
     out
 }
 
-/// Appends a deduplicated rule line into Code Tender's KB (`patterns-fixed`, `check-recipes`, `do-not-repeat`, or `agent-lesson`).
+/// Appends a deduplicated rule line into Code Tender's private runtime KB overlay
+/// (`patterns-fixed`, `check-recipes`, `do-not-repeat`, or `agent-lesson`).
 /// Returns `Ok(true)` if newly added, `Ok(false)` if an identical rule already existed.
 pub fn append_tender_kb_entry(
     workspace_root: &Path,
@@ -936,31 +958,33 @@ pub fn append_tender_kb_entry(
     if clean_rule.is_empty() {
         return Ok(false);
     }
-    ensure_tender_kb_scaffold(workspace_root);
 
-    let path = match target {
-        "patterns-fixed" | "patterns_fixed" => {
-            workspace_root.join("tender-agents/kb/patterns-fixed.md")
-        }
-        "check-recipes" | "check_recipes" => {
-            workspace_root.join("tender-agents/kb/check-recipes.md")
-        }
-        "do-not-repeat" | "do_not_repeat" => {
-            workspace_root.join("tender-agents/kb/do-not-repeat.md")
-        }
+    let (committed_rel, overlay_rel) = match target {
+        "patterns-fixed" | "patterns_fixed" => (
+            "tender-agents/kb/patterns-fixed.md".to_string(),
+            "tender/kb/patterns-fixed.md".to_string(),
+        ),
+        "check-recipes" | "check_recipes" => (
+            "tender-agents/kb/check-recipes.md".to_string(),
+            "tender/kb/check-recipes.md".to_string(),
+        ),
+        "do-not-repeat" | "do_not_repeat" => (
+            "tender-agents/kb/do-not-repeat.md".to_string(),
+            "tender/kb/do-not-repeat.md".to_string(),
+        ),
         "agent-lesson" | "agent_lesson" => {
             let agent = target_agent
                 .filter(|a| TENDER_AGENTS.contains(a))
                 .unwrap_or("02-tender-fixer");
-            workspace_root
-                .join("tender-agents")
-                .join(agent)
-                .join("kb/lessons.md")
+            (
+                format!("tender-agents/{agent}/kb/lessons.md"),
+                format!("tender/{agent}/lessons.md"),
+            )
         }
         other => return Err(format!("unknown tender KB target `{}`", other)),
     };
 
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_merged_tender_kb_file(workspace_root, &committed_rel, &overlay_rel);
     let norm_new = clean_rule.to_ascii_lowercase();
     let norm_new_stripped = norm_new.trim_start_matches("- ").trim();
     if existing.lines().any(|line| {
@@ -979,22 +1003,28 @@ pub fn append_tender_kb_entry(
     } else {
         format!("- {}", clean_rule)
     };
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let overlay_path = runtime_kb_root(workspace_root).join(overlay_rel);
+    write_private_kb_file(&overlay_path, &format!("{formatted}\n"), true)
         .map_err(|e| e.to_string())?;
-    use std::io::Write as _;
-    writeln!(file, "{}", formatted).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
 pub fn load_tender_kb_payload(workspace_root: &Path) -> serde_json::Value {
-    ensure_tender_kb_scaffold(workspace_root);
-    let root = workspace_root.join("tender-agents");
-    let patterns_fixed = fs::read_to_string(root.join("kb/patterns-fixed.md")).unwrap_or_default();
-    let check_recipes = fs::read_to_string(root.join("kb/check-recipes.md")).unwrap_or_default();
-    let do_not_repeat = fs::read_to_string(root.join("kb/do-not-repeat.md")).unwrap_or_default();
+    let patterns_fixed = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/patterns-fixed.md",
+        "tender/kb/patterns-fixed.md",
+    );
+    let check_recipes = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/check-recipes.md",
+        "tender/kb/check-recipes.md",
+    );
+    let do_not_repeat = read_merged_tender_kb_file(
+        workspace_root,
+        "tender-agents/kb/do-not-repeat.md",
+        "tender/kb/do-not-repeat.md",
+    );
     serde_json::json!({
         "patterns_fixed": patterns_fixed,
         "check_recipes": check_recipes,
@@ -1007,14 +1037,25 @@ pub fn save_tender_kb_file(
     file_key: &str,
     content: &str,
 ) -> Result<(), String> {
-    ensure_tender_kb_scaffold(workspace_root);
-    let rel = match file_key {
-        "patterns-fixed" => "tender-agents/kb/patterns-fixed.md",
-        "check-recipes" => "tender-agents/kb/check-recipes.md",
-        "do-not-repeat" => "tender-agents/kb/do-not-repeat.md",
+    let (committed_rel, overlay_rel) = match file_key {
+        "patterns-fixed" => (
+            "tender-agents/kb/patterns-fixed.md",
+            "tender/kb/patterns-fixed.md",
+        ),
+        "check-recipes" => (
+            "tender-agents/kb/check-recipes.md",
+            "tender/kb/check-recipes.md",
+        ),
+        "do-not-repeat" => (
+            "tender-agents/kb/do-not-repeat.md",
+            "tender/kb/do-not-repeat.md",
+        ),
         _ => return Err(format!("invalid tender KB key `{}`", file_key)),
     };
-    fs::write(workspace_root.join(rel), content).map_err(|e| e.to_string())
+    let base_raw = fs::read_to_string(workspace_root.join(committed_rel)).unwrap_or_default();
+    let stripped = strip_committed_kb_lines(&base_raw, content);
+    let overlay_path = runtime_kb_root(workspace_root).join(overlay_rel);
+    write_private_kb_file(&overlay_path, &stripped, false).map_err(|e| e.to_string())
 }
 
 /// Synchronizes open PR snapshots from GitHub into `store.tender_pull_requests`:
@@ -1028,18 +1069,23 @@ pub fn sync_watched_prs_from_snapshots(
     state_dir: &Path,
     snapshots: &[TenderPrSnapshot],
 ) -> Result<(), String> {
-    sync_watched_prs_from_snapshots_with_gh(cfg, repo_cfg, state_dir, None, snapshots)
+    sync_watched_prs_from_snapshots_with_gh(cfg, repo_cfg, state_dir, None, snapshots, None)
 }
 
 /// Synchronizes open PR snapshots AND auto-resolves any unresolved GitHub review threads where
 /// we (the PR author or Code Tender) already left a reply addressing the concern or linking an issue,
 /// ensuring addressed/issue-tracked threads never remain stuck as `Needs Input` (`NeedsHuman`).
+///
+/// `open_pr_numbers` is the complete GitHub open-PR list for the repo (including PRs filtered out of
+/// `snapshots`); pass `Some` only when Stage-1 paging finished. With `None`, completeness falls back to
+/// the legacy `snapshots.len() < 25` heuristic.
 pub fn sync_watched_prs_from_snapshots_with_gh(
     cfg: &WorkspaceConfig,
     repo_cfg: &WatchedRepoConfig,
     state_dir: &Path,
     gh: Option<&GitHubClient>,
     snapshots: &[TenderPrSnapshot],
+    open_pr_numbers: Option<&[u64]>,
 ) -> Result<(), String> {
     // 1. Outside the file spinlock, resolve any unresolved GitHub review threads on watched PRs
     //    whose latest reply was authored by us (PR author or Code Tender).
@@ -1092,8 +1138,14 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
         }
     }
 
-    let open_nums: BTreeSet<u64> = snapshots.iter().map(|s| s.pr_number).collect();
-    let complete_open_window = snapshots.len() < 25;
+    let mut open_nums: BTreeSet<u64> = snapshots.iter().map(|s| s.pr_number).collect();
+    let complete_open_window = match open_pr_numbers {
+        Some(all_open) => {
+            open_nums.extend(all_open.iter().copied());
+            true
+        }
+        None => snapshots.len() < 25,
+    };
     LedgerStore::with_exclusive_lock(state_dir, |store| {
         if complete_open_window {
             for tpr in store.tender_pull_requests.values_mut() {
@@ -1101,10 +1153,7 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                     && !open_nums.contains(&tpr.pr_number)
                 {
                     tpr.is_open = false;
-                    tpr.open_feedback_count = 0;
-                    tpr.staged_patch = None;
-                    tpr.staged_commit_message = None;
-                    tpr.pending_items.clear();
+                    clear_staged_state(tpr);
                     prune_non_actionable_handled_items(tpr, false);
                 }
             }
@@ -1150,12 +1199,37 @@ pub fn sync_watched_prs_from_snapshots_with_gh(
                 existing.head_ref = snap.head_ref.clone();
                 existing.base_ref = snap.base_ref.clone();
                 existing.head_sha = Some(snap.head_sha.clone());
-                existing.open_feedback_count = actionable_count;
+                // Open-but-ineligible PRs (draft, fork, disallowed author) must not keep a
+                // staged patch that could still be approved or pushed. An explicitly watched PR
+                // stays eligible when no per-repo allowlist is set, mirroring
+                // `partition_tender_open_pr_headers` (blank/"unknown" authors never qualify).
+                let author = snap.author.trim();
+                let watched_override = existing.watched
+                    && repo_cfg.tender_allowed_authors.is_empty()
+                    && !author.is_empty()
+                    && !author.eq_ignore_ascii_case("unknown");
+                let eligible = repo_cfg.tender_enabled
+                    && !snap.is_draft
+                    && !snap.is_fork
+                    && (cfg.is_tender_author_allowed(repo_cfg, &snap.author) || watched_override);
+                if eligible {
+                    existing.open_feedback_count = actionable_count;
+                } else {
+                    clear_staged_state(existing);
+                }
                 reconcile_pr_handled_items_and_status(existing, snap, &newly_resolved_threads);
             }
         }
     })
     .map_err(|e| e.to_string())
+}
+
+/// Drops any staged patch, pending items, and the open feedback count for a PR.
+fn clear_staged_state(tpr: &mut TenderPrState) {
+    tpr.open_feedback_count = 0;
+    tpr.staged_patch = None;
+    tpr.staged_commit_message = None;
+    tpr.pending_items.clear();
 }
 
 fn prune_non_actionable_handled_items(tpr: &mut TenderPrState, has_inline_threads: bool) {
@@ -1170,12 +1244,17 @@ fn prune_non_actionable_handled_items(tpr: &mut TenderPrState, has_inline_thread
             if sum_trim == "</details>" || author_lc.contains("codex") {
                 return false;
             }
-            if author_lc.contains("cubic")
-                && (has_inline_threads
-                    || h.summary.contains("No issues found")
-                    || h.summary.contains("All reported issues were addressed"))
-            {
-                return false;
+            if author_lc.contains("cubic") {
+                let sum_lc = sum_trim.to_ascii_lowercase();
+                if has_inline_threads
+                    || sum_lc.contains("no issues found")
+                    || sum_lc.contains("0 issues found")
+                    || sum_lc.contains("no actionable issues")
+                    || sum_lc.contains("all reported issues were addressed")
+                    || sum_lc.contains("all issues were addressed")
+                {
+                    return false;
+                }
             }
         }
         true
@@ -1680,10 +1759,28 @@ fn concise_ui_snippet(raw: &str, max_chars: usize) -> String {
     }
 }
 
+pub fn load_tender_agent_notes(workspace_root: &Path, agent_id: &str) -> String {
+    let base_notes = fs::read_to_string(
+        workspace_root
+            .join("tender-agents")
+            .join(agent_id)
+            .join("notes.md"),
+    )
+    .unwrap_or_default();
+    let overlay_notes = fs::read_to_string(
+        runtime_kb_root(workspace_root)
+            .join("tender")
+            .join(agent_id)
+            .join("notes.md"),
+    )
+    .unwrap_or_default();
+    merge_kb_markdown(&base_notes, &overlay_notes)
+}
+
 pub fn load_tender_agent_prompt(workspace_root: &Path, agent_id: &str) -> String {
     let dir = workspace_root.join("tender-agents").join(agent_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap_or_default();
-    let notes = fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+    let notes = load_tender_agent_notes(workspace_root, agent_id);
     if notes.trim().is_empty() {
         prompt
     } else {
@@ -1700,13 +1797,26 @@ pub fn save_tender_agent_notes(
     if !TENDER_AGENTS.contains(&agent_id) {
         return Err(format!("unknown tender agent `{}`", agent_id));
     }
-    let dir = workspace_root.join("tender-agents").join(agent_id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     if let Some(p) = prompt {
+        let dir = workspace_root.join("tender-agents").join(agent_id);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         fs::write(dir.join("PROMPT.md"), p).map_err(|e| e.to_string())?;
     }
     if let Some(n) = notes {
-        fs::write(dir.join("notes.md"), n).map_err(|e| e.to_string())?;
+        let committed_notes = fs::read_to_string(
+            workspace_root
+                .join("tender-agents")
+                .join(agent_id)
+                .join("notes.md"),
+        )
+        .unwrap_or_default();
+        // Keep committed lines out of the private overlay, like the lessons and KB save paths.
+        let stripped = strip_committed_kb_lines(&committed_notes, n);
+        let overlay_path = runtime_kb_root(workspace_root)
+            .join("tender")
+            .join(agent_id)
+            .join("notes.md");
+        write_private_kb_file(&overlay_path, &stripped, false).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -3316,9 +3426,8 @@ fn install_worktree_js_deps_if_lockfile_diverged(local_checkout: Option<&Path>, 
     };
     cmd.current_dir(workdir)
         .env("CI", "1")
-        .env("PATH", merged_path)
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN");
+        .env("PATH", merged_path);
+    crate::brains::strip_github_credentials(&mut cmd);
     let _ = run_command_with_timeout(cmd, Duration::from_secs(300), "worktree-js-deps");
     #[cfg(unix)]
     if workdir.join("node_modules").exists() {
@@ -3559,9 +3668,8 @@ fn run_local_check_gate(
         .env("PATH", merged_path)
         .env("CI", "1")
         .env("VITEST_MAX_WORKERS", "2")
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
     if let Some(target_dir) = cargo_target_dir {
         cmd.env("CARGO_TARGET_DIR", target_dir);
     }
@@ -3652,9 +3760,8 @@ fn invoke_tender_cli(
     // Security invariant: strip GitHub auth tokens from child LLM agent processes so prompt injection can never read them.
     cmd.current_dir(workdir)
         .env("PATH", build_workdir_path(workdir))
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
 
     let output = run_command_with_timeout(
         cmd,
@@ -4124,6 +4231,9 @@ gdocs_bin = "gdocs"
             local_check_cmd: None,
             enabled: false,
             tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
         };
 
         let snaps = vec![
@@ -4174,6 +4284,340 @@ gdocs_bin = "gdocs"
         assert!(!ledger2.tender_pull_requests["acme/web#11"].is_open);
 
         let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn sync_watched_prs_keeps_open_prs_missing_from_eligible_snapshots() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_open_set_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
+        };
+        let snap = |n: u64| TenderPrSnapshot {
+            pr_number: n,
+            title: format!("PR {n}"),
+            author: cfg.accounts.primary.clone(),
+            is_draft: false,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: format!("feat/{n}"),
+            head_sha: format!("sha{n}"),
+            feedback_items: Vec::new(),
+        };
+
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(10), snap(11)])
+            .unwrap();
+
+        // #11 is still open on GitHub but filtered out of the eligible snapshots.
+        sync_watched_prs_from_snapshots_with_gh(
+            &cfg,
+            &repo_cfg,
+            &state_dir,
+            None,
+            &[snap(10)],
+            Some(&[10, 11]),
+        )
+        .unwrap();
+        let kept = LedgerStore::load_or_default(&state_dir).unwrap();
+        assert!(kept.tender_pull_requests["acme/web#11"].is_open);
+
+        // Once #11 disappears from the complete open list it is closed.
+        sync_watched_prs_from_snapshots_with_gh(
+            &cfg,
+            &repo_cfg,
+            &state_dir,
+            None,
+            &[snap(10)],
+            Some(&[10]),
+        )
+        .unwrap();
+        let closed = LedgerStore::load_or_default(&state_dir).unwrap();
+        assert!(!closed.tender_pull_requests["acme/web#11"].is_open);
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn sync_watched_prs_clears_staged_state_for_open_ineligible_prs() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_ineligible_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
+        };
+        let snap = |is_draft: bool| TenderPrSnapshot {
+            pr_number: 20,
+            title: "Add billing".to_string(),
+            author: cfg.accounts.primary.clone(),
+            is_draft,
+            is_fork: false,
+            base_ref: "main".to_string(),
+            head_ref: "feat/billing".to_string(),
+            head_sha: "aaa1111".to_string(),
+            feedback_items: Vec::new(),
+        };
+        let seed_staged_state = || {
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                if let Some(tpr) = store.tender_pull_requests.get_mut("acme/web#20") {
+                    tpr.staged_patch = Some("diff --git a/x b/x".to_string());
+                    tpr.staged_commit_message = Some("fix: x".to_string());
+                    tpr.pending_items.push(TenderHandledItem {
+                        feedback_id: "thread:PRRT_1:100".to_string(),
+                        source_author: "cubic-dev-ai".to_string(),
+                        path: Some("src/x.rs".to_string()),
+                        line: Some(1),
+                        thread_node_id: Some("PRRT_1".to_string()),
+                        reply_comment_id: Some(100),
+                        summary: "P2: fix x".to_string(),
+                        action: TenderActionStatus::Fixed,
+                        reply_text: "Fixed".to_string(),
+                        commit_sha: None,
+                        issue_number: None,
+                        issue_url: None,
+                        draft_issue_title: None,
+                        draft_issue_body: None,
+                        resolved_thread: false,
+                        reply_posted: false,
+                    });
+                    tpr.open_feedback_count = 1;
+                }
+            })
+            .unwrap();
+        };
+
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(false)]).unwrap();
+
+        // Eligible snapshot leaves staged state intact.
+        seed_staged_state();
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(false)]).unwrap();
+        let kept = LedgerStore::load_or_default(&state_dir).unwrap();
+        let tpr = &kept.tender_pull_requests["acme/web#20"];
+        assert!(tpr.staged_patch.is_some());
+        assert!(tpr.staged_commit_message.is_some());
+        assert_eq!(tpr.pending_items.len(), 1);
+
+        // PR turns draft while still open: staged state is cleared, PR stays open.
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg, &state_dir, &[snap(true)]).unwrap();
+        let cleared = LedgerStore::load_or_default(&state_dir).unwrap();
+        let tpr = &cleared.tender_pull_requests["acme/web#20"];
+        assert!(tpr.is_open);
+        assert!(tpr.staged_patch.is_none());
+        assert!(tpr.staged_commit_message.is_none());
+        assert!(tpr.pending_items.is_empty());
+        assert_eq!(tpr.open_feedback_count, 0);
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn sync_watched_override_keeps_staged_state_only_without_allowlist() {
+        use crate::config::{AccountPolicy, ReviewEventPolicy};
+        let state_dir =
+            std::env::temp_dir().join(format!("otto_sync_watched_override_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state_dir);
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg: WorkspaceConfig = toml::from_str(
+            r#"
+[accounts]
+primary = "alice-dev"
+secondary = "bob-reviewer"
+tokens_dir = "~/.code-reviewer/tokens"
+[agents]
+primary_runner = "claude"
+verifier_runner = "agy"
+allow_single_runner_fallback = true
+[gdrive]
+enabled = false
+root_folder_id = ""
+living_docs_folder_id = ""
+gdrive_bin = "gdrive"
+gdocs_bin = "gdocs"
+"#,
+        )
+        .unwrap();
+        let repo_cfg = |allowed: &[&str]| WatchedRepoConfig {
+            full_name: "acme/web".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Swap,
+            forced_account: None,
+            review_event_policy: ReviewEventPolicy::FormalVerdict,
+            gdrive_folder_id: None,
+            local_repo_path: None,
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: allowed.iter().map(ToString::to_string).collect(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
+        };
+        let snap = |is_draft: bool, is_fork: bool| TenderPrSnapshot {
+            pr_number: 30,
+            title: "External change".to_string(),
+            author: "outside-dev".to_string(),
+            is_draft,
+            is_fork,
+            base_ref: "main".to_string(),
+            head_ref: "feat/external".to_string(),
+            head_sha: "ccc3333".to_string(),
+            feedback_items: Vec::new(),
+        };
+        // Seeds an explicitly watched PR (as `tender watch` would) carrying staged state.
+        let seed_watched_staged = || {
+            LedgerStore::with_exclusive_lock(&state_dir, |store| {
+                let mut tpr = TenderPrState::new(
+                    "acme/web",
+                    30,
+                    "External change",
+                    "outside-dev",
+                    "main",
+                    "feat/external",
+                );
+                tpr.watched = true;
+                tpr.is_open = true;
+                tpr.staged_patch = Some("diff --git a/x b/x".to_string());
+                tpr.staged_commit_message = Some("fix: x".to_string());
+                tpr.open_feedback_count = 1;
+                store
+                    .tender_pull_requests
+                    .insert("acme/web#30".to_string(), tpr);
+            })
+            .unwrap();
+        };
+        let staged_patch_kept = || {
+            LedgerStore::load_or_default(&state_dir)
+                .unwrap()
+                .tender_pull_requests["acme/web#30"]
+                .staged_patch
+                .is_some()
+        };
+
+        // Watched, no allowlist: the override keeps the staged patch.
+        seed_watched_staged();
+        sync_watched_prs_from_snapshots(&cfg, &repo_cfg(&[]), &state_dir, &[snap(false, false)])
+            .unwrap();
+        assert!(staged_patch_kept());
+
+        // Watched, but an allowlist excludes the author: the override is rejected.
+        seed_watched_staged();
+        sync_watched_prs_from_snapshots(
+            &cfg,
+            &repo_cfg(&["alice-dev"]),
+            &state_dir,
+            &[snap(false, false)],
+        )
+        .unwrap();
+        assert!(!staged_patch_kept());
+
+        // Watched drafts and forks are cleared even without an allowlist.
+        for (is_draft, is_fork) in [(true, false), (false, true)] {
+            seed_watched_staged();
+            sync_watched_prs_from_snapshots(
+                &cfg,
+                &repo_cfg(&[]),
+                &state_dir,
+                &[snap(is_draft, is_fork)],
+            )
+            .unwrap();
+            assert!(!staged_patch_kept());
+        }
+
+        let _ = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn save_tender_agent_notes_strips_committed_lines_from_overlay() {
+        let ws = std::env::temp_dir().join(format!("otto_agent_notes_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        let agent = TENDER_AGENTS[0];
+        let agent_dir = ws.join("tender-agents").join(agent);
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("notes.md"), "- committed rule\n").unwrap();
+
+        save_tender_agent_notes(&ws, agent, None, Some("- committed rule\n- private rule\n"))
+            .unwrap();
+
+        let overlay = fs::read_to_string(
+            runtime_kb_root(&ws)
+                .join("tender")
+                .join(agent)
+                .join("notes.md"),
+        )
+        .unwrap();
+        assert_eq!(overlay, "- private rule\n");
+        let _ = fs::remove_dir_all(&ws);
     }
 
     #[test]

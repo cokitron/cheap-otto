@@ -3,7 +3,8 @@
 //! and post-merge Living Documentation engine.
 
 use crate::config::{
-    AgentsConfig, CliRunner, WorkspaceConfig, expand_tilde, home_dir, repo_fs_slug,
+    AgentsConfig, CliRunner, WorkspaceConfig, expand_tilde, home_dir, merge_kb_markdown,
+    repo_fs_slug, runtime_kb_root, write_private_kb_file,
 };
 use crate::github::{DetailedOpenPr, MergedPrEvent};
 use crate::state::{
@@ -789,7 +790,44 @@ pub fn update_living_docs_on_merge(
     Ok(())
 }
 
-/// Appends a new structured entry to a brain's isolated Knowledge Base (`lessons.md`, `false-positives.md`, or `exemplars.md`).
+/// Reads a review brain's KB file by merging the committed universal starter rules in `brains/<id>/kb/`
+/// with any private runtime overlay in `<state_dir>/kb/brains/<id>/` (never dirtying git-tracked files).
+pub fn load_brain_kb_section(workspace_root: &Path, brain_id: &str, filename: &str) -> String {
+    let committed = workspace_root
+        .join("brains")
+        .join(brain_id)
+        .join("kb")
+        .join(filename);
+    let overlay = runtime_kb_root(workspace_root)
+        .join("brains")
+        .join(brain_id)
+        .join(filename);
+    let base_raw = fs::read_to_string(committed).unwrap_or_default();
+    let overlay_raw = fs::read_to_string(overlay).unwrap_or_default();
+    merge_kb_markdown(&base_raw, &overlay_raw)
+}
+
+/// Normalizes a KB line to its comparable body: strips the `- ` bullet and `**[date]** ` prefix, trims, lowercases.
+/// Equality (not substring) on this body keeps short rules from being swallowed by longer existing ones.
+fn kb_line_body(line: &str) -> String {
+    let t = line.trim();
+    let t = t.strip_prefix("- ").unwrap_or(t);
+    let t = if t.starts_with("**[") {
+        t.split_once("]**").map_or(t, |(_, rest)| rest)
+    } else {
+        t
+    };
+    t.trim().to_ascii_lowercase()
+}
+
+/// Removes inherited GitHub credentials so LLM CLIs (and their tools) never hold repo-scoped tokens.
+pub(crate) fn strip_github_credentials(cmd: &mut Command) {
+    cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
+}
+
+/// Appends a new structured entry to a brain's private runtime Knowledge Base overlay
+/// (`~/.code-reviewer/kb/brains/<brain_id>/<filename>`) so learned rules survive `m1 sync`
+/// and never leak private repository identifiers into git-tracked files.
 pub fn append_kb_entry(
     workspace_root: &Path,
     brain_id: &str,
@@ -813,21 +851,29 @@ pub fn append_kb_entry(
         "exemplar" | "exemplars" => "exemplars.md",
         _ => "lessons.md",
     };
-    let path = workspace_root
+    let clean_rule = rule_text.trim();
+    let path = runtime_kb_root(workspace_root)
         .join("brains")
         .join(brain_id)
-        .join("kb")
         .join(filename);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    if clean_rule.is_empty() {
+        return Ok(path);
     }
-    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-    writeln!(
-        f,
-        "- **[{}]** {}",
-        Utc::now().format("%Y-%m-%d"),
-        rule_text.trim()
-    )?;
+
+    // Serialize read, dedup check and append per overlay so concurrent writers cannot add duplicates.
+    // The `.lock` suffix keeps the file out of the KB merge, which only reads named `*.md` files.
+    let _kb_lock = acquire_file_spinlock(
+        &path.with_file_name(format!("{filename}.lock")),
+        Duration::from_secs(10),
+    );
+    let merged_existing = load_brain_kb_section(workspace_root, brain_id, filename);
+    let needle = kb_line_body(clean_rule);
+    if merged_existing.lines().any(|l| kb_line_body(l) == needle) {
+        return Ok(path);
+    }
+
+    let entry = format!("- **[{}]** {}\n", Utc::now().format("%Y-%m-%d"), clean_rule);
+    write_private_kb_file(&path, &entry, true)?;
     Ok(path)
 }
 
@@ -1174,9 +1220,9 @@ fn build_re_review_prompt(
 fn load_brain_prompt_and_kb(workspace_root: &Path, brain_id: &str) -> Result<String, BrainError> {
     let dir = workspace_root.join("brains").join(brain_id);
     let prompt = fs::read_to_string(dir.join("PROMPT.md"))?;
-    let lessons = fs::read_to_string(dir.join("kb").join("lessons.md")).unwrap_or_default();
-    let fps = fs::read_to_string(dir.join("kb").join("false-positives.md")).unwrap_or_default();
-    let exemplars = fs::read_to_string(dir.join("kb").join("exemplars.md")).unwrap_or_default();
+    let lessons = load_brain_kb_section(workspace_root, brain_id, "lessons.md");
+    let fps = load_brain_kb_section(workspace_root, brain_id, "false-positives.md");
+    let exemplars = load_brain_kb_section(workspace_root, brain_id, "exemplars.md");
 
     Ok(format!(
         "{prompt}\n\n\
@@ -1355,6 +1401,7 @@ pub fn is_runner_authenticated(runner: CliRunner) -> bool {
         CliRunner::Claude => {
             let mut cmd = Command::new(claude_binary());
             cmd.args(["auth", "status"]).stdin(Stdio::null());
+            strip_github_credentials(&mut cmd);
             let Ok(out) = run_command_with_timeout(
                 cmd,
                 Duration::from_secs(AUTH_PROBE_TIMEOUT_SECS),
@@ -1369,6 +1416,7 @@ pub fn is_runner_authenticated(runner: CliRunner) -> bool {
             // Fast zero-token model catalog probe with hard wall-clock timeout.
             let mut cmd = Command::new(agy_binary());
             cmd.args(["models"]).stdin(Stdio::null());
+            strip_github_credentials(&mut cmd);
             let Ok(out) = run_command_with_timeout(
                 cmd,
                 Duration::from_secs(AUTH_PROBE_TIMEOUT_SECS),
@@ -1449,6 +1497,7 @@ fn invoke_agent_cli(
     };
 
     cmd.current_dir(workdir).stdin(Stdio::null());
+    strip_github_credentials(&mut cmd);
     let output = run_command_with_timeout(
         cmd,
         Duration::from_secs(AGENT_REVIEW_TIMEOUT_SECS),
@@ -1846,5 +1895,86 @@ mod tests {
         assert_eq!(parsed.summary, "triaged 2 items");
         assert_eq!(parsed.items.len(), 2);
         assert_eq!(parsed.items[0].feedback_id, "fb-1");
+    }
+
+    #[test]
+    fn append_kb_entry_dedupes_on_line_body_equality_not_substring() -> Result<(), BrainError> {
+        let ws = std::env::temp_dir().join(format!("otto_kb_dedupe_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        let brain = SPECIALIST_BRAINS[0];
+
+        let path = append_kb_entry(
+            &ws,
+            brain,
+            "lesson",
+            "Always validate input at the boundary",
+        )?;
+        // Substring of the stored line must still be added.
+        append_kb_entry(&ws, brain, "lesson", "validate input")?;
+        // Exact repeat (case-insensitive) must be skipped.
+        append_kb_entry(
+            &ws,
+            brain,
+            "lesson",
+            "ALWAYS validate input at the boundary",
+        )?;
+
+        let stored = fs::read_to_string(&path)?;
+        assert_eq!(
+            stored.lines().count(),
+            2,
+            "unexpected KB contents: {stored}"
+        );
+        assert!(stored.lines().any(|l| l.ends_with("** validate input")));
+        let _ = fs::remove_dir_all(&ws);
+        Ok(())
+    }
+
+    #[test]
+    fn append_kb_entry_concurrent_writers_add_single_bullet() -> Result<(), BrainError> {
+        let ws = std::env::temp_dir().join(format!("otto_kb_concurrent_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        let brain = SPECIALIST_BRAINS[0];
+        let rule = "Serialize KB appends per overlay";
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let ws = ws.clone();
+                std::thread::spawn(move || append_kb_entry(&ws, brain, "lesson", rule))
+            })
+            .collect();
+        let mut path = None;
+        for h in handles {
+            path = Some(h.join().expect("writer thread panicked")?);
+        }
+
+        let path = path.expect("at least one writer ran");
+        let stored = fs::read_to_string(&path)?;
+        let matching = stored
+            .lines()
+            .filter(|l| kb_line_body(l) == kb_line_body(rule))
+            .count();
+        assert_eq!(matching, 1, "unexpected KB contents: {stored}");
+        let _ = fs::remove_dir_all(&ws);
+        Ok(())
+    }
+
+    #[test]
+    fn kb_line_body_strips_bullet_and_date_prefix() {
+        assert_eq!(kb_line_body("- **[2026-01-02]** Foo Bar "), "foo bar");
+        assert_eq!(kb_line_body("Foo Bar"), "foo bar");
+    }
+
+    #[test]
+    fn strip_github_credentials_removes_both_token_vars() {
+        let mut cmd = Command::new("claude");
+        strip_github_credentials(&mut cmd);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(removed.contains(&"GH_TOKEN".to_string()));
+        assert!(removed.contains(&"GITHUB_TOKEN".to_string()));
     }
 }

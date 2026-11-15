@@ -208,6 +208,16 @@ pub struct WatchedRepoConfig {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub tender_enabled: bool,
+    /// Per-repository allowlist of PR author GitHub logins eligible for Code Tender.
+    /// When non-empty, overrides global `tender.allowed_authors` and blocks tending any PR authored by someone else.
+    #[serde(default)]
+    pub tender_allowed_authors: Vec<String>,
+    /// Optional per-repository allowlist of PR author GitHub logins eligible for internal `poll` reviews (`[]` = all authors).
+    #[serde(default)]
+    pub review_allowed_authors: Vec<String>,
+    /// When `true`, internal `poll` skips cross-repository fork PRs (`isCrossRepository == true`).
+    #[serde(default)]
+    pub skip_fork_prs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,9 +365,25 @@ impl WorkspaceConfig {
 
     /// Returns `true` when `pr_author` is permitted for automatic Code Tender handling.
     ///
-    /// Empty `tender.allowed_authors` safely defaults to `[accounts.primary, accounts.secondary]` (plus
-    /// `repo.forced_account` when set) so Code Tender never unexpectedly pushes to external contributors' PRs.
+    /// - Rejects empty or `"unknown"` author logins (fail-closed).
+    /// - When `repo.tender_allowed_authors` is non-empty, enforces that per-repository allowlist strictly
+    ///   (overriding global `tender.allowed_authors` and default accounts).
+    /// - Empty `tender.allowed_authors` safely defaults to `[accounts.primary, accounts.secondary]` (plus
+    ///   `repo.forced_account` when set) so Code Tender never unexpectedly pushes to external contributors' PRs.
     pub fn is_tender_author_allowed(&self, repo: &WatchedRepoConfig, pr_author: &str) -> bool {
+        let author = pr_author.trim();
+        if author.is_empty() || author.eq_ignore_ascii_case("unknown") {
+            return false;
+        }
+        if !repo.tender_allowed_authors.is_empty() {
+            if repo.tender_allowed_authors.iter().any(|a| a.trim() == "*") {
+                return true;
+            }
+            return repo
+                .tender_allowed_authors
+                .iter()
+                .any(|a| a.trim().eq_ignore_ascii_case(author));
+        }
         if self.tender.allowed_authors.iter().any(|a| a.trim() == "*") {
             return true;
         }
@@ -366,14 +392,31 @@ impl WorkspaceConfig {
                 .tender
                 .allowed_authors
                 .iter()
-                .any(|a| a.trim().eq_ignore_ascii_case(pr_author));
+                .any(|a| a.trim().eq_ignore_ascii_case(author));
         }
-        pr_author.eq_ignore_ascii_case(&self.accounts.primary)
-            || pr_author.eq_ignore_ascii_case(&self.accounts.secondary)
+        author.eq_ignore_ascii_case(&self.accounts.primary)
+            || author.eq_ignore_ascii_case(&self.accounts.secondary)
             || repo
                 .forced_account
                 .as_deref()
-                .is_some_and(|f| f.eq_ignore_ascii_case(pr_author))
+                .is_some_and(|f| f.trim().eq_ignore_ascii_case(author))
+    }
+
+    /// Returns `true` when `pr_author` is permitted for automated `code-reviewer poll` runs on `repo`.
+    pub fn is_review_author_allowed(&self, repo: &WatchedRepoConfig, pr_author: &str) -> bool {
+        let _ = self;
+        if repo.review_allowed_authors.is_empty()
+            || repo.review_allowed_authors.iter().any(|a| a.trim() == "*")
+        {
+            return true;
+        }
+        let author = pr_author.trim();
+        if author.is_empty() || author.eq_ignore_ascii_case("unknown") {
+            return false;
+        }
+        repo.review_allowed_authors
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(author))
     }
 
     /// Selects the GitHub Pull Request Review API `event` string (`"COMMENT"`, `"APPROVE"`, or `"REQUEST_CHANGES"`).
@@ -495,6 +538,149 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Resolves the private runtime Knowledge Base overlay root outside git-tracked directories.
+///
+/// - For real `code-reviewer` workspaces (`config/repos.toml` or `config/repos.example.toml` present),
+///   resolves `<state_dir>/kb` (defaulting to `~/.code-reviewer/kb`) so runtime lessons/guardrails
+///   survive `git checkout -B main otto-sync` and never leak private repository names into public commits.
+/// - For isolated temporary directories in unit tests, resolves `<workspace_root>/.runtime-kb` so tests
+///   remain hermetic and never touch the operator's live `~/.code-reviewer/kb`.
+pub fn runtime_kb_root(workspace_root: &Path) -> PathBuf {
+    let config_dir = workspace_root.join("config");
+    if config_dir.join("repos.toml").exists() || config_dir.join("repos.example.toml").exists() {
+        match WorkspaceConfig::load(&config_dir.join("repos.toml")) {
+            Ok(cfg) => return expand_tilde(&cfg.state_dir).join("kb"),
+            // Surface the failure: otherwise KB reads and `kb add` writes silently target the wrong overlay.
+            Err(e) => eprintln!(
+                "warning: failed to load repos.toml ({e}); falling back to ~/.code-reviewer/kb instead of the configured state_dir"
+            ),
+        }
+        return expand_tilde("~/.code-reviewer").join("kb");
+    }
+    workspace_root.join(".runtime-kb")
+}
+
+/// Writes (or appends to) a private runtime KB overlay file, creating its directories first.
+///
+/// On unix the overlay directory is forced to `0700` and the file to `0600` (including pre-existing
+/// overlays) because the overlay may hold private repository names and lessons.
+///
+/// # Errors
+/// Returns any I/O error from creating the directory, writing the file, or setting permissions.
+pub fn write_private_kb_file(path: &Path, contents: &str, append: bool) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).write(true);
+    if append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(contents.as_bytes())
+}
+
+/// Merges a committed starter KB markdown file with a private runtime KB overlay, deduplicating headings and bullets.
+pub fn merge_kb_markdown(committed: &str, runtime_overlay: &str) -> String {
+    let base_trimmed = committed.trim_end();
+    if runtime_overlay.trim().is_empty() {
+        return if base_trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("{base_trimmed}\n")
+        };
+    }
+    if base_trimmed.is_empty() {
+        return format!("{}\n", runtime_overlay.trim_end());
+    }
+
+    let existing_norm: std::collections::BTreeSet<String> = base_trimmed
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches("- ")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut extra_lines = Vec::new();
+    for line in runtime_overlay.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let norm = t.trim_start_matches("- ").trim().to_ascii_lowercase();
+        if existing_norm.contains(&norm) {
+            continue;
+        }
+        extra_lines.push(line);
+    }
+
+    if extra_lines.is_empty() {
+        format!("{base_trimmed}\n")
+    } else {
+        format!("{base_trimmed}\n{}\n", extra_lines.join("\n"))
+    }
+}
+
+/// Strips lines already present in `committed` before persisting operator edits to the private runtime KB overlay.
+pub fn strip_committed_kb_lines(committed: &str, edited_full: &str) -> String {
+    let base_norm: std::collections::BTreeSet<String> = committed
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches("- ")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let kept: Vec<&str> = edited_full
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            if t.is_empty() {
+                return false;
+            }
+            let norm = t.trim_start_matches("- ").trim().to_ascii_lowercase();
+            !base_norm.contains(&norm)
+        })
+        .collect();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", kept.join("\n"))
+    }
+}
+
 /// Parses a GitHub Pull Request URL (`https://github.com/owner/repo/pull/123`) or
 /// shorthand (`owner/repo#123`) into `(normalized_repo_slug, pr_number)`.
 pub fn parse_pr_reference_input(raw: &str) -> Result<(String, u64), String> {
@@ -591,6 +777,9 @@ mod tests {
             local_check_cmd: None,
             enabled: true,
             tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
         };
 
         assert_eq!(
@@ -622,6 +811,9 @@ mod tests {
             local_check_cmd: Some("npm run check".to_string()),
             enabled: true,
             tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
         };
 
         let reviewer = cfg.select_reviewer_account(&org_repo, "alice-dev", Some("alice-dev"));
@@ -651,11 +843,16 @@ mod tests {
             local_check_cmd: None,
             enabled: true,
             tender_enabled: true,
+            tender_allowed_authors: Vec::new(),
+            review_allowed_authors: Vec::new(),
+            skip_fork_prs: false,
         };
 
         assert!(cfg.is_tender_author_allowed(&repo, "alice-dev"));
         assert!(cfg.is_tender_author_allowed(&repo, "BOB-REVIEWER"));
         assert!(!cfg.is_tender_author_allowed(&repo, "random-stranger"));
+        assert!(!cfg.is_tender_author_allowed(&repo, ""));
+        assert!(!cfg.is_tender_author_allowed(&repo, "unknown"));
         assert_eq!(cfg.select_tender_account(&repo, "alice-dev"), "alice-dev");
         assert_eq!(
             cfg.select_tender_account(&repo, "bob-reviewer"),
@@ -664,6 +861,53 @@ mod tests {
 
         cfg.tender.allowed_authors = vec!["*".to_string()];
         assert!(cfg.is_tender_author_allowed(&repo, "random-stranger"));
+        assert!(!cfg.is_tender_author_allowed(&repo, "unknown"));
+    }
+
+    #[test]
+    fn per_repo_tender_and_review_author_allowlists_override_global_accounts() {
+        let mut cfg = sample_config();
+        cfg.tender.allowed_authors = vec!["*".to_string()];
+        let oss_repo = WatchedRepoConfig {
+            full_name: "cokitron/cheap-otto".to_string(),
+            default_branch: "main".to_string(),
+            language: "en".to_string(),
+            account_policy: AccountPolicy::Forced,
+            forced_account: Some("cokitron".to_string()),
+            review_event_policy: ReviewEventPolicy::CommentOnly,
+            gdrive_folder_id: None,
+            local_repo_path: Some("~/otto-workspaces/cheap-otto".to_string()),
+            local_check_cmd: None,
+            enabled: false,
+            tender_enabled: true,
+            tender_allowed_authors: vec!["cokitron".to_string()],
+            review_allowed_authors: vec!["cokitron".to_string()],
+            skip_fork_prs: true,
+        };
+
+        // Per-repo `tender_allowed_authors = ["cokitron"]` strictly rejects primary, secondary, and external contributors!
+        assert!(cfg.is_tender_author_allowed(&oss_repo, "cokitron"));
+        assert!(cfg.is_tender_author_allowed(&oss_repo, "COKITRON"));
+        assert!(!cfg.is_tender_author_allowed(&oss_repo, "alice-dev"));
+        assert!(!cfg.is_tender_author_allowed(&oss_repo, "bob-reviewer"));
+        assert!(!cfg.is_tender_author_allowed(&oss_repo, "external-contributor"));
+
+        assert!(cfg.is_review_author_allowed(&oss_repo, "cokitron"));
+        assert!(!cfg.is_review_author_allowed(&oss_repo, "external-contributor"));
+        assert!(!cfg.is_review_author_allowed(&oss_repo, "unknown"));
+    }
+
+    #[test]
+    fn merges_and_strips_runtime_kb_overlay_without_duplicating_committed_rules() {
+        let committed = "# Code Tender KB\n\n- `[*]` Always run local checks.\n";
+        let overlay = "- `[acme/app]` Normalize line endings.\n- `[*]` Always run local checks.\n";
+        let merged = merge_kb_markdown(committed, overlay);
+        assert_eq!(
+            merged,
+            "# Code Tender KB\n\n- `[*]` Always run local checks.\n- `[acme/app]` Normalize line endings.\n"
+        );
+        let stripped = strip_committed_kb_lines(committed, &merged);
+        assert_eq!(stripped, "- `[acme/app]` Normalize line endings.\n");
     }
 
     #[test]
@@ -698,5 +942,65 @@ mod tests {
             ("acme-org/web-app".to_string(), 42)
         );
         assert!(parse_pr_reference_input("acme-org/web-app").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_kb_file_tightens_existing_overlay_permissions() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("otto_private_kb_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("tender").join("agent");
+        // Pre-existing overlay with loose permissions must be tightened.
+        fs::create_dir_all(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+        let file = dir.join("notes.md");
+        fs::write(&file, "old\n")?;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644))?;
+
+        write_private_kb_file(&file, "new\n", false)?;
+        write_private_kb_file(&file, "more\n", true)?;
+
+        assert_eq!(fs::read_to_string(&file)?, "new\nmore\n");
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_kb_file_creates_new_overlay_with_private_permissions() -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("otto_private_kb_new_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("tender").join("agent");
+        let file = dir.join("notes.md");
+
+        write_private_kb_file(&file, "fresh\n", false)?;
+
+        assert_eq!(fs::read_to_string(&file)?, "fresh\n");
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&file)?.permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_kb_root_falls_back_when_repos_toml_is_unparseable() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("otto_bad_repos_toml_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("config"))?;
+        fs::write(root.join("config/repos.toml"), "not = [valid toml")?;
+
+        let kb = runtime_kb_root(&root);
+        assert!(
+            kb.ends_with(".code-reviewer/kb"),
+            "unexpected fallback {kb:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
     }
 }
