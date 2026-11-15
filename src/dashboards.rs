@@ -147,9 +147,16 @@ impl TryFrom<DashboardSetFields> for DashboardSet {
         }
         let ports: Vec<u16> = fields.services.iter().map(|service| service.port).collect();
         validate_ports(&ports)?;
-        Ok(Self {
-            services: fields.services,
-        })
+        let &[mission_control, pixel_office, reviewer] = ports.as_slice() else {
+            return Err(DashboardError::UnexpectedServices);
+        };
+        // Labels, managers and display names come from the registry, so a payload that
+        // disagrees with it must not select the wrong LaunchAgents in `managed()`.
+        let set = Self::from_ports(mission_control, pixel_office, reviewer);
+        if set.services != fields.services {
+            return Err(DashboardError::UnexpectedServices);
+        }
+        Ok(set)
     }
 }
 
@@ -259,8 +266,9 @@ const SERVICE_PATH_XML: &str = "/opt/homebrew/bin:/usr/local/bin:$HOME_XML/.carg
 /// Returns `None` for the Reviewer, whose LaunchAgent `m1-provision.sh` installs. The text is a
 /// template for an unquoted heredoc in the install script: `$HOME_XML` and, for the Pixel Office,
 /// `$PIXEL_BIN_XML` stay literal, and the Mac's shell fills them with XML-escaped values, because
-/// `launchd` expands no variables. Ports come from `set`. The label is rebuilt from the id, not
-/// read from the set, so no deserialized text can reach the heredoc or the XML.
+/// `launchd` expands no variables. Only `service.id` is read: ports come from `set` and the label
+/// is rebuilt from the id, because `DashboardService` fields are public and a hand-built value
+/// must not put its own text into the heredoc or the XML.
 #[must_use = "the plist template should be written by the install script"]
 pub fn render_service_plist_template(
     service: &DashboardService,
@@ -552,15 +560,54 @@ mod tests {
     }
 
     #[test]
-    fn plist_label_comes_from_the_id_not_from_deserialized_text() -> Result<(), serde_json::Error> {
-        let mut json = serde_json::to_value(DashboardSet::standard())?;
-        let hostile = "x'; rm -rf ~ #$(id)</string><string>-evil";
-        json["services"][0]["launchd_label"] = serde_json::json!(hostile);
-        let set: DashboardSet = serde_json::from_value(json)?;
-        let plist = template(&set, DashboardId::MissionControl);
+    fn plist_label_comes_from_the_id_not_from_the_service_text() -> Result<(), DashboardError> {
+        let set = DashboardSet::standard();
+        let mut service = set
+            .get(DashboardId::MissionControl)
+            .cloned()
+            .ok_or(DashboardError::UnexpectedServices)?;
+        service.launchd_label = "x'; rm -rf ~ #$(id)</string><string>-evil".to_string();
+        service.port = 9999;
+        let plist = render_service_plist_template(&service, &set).unwrap_or_default();
         assert!(plist.contains("<string>com.cheapotto.dashboards.mission-control</string>"));
+        assert!(plist.contains("<string>7420</string>"));
         assert!(!plist.contains("rm -rf"));
         assert!(!plist.contains("$(id)"));
+        assert!(!plist.contains("9999"));
+        Ok(())
+    }
+
+    #[test]
+    fn deserializing_rejects_services_that_differ_from_the_registry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good = serde_json::to_value(DashboardSet::standard())?;
+        let parse = |value: serde_json::Value| serde_json::from_value::<DashboardSet>(value);
+        let message = DashboardError::UnexpectedServices.to_string();
+
+        let mut manager = good.clone();
+        manager["services"][2]["manager"] = serde_json::json!("cheap-otto");
+        let err = parse(manager)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let mut label = good.clone();
+        label["services"][0]["launchd_label"] = serde_json::json!("com.cheapotto.other");
+        let err = parse(label)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let mut name = good.clone();
+        name["services"][1]["display_name"] = serde_json::json!("Renamed");
+        let err = parse(name).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains(&message), "{err}");
+
+        let custom = DashboardSet::with_ports(8420, 8421, 8430)?;
+        let round_trip = parse(serde_json::to_value(&custom)?)?;
+        assert_eq!(round_trip, custom);
         Ok(())
     }
 }
