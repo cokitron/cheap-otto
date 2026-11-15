@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::bridge::PeerNode;
+use crate::command::CommandSpec;
+
 /// Default port of Mission Control (`cheap-otto serve`).
 pub const MISSION_CONTROL_PORT: u16 = 7420;
 /// Default port of the Pixel Office (`pixel-agents`).
@@ -251,6 +254,211 @@ fn managed_label(id: DashboardId) -> String {
     format!("com.cheapotto.{RESERVED_PROJECT_NAME}.{}", id.slug())
 }
 
+// ---------------------------------------------------------------------------------------------
+// Tunnel: the one SSH process that forwards every dashboard port (design 3.5). The process work
+// (spawning, probing ports, reading `tunnel.json`) lives in `src/main.rs`; this part only plans
+// and decides.
+// ---------------------------------------------------------------------------------------------
+
+/// `-o` options every dashboard tunnel carries, in order. [R3.3]
+///
+/// `BatchMode=yes` stops a detached process from hanging on a password prompt and
+/// `ConnectTimeout=10` stops it from hanging on an unreachable host.
+const TUNNEL_SSH_OPTIONS: [&str; 5] = [
+    "ExitOnForwardFailure=yes",
+    "ServerAliveInterval=30",
+    "ServerAliveCountMax=3",
+    "BatchMode=yes",
+    "ConnectTimeout=10",
+];
+
+/// The `-L` value for one port: loopback on the workstation and on the Mac. [R3.3]
+fn loopback_forward(port: u16) -> String {
+    format!("127.0.0.1:{port}:127.0.0.1:{port}")
+}
+
+/// Builds the one SSH tunnel that forwards every dashboard port. [R3.1, R3.3]
+///
+/// `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+/// -o BatchMode=yes -o ConnectTimeout=10 -p <ssh_port> -L 127.0.0.1:P:127.0.0.1:P … <user@host>`,
+/// with one forward per port in set order. Every port is forwarded whether or not its service is
+/// installed. The destination is `user@host`, not the SSH alias, so no `Host` block can add
+/// forwards of its own. The arguments are discrete and no remote command is sent (`-N`), so
+/// nothing here is interpreted by a shell.
+#[must_use = "the tunnel command should be displayed or spawned"]
+pub fn build_tunnel_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec {
+    let ports = set.ports();
+    let mut args = Vec::with_capacity(4 + TUNNEL_SSH_OPTIONS.len() * 2 + ports.len() * 2);
+    args.push("-N".to_string());
+    for option in TUNNEL_SSH_OPTIONS {
+        args.push("-o".to_string());
+        args.push(option.to_string());
+    }
+    args.push("-p".to_string());
+    args.push(peer.ssh_port.to_string());
+    for port in ports {
+        args.push("-L".to_string());
+        args.push(loopback_forward(port));
+    }
+    args.push(peer.ssh_destination());
+    CommandSpec::new(
+        "Forward every dashboard port from the Mac to 127.0.0.1 on this workstation",
+        "ssh",
+        args,
+    )
+}
+
+/// What `tunnel.json` in the state directory records about the tunnel cheap-otto started. [R3.4]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelRecord {
+    /// Process id of the `ssh` process.
+    pub pid: u32,
+    /// Every forwarded port, in set order.
+    pub ports: Vec<u16>,
+    /// The `user@host` the tunnel was opened to.
+    pub destination: String,
+    /// The SSH port the tunnel was opened to.
+    pub ssh_port: u16,
+    /// When the tunnel was started, in seconds since the Unix epoch.
+    pub started_epoch_secs: u64,
+}
+
+/// What to do about the tunnel, given which dashboard ports answer on the workstation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelDecision {
+    /// Every port answers locally and the recorded tunnel is a live ssh process that covers them.
+    AlreadyUp,
+    /// No port answers locally.
+    Start,
+    /// Some ports answer and some do not, or every port answers without a covering recorded
+    /// tunnel (then `held` is every port and `missing` is empty).
+    Conflict {
+        /// Ports that answer locally, in input order.
+        held: Vec<u16>,
+        /// Ports that do not answer locally, in input order.
+        missing: Vec<u16>,
+    },
+}
+
+/// True only when `record` exists, its process is a live ssh process (`ssh_alive`, from
+/// [`command_line_is_recorded_tunnel`]), it was opened to the current peer's `user@host` and SSH
+/// port, and it forwards every port in `set`. A record made for another Mac is never reused.
+/// [R3.2, R3.5]
+#[must_use = "the result decides whether a new tunnel is started"]
+pub fn recorded_tunnel_covers(
+    record: Option<&TunnelRecord>,
+    ssh_alive: bool,
+    set: &DashboardSet,
+    peer: &PeerNode,
+) -> bool {
+    let Some(record) = record else {
+        return false;
+    };
+    ssh_alive
+        && record.destination == peer.ssh_destination()
+        && record.ssh_port == peer.ssh_port
+        && set.ports().iter().all(|port| record.ports.contains(port))
+}
+
+/// Decides between reusing, starting and refusing, from `(port, answers locally)` pairs and the
+/// result of [`recorded_tunnel_covers`]. Every port answering is proof of a tunnel only when the
+/// recorded tunnel covers them; otherwise unrelated listeners hold them. [R3.2, R3.5]
+#[must_use = "the decision says whether to start, reuse or refuse a tunnel"]
+pub fn decide_tunnel(local_ports: &[(u16, bool)], recorded_tunnel_covers: bool) -> TunnelDecision {
+    let ports_where = |wanted: bool| -> Vec<u16> {
+        local_ports
+            .iter()
+            .filter(|(_, answers)| *answers == wanted)
+            .map(|(port, _)| *port)
+            .collect()
+    };
+    let held = ports_where(true);
+    let missing = ports_where(false);
+    if held.is_empty() {
+        TunnelDecision::Start
+    } else if missing.is_empty() && recorded_tunnel_covers {
+        TunnelDecision::AlreadyUp
+    } else {
+        TunnelDecision::Conflict { held, missing }
+    }
+}
+
+/// Why a freshly started tunnel did not come up. [R3.6]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelFailure {
+    /// The ssh process exited before every forward answered.
+    ExitedEarly {
+        /// The exit status as the OS reported it.
+        status: String,
+    },
+    /// The ssh process was still running, but not every forward answered in time.
+    TimedOut {
+        /// How long the shell waited.
+        waited_secs: u64,
+    },
+}
+
+/// One failure message for both kinds: what happened, every port that did not answer, and, last,
+/// the command that tests SSH by hand. [R3.6]
+#[must_use = "the failure message should be reported to the operator"]
+pub fn describe_tunnel_failure(
+    failure: &TunnelFailure,
+    unanswered: &[u16],
+    ssh_test_command: &str,
+) -> String {
+    let what = match failure {
+        TunnelFailure::ExitedEarly { status } => {
+            format!("The SSH tunnel exited before opening every forward ({status}).")
+        }
+        TunnelFailure::TimedOut { waited_secs } => {
+            format!("The SSH tunnel did not open every forward within {waited_secs} s.")
+        }
+    };
+    let ports = if unanswered.is_empty() {
+        "none".to_string()
+    } else {
+        unanswered
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{what} Ports not answering on 127.0.0.1: {ports}. Test SSH by hand: {ssh_test_command}"
+    )
+}
+
+/// True only when `command_line` (as `ps -o args=` or Win32 `CommandLine` reports it) is an `ssh`
+/// tunnel (`-N`) whose arguments include the record's destination and
+/// `127.0.0.1:<port>:127.0.0.1:<port>` for every recorded port, each as a whole argument.
+///
+/// Guards against a recycled pid: after a reboot the recorded pid can belong to someone's
+/// interactive ssh session, which must never be signalled. A record with no ports never matches.
+/// [R3.5]
+#[must_use = "the result decides whether a recorded pid may be signalled"]
+pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord) -> bool {
+    let line = command_line.trim();
+    // The program may be quoted, with spaces, as Windows reports it: `"C:\Program Files\…\ssh.exe"`.
+    let (program, rest) = match line.strip_prefix('"') {
+        Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
+        None => line.split_once(char::is_whitespace).unwrap_or((line, "")),
+    };
+    let file_name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let is_ssh = file_name.eq_ignore_ascii_case("ssh") || file_name.eq_ignore_ascii_case("ssh.exe");
+    let args: Vec<&str> = rest
+        .split_whitespace()
+        .map(|arg| arg.trim_matches('"'))
+        .collect();
+    is_ssh
+        && !record.ports.is_empty()
+        && args.contains(&"-N")
+        && args.contains(&record.destination.as_str())
+        && record
+            .ports
+            .iter()
+            .all(|&port| args.contains(&loopback_forward(port).as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +592,314 @@ mod tests {
         assert!(parse(reordered).is_err());
 
         assert_eq!(parse(good)?, DashboardSet::standard());
+        Ok(())
+    }
+
+    // --- Tunnel (T1.7) ---
+
+    fn tunnel_peer() -> Result<PeerNode, crate::bridge::BridgeError> {
+        PeerNode::new("otto-mac", "192.0.2.10", "admin", 2222)
+    }
+
+    fn covering_record(peer: &PeerNode) -> TunnelRecord {
+        TunnelRecord {
+            pid: 4242,
+            ports: DashboardSet::standard().ports(),
+            destination: peer.ssh_destination(),
+            ssh_port: peer.ssh_port,
+            started_epoch_secs: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn tunnel_spec_forwards_every_port_on_loopback_with_safe_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let peer = tunnel_peer()?;
+        let spec = build_tunnel_spec(&peer, &DashboardSet::standard());
+        assert_eq!(spec.program, "ssh");
+        assert!(!spec.allow_failure);
+        assert_eq!(
+            spec.args,
+            [
+                "-N",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-p",
+                "2222",
+                "-L",
+                "127.0.0.1:7420:127.0.0.1:7420",
+                "-L",
+                "127.0.0.1:7421:127.0.0.1:7421",
+                "-L",
+                "127.0.0.1:7430:127.0.0.1:7430",
+                "admin@192.0.2.10",
+            ]
+        );
+        let forwards: Vec<&String> = spec
+            .args
+            .windows(2)
+            .filter(|pair| pair[0] == "-L")
+            .map(|pair| &pair[1])
+            .collect();
+        assert_eq!(forwards.len(), 3);
+        for forward in forwards {
+            // Loopback bind on the workstation, loopback target on the Mac.
+            assert!(forward.starts_with("127.0.0.1:"), "{forward}");
+            assert!(forward.contains(":127.0.0.1:"), "{forward}");
+        }
+        assert_eq!(
+            spec.args.last().map(String::as_str),
+            Some("admin@192.0.2.10")
+        );
+
+        // Custom ports are forwarded in set order.
+        let custom = DashboardSet::with_ports(8420, 8421, 8430)?;
+        let rendered = build_tunnel_spec(&peer, &custom).display_command();
+        assert!(rendered.contains(
+            "-L 127.0.0.1:8420:127.0.0.1:8420 -L 127.0.0.1:8421:127.0.0.1:8421 -L 127.0.0.1:8430:127.0.0.1:8430 admin@192.0.2.10"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tunnel_destination_rejects_hostile_input_and_stays_one_argument()
+    -> Result<(), crate::bridge::BridgeError> {
+        // Hostile hosts and users never become a PeerNode, so they never reach the ssh argv,
+        // where a leading `-` would be read as an ssh option.
+        for host in [
+            "-oProxyCommand=touch /tmp/x",
+            "192.0.2.10; rm -rf ~",
+            "$(reboot)",
+            "x'; rm -rf ~ #",
+        ] {
+            assert!(
+                PeerNode::new("otto-mac", host, "admin", 22).is_err(),
+                "{host}"
+            );
+        }
+        for user in ["-oProxyCommand=x", "admin;id", "$(id)", "a'b"] {
+            assert!(
+                PeerNode::new("otto-mac", "192.0.2.10", user, 22).is_err(),
+                "{user}"
+            );
+        }
+        // The destination is one discrete argument and there is no remote command for a shell.
+        let spec = build_tunnel_spec(&tunnel_peer()?, &DashboardSet::standard());
+        assert_eq!(
+            spec.args
+                .iter()
+                .filter(|arg| arg.contains("192.0.2.10"))
+                .count(),
+            1
+        );
+        assert!(spec.args.contains(&"-N".to_string()));
+
+        // A look-alike destination in a recycled pid's command line is not the recorded tunnel.
+        let record = covering_record(&tunnel_peer()?);
+        let forwards = "-L 127.0.0.1:7420:127.0.0.1:7420 -L 127.0.0.1:7421:127.0.0.1:7421 -L 127.0.0.1:7430:127.0.0.1:7430";
+        for hostile in [
+            format!("ssh -N {forwards} admin@192.0.2.10.example.net"),
+            format!("ssh -N {forwards} 'admin@192.0.2.10;id'"),
+            format!("ssh -N {forwards} evil@admin@192.0.2.10"),
+            format!("sh -c 'ssh -N {forwards} admin@192.0.2.10'"),
+        ] {
+            assert!(
+                !command_line_is_recorded_tunnel(&hostile, &record),
+                "{hostile}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decides_already_up_start_and_conflict() {
+        let all_up = [(7420, true), (7421, true), (7430, true)];
+        assert_eq!(decide_tunnel(&all_up, true), TunnelDecision::AlreadyUp);
+
+        let all_down = [(7420, false), (7421, false), (7430, false)];
+        assert_eq!(decide_tunnel(&all_down, true), TunnelDecision::Start);
+        assert_eq!(decide_tunnel(&all_down, false), TunnelDecision::Start);
+        assert_eq!(decide_tunnel(&[], false), TunnelDecision::Start);
+        assert_eq!(decide_tunnel(&[], true), TunnelDecision::Start);
+
+        let mixed = [(7420, false), (7421, true), (7430, false)];
+        let expected = TunnelDecision::Conflict {
+            held: vec![7421],
+            missing: vec![7420, 7430],
+        };
+        assert_eq!(decide_tunnel(&mixed, false), expected);
+        // A covering record does not hide that some forwards are down.
+        assert_eq!(decide_tunnel(&mixed, true), expected);
+    }
+
+    #[test]
+    fn all_ports_answering_without_a_recorded_tunnel_is_a_conflict() {
+        let all_up = [(7420, true), (7421, true), (7430, true)];
+        assert_eq!(
+            decide_tunnel(&all_up, false),
+            TunnelDecision::Conflict {
+                held: vec![7420, 7421, 7430],
+                missing: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn recorded_tunnel_must_be_alive_ssh_and_cover_every_port()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let record = covering_record(&peer);
+
+        assert!(!recorded_tunnel_covers(None, true, &set, &peer));
+        // A dead pid, or one whose command line is not the recorded ssh tunnel.
+        assert!(!recorded_tunnel_covers(Some(&record), false, &set, &peer));
+
+        let mut missing_one = record.clone();
+        missing_one.ports.retain(|&port| port != PIXEL_OFFICE_PORT);
+        assert!(!recorded_tunnel_covers(
+            Some(&missing_one),
+            true,
+            &set,
+            &peer
+        ));
+
+        let mut empty = record.clone();
+        empty.ports.clear();
+        assert!(!recorded_tunnel_covers(Some(&empty), true, &set, &peer));
+
+        assert!(recorded_tunnel_covers(Some(&record), true, &set, &peer));
+        let mut extra = record;
+        extra.ports.push(5173);
+        assert!(recorded_tunnel_covers(Some(&extra), true, &set, &peer));
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_tunnel_for_another_peer_or_ssh_port_does_not_cover()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let record = covering_record(&peer);
+
+        let mut other_host = record.clone();
+        other_host.destination = "admin@198.51.100.7".to_string();
+        assert!(!recorded_tunnel_covers(
+            Some(&other_host),
+            true,
+            &set,
+            &peer
+        ));
+
+        let mut other_user = record.clone();
+        other_user.destination = "someone@192.0.2.10".to_string();
+        assert!(!recorded_tunnel_covers(
+            Some(&other_user),
+            true,
+            &set,
+            &peer
+        ));
+
+        let mut other_port = record;
+        other_port.ssh_port = 22;
+        assert!(!recorded_tunnel_covers(
+            Some(&other_port),
+            true,
+            &set,
+            &peer
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn tunnel_failure_message_names_unanswered_ports_for_exit_and_timeout() {
+        let test_command = "ssh -p 2222 admin@192.0.2.10 true";
+        let failures = [
+            TunnelFailure::ExitedEarly {
+                status: "exit code: 255".to_string(),
+            },
+            TunnelFailure::TimedOut { waited_secs: 5 },
+        ];
+        for failure in &failures {
+            let message = describe_tunnel_failure(failure, &[7421, 7430], test_command);
+            assert!(message.contains("7421"), "{message}");
+            assert!(message.contains("7430"), "{message}");
+            assert!(!message.contains("7420"), "{message}");
+            assert!(message.ends_with(test_command), "{message}");
+        }
+        let exited = describe_tunnel_failure(&failures[0], &[7420], test_command);
+        assert!(exited.contains("exited") && exited.contains("exit code: 255"));
+        let timed_out = describe_tunnel_failure(&failures[1], &[7420], test_command);
+        assert!(timed_out.contains("within 5 s"), "{timed_out}");
+        let none = describe_tunnel_failure(&failures[1], &[], test_command);
+        assert!(none.contains("127.0.0.1: none."), "{none}");
+    }
+
+    #[test]
+    fn command_line_must_match_recorded_destination_and_forwards()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let record = covering_record(&peer);
+        let own = build_tunnel_spec(&peer, &DashboardSet::standard()).display_command();
+        assert!(command_line_is_recorded_tunnel(&own, &record), "{own}");
+        // As `ps -o args=` on macOS and Win32 `CommandLine` (quoted program, spaces) report it.
+        let args = own.trim_start_matches("ssh ");
+        for line in [
+            format!("/usr/bin/ssh {args}"),
+            format!("\"C:\\Program Files\\OpenSSH\\ssh.exe\" {args}"),
+            format!("\"ssh\" {args}\n"),
+        ] {
+            assert!(command_line_is_recorded_tunnel(&line, &record), "{line}");
+        }
+
+        let one_missing = own.replace("-L 127.0.0.1:7421:127.0.0.1:7421 ", "");
+        let other_host = own.replace("admin@192.0.2.10", "admin@198.51.100.7");
+        for line in [
+            "ssh user@other-host".to_string(),
+            "ssh admin@192.0.2.10".to_string(),
+            one_missing,
+            other_host,
+            String::new(),
+            "   ".to_string(),
+            format!("python3 {args}"),
+            format!("sshd {args}"),
+            own.replace(" -N", ""),
+        ] {
+            assert!(!command_line_is_recorded_tunnel(&line, &record), "{line}");
+        }
+
+        // A record without ports never matches, so a bare session to the Mac is never signalled.
+        let mut empty = record;
+        empty.ports.clear();
+        assert!(!command_line_is_recorded_tunnel(&own, &empty));
+        Ok(())
+    }
+
+    #[test]
+    fn tunnel_record_round_trips_as_json() -> Result<(), serde_json::Error> {
+        let record = TunnelRecord {
+            pid: 4242,
+            ports: vec![7420, 7421, 7430],
+            destination: "admin@192.0.2.10".to_string(),
+            ssh_port: 2222,
+            started_epoch_secs: 1_700_000_000,
+        };
+        let json = serde_json::to_string_pretty(&record)?;
+        assert!(json.contains("\"ssh_port\": 2222"), "{json}");
+        assert!(
+            json.contains("\"started_epoch_secs\": 1700000000"),
+            "{json}"
+        );
+        let back: TunnelRecord = serde_json::from_str(&json)?;
+        assert_eq!(back, record);
         Ok(())
     }
 }
