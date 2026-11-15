@@ -63,7 +63,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.2 Reserve the `dashboards` project name
 
-- [ ] Done
+- [x] Done
+- PR: #45
 - **Issue:** #9
 - **Covers:** R2.4
 - **Depends on:** T1.1
@@ -77,7 +78,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.3 LaunchAgent templates
 
-- [ ] Done
+- [x] Done
+- PR: #45
 - **Issue:** #10
 - **Covers:** R1.1, R1.2, R1.3, R1.4, R1.8
 - **Depends on:** T1.1
