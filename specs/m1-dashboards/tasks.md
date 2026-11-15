@@ -172,7 +172,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.6 Status script and parser
 
-- [ ] Done
+- [x] Done
+- PR: #52
 - **Issue:** #13
 - **Covers:** R5.1, R5.2, R5.5
 - **Depends on:** T1.1, T1.4 (same files as T1.4, so it follows PR 6)
@@ -181,14 +182,14 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
   1. Add `render_status_script(set)` and `build_status_spec(peer, set) -> CommandSpec`, printing the lines in design 3.4, including `last_exit` on every dashboard line. Use `BatchMode=yes` and `ConnectTimeout=3` like `PeerNode::build_ssh_probe_spec`.
   2. Add `DashboardRemoteStatus`, `DashboardHostFacts`, `DashboardStatusReport` and `pub fn parse_status_output(raw: &str, set: &DashboardSet) -> DashboardStatusReport`.
   3. The parser never panics: unknown lines, keys and ids are ignored; `pid=-` and unparsable pids become `None`; `autologin_user=-` and `last_exit=-` become `None`.
-  4. Add `DashboardDiagnosis`, `explain_unavailable` and `render_status_rows` as in design 3.4. `explain_unavailable` returns `None` for a listening dashboard and otherwise the first matching row of the table there, always with the log path.
+  4. Add `DashboardDiagnosis`, `explain_unavailable` and `render_status_rows` as in design 3.4. `explain_unavailable` returns `None` for a loaded and listening dashboard and otherwise the first matching row of the table there, always with the log path.
 - **Tests:**
   - `status_script_is_read_only`: contains none of `bootstrap`, `bootout`, `kickstart`, `kill `, `rm `, `mv `.
   - `parses_status_lines_for_all_dashboards`: the four sample lines in design 3.4 give three dashboards and the host facts.
   - `ignores_unknown_lines_keys_and_ids`
   - `missing_host_line_yields_none`
   - `handles_empty_and_garbage_output_without_panicking`: `""`, `"\n\n"`, `"dashboard="`, `"dashboard=reviewer pid=abc loaded=maybe"`.
-  - `explains_every_unavailable_dashboard_with_reason_and_log`: one case per row of the table in design 3.4 (no GUI session; `cheap-otto` missing; `pixel-agents` missing; not loaded; loaded but not listening with a `last_exit`), each with the expected reason and log path; a missing `host` line skips the first three.
+  - `explains_every_unavailable_dashboard_with_reason_and_log`: one case per row of the table in design 3.4 (no GUI session; `cheap-otto` missing; `pixel-agents` missing; row 4a, not loaded but `listening` true, whose reason says another process holds the port and names the `lsof` command [R5.1, R1.10]; not loaded and not listening; loaded but not listening with a `last_exit`), each with the expected reason and log path; a missing `host` line skips the first three.
   - `listening_dashboard_needs_no_explanation`
   - `status_rows_explain_port_held_skipped_and_unloaded_dashboards`: feed `parse_status_output` the probe output a Mac would print after a port-held Mission Control install and a skipped Pixel Office, pass the report to `render_status_rows`, and assert each of those two rows carries a reason and a log path while the listening Reviewer row has neither. This is the end-to-end check for R5.1; it needs no Mac because the probe output is the input.
   - in `tests/dashboard_scripts.rs`: `rendered_status_script_passes_sh_syntax_check`
@@ -267,7 +268,8 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.2 Tunnel management
 
-- [ ] Done
+- [x] Done
+- PR: #50
 - **Issue:** #17
 - **Covers:** R3.1 to R3.7
 - **Depends on:** T1.7
@@ -403,7 +405,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.4 The Pixel Office button starts the service, not an orphan
 
-- [ ] Done
+- [x] Done
+- PR: #49
 - **Issue:** #24
 - **Covers:** R1.2 (keeps Pixel Office under `launchd`)
 - **Depends on:** T0.1, T1.1

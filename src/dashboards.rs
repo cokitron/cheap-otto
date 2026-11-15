@@ -814,6 +814,325 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
     }
 }
 
+// Status (design 3.4): a read-only probe run on the Mac, a tolerant parser for what it prints,
+// and the diagnosis of why a dashboard is unavailable. `src/main.rs` runs the probe.
+
+/// Longest value the parser keeps for free-text fields such as `last_exit` and `autologin_user`.
+const STATUS_VALUE_MAX_CHARS: usize = 64;
+
+/// Renders the read-only status probe: one `dashboard=<id> …` line per dashboard in set order,
+/// then one `host …` line. [R5.1, R5.2, R5.5]
+///
+/// It only runs `launchctl print`, `nc -z`, `command -v` and `defaults read`; it never starts,
+/// stops or changes anything. The text is built from constants, registry labels and `u16` ports,
+/// so no operator input reaches the Mac's shell. Every value it prints is a single token, so
+/// [`parse_status_output`] can split on whitespace.
+#[must_use = "the status script should be run on the Mac"]
+pub fn render_status_script(set: &DashboardSet) -> String {
+    let mut script = String::from(
+        r#"set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+UID_NUM=$(id -u)
+
+# status_line <id> <label> <port>
+status_line() {
+  loaded=0; pid=""; last_exit=""; listening=0
+  if info=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null); then
+    loaded=1
+    pid=$(printf '%s\n' "$info" | awk '/^[[:space:]]*pid = /{print $3; exit}')
+    last_exit=$(printf '%s\n' "$info" | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+  fi
+  if nc -z 127.0.0.1 "$3" >/dev/null 2>&1; then listening=1; fi
+  echo "dashboard=$1 loaded=$loaded pid=${pid:--} listening=$listening last_exit=${last_exit:--}"
+}
+
+"#,
+    );
+    for service in set.services() {
+        script.push_str(&format!(
+            "status_line {} {} {}\n",
+            service.id.slug(),
+            service.launchd_label,
+            service.port
+        ));
+    }
+    script.push_str(
+        r#"
+if [ -x "$HOME/.cargo/bin/cheap-otto" ]; then cheap_otto_bin=1; else cheap_otto_bin=0; fi
+if command -v pixel-agents >/dev/null 2>&1; then pixel_agents_bin=1; else pixel_agents_bin=0; fi
+if launchctl print "gui/$UID_NUM" >/dev/null 2>&1; then gui_session=1; else gui_session=0; fi
+autologin_user=$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null || true)
+autologin_user=$(printf '%s' "$autologin_user" | tr -s ' \t\n' '_')
+echo "host cheap_otto_bin=$cheap_otto_bin pixel_agents_bin=$pixel_agents_bin gui_session=$gui_session autologin_user=${autologin_user:--}"
+"#,
+    );
+    script
+}
+
+/// Builds `ssh -o BatchMode=yes -o ConnectTimeout=3 -p <port> <user@host> /bin/sh -c '<script>'`
+/// for [`render_status_script`]. [R5.5]
+///
+/// The Mac's login shell is zsh, so the script is wrapped in `/bin/sh -c` and passed as one
+/// single-quoted argument. The local process gets discrete args, like
+/// [`PeerNode::build_ssh_probe_spec`].
+#[must_use = "the status probe should be displayed or executed"]
+pub fn build_status_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec {
+    let remote = format!(
+        "/bin/sh -c {}",
+        crate::worktree::posix_single_quote(&render_status_script(set))
+    );
+    peer.build_ssh_probe_spec(
+        "Read every dashboard's LaunchAgent, pid and port on the Mac (read-only)",
+        &remote,
+    )
+}
+
+/// What the probe saw for one dashboard on the Mac. [R5.1]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardRemoteStatus {
+    /// Which dashboard the line describes.
+    pub id: DashboardId,
+    /// `launchctl print` found the LaunchAgent in the user's GUI domain.
+    pub loaded: bool,
+    /// The running process id, when `launchd` reports one.
+    pub pid: Option<u32>,
+    /// The port answers on `127.0.0.1` on the Mac.
+    pub listening: bool,
+    /// `launchd`'s last exit status (spaces turned into `_`), when there is one.
+    pub last_exit: Option<String>,
+}
+
+/// Facts about the Mac that explain why a dashboard cannot run. [R5.2]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardHostFacts {
+    /// `~/.cargo/bin/cheap-otto` exists and is executable.
+    pub cheap_otto_bin: bool,
+    /// `pixel-agents` is on the probe's `PATH`.
+    pub pixel_agents_bin: bool,
+    /// The user has a GUI session, which LaunchAgents need.
+    pub gui_session: bool,
+    /// The automatic-login user, or `None` when automatic login is off. [R5.3]
+    pub autologin_user: Option<String>,
+}
+
+/// Everything the status probe reported, as parsed by [`parse_status_output`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardStatusReport {
+    /// One entry per dashboard line, in set order; a dashboard with no line has no entry.
+    pub dashboards: Vec<DashboardRemoteStatus>,
+    /// The `host` line, or `None` when the probe printed none.
+    pub host: Option<DashboardHostFacts>,
+}
+
+/// `key=value` tokens of one probe line. Tokens without `=` are skipped.
+fn status_tokens<'a>(
+    tokens: impl Iterator<Item = &'a str>,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    tokens.filter_map(|token| token.split_once('='))
+}
+
+/// `1` is true; anything else, including a missing key, is false.
+fn status_flag(value: &str) -> bool {
+    value == "1"
+}
+
+/// `-` and empty values are `None`. Control characters are dropped and the value is capped, so a
+/// strange `launchctl` or `defaults` answer cannot garble the operator's terminal.
+fn status_text(value: &str) -> Option<String> {
+    let clean: String = value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(STATUS_VALUE_MAX_CHARS)
+        .collect();
+    (!clean.is_empty() && clean != "-").then_some(clean)
+}
+
+/// Parses what [`render_status_script`] printed. [R5.1, R5.2]
+///
+/// Never panics. Lines that are neither `dashboard=<id> …` nor `host …`, unknown keys, unknown
+/// ids and ids outside `set` are ignored. A missing or unparsable flag is false; `pid=-`, an
+/// unparsable pid, `last_exit=-` and `autologin_user=-` are `None`. A `host` line without any
+/// known key is ignored. When an id or the `host` line appears twice, the last one wins.
+#[must_use = "the parsed report should be explained or printed"]
+pub fn parse_status_output(raw: &str, set: &DashboardSet) -> DashboardStatusReport {
+    let mut seen: Vec<DashboardRemoteStatus> = Vec::new();
+    let mut host = None;
+    for line in raw.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(first) = tokens.next() else {
+            continue;
+        };
+        if first == "host" {
+            let mut facts = DashboardHostFacts::default();
+            let mut any_known_key = false;
+            for (key, value) in status_tokens(tokens) {
+                match key {
+                    "cheap_otto_bin" => facts.cheap_otto_bin = status_flag(value),
+                    "pixel_agents_bin" => facts.pixel_agents_bin = status_flag(value),
+                    "gui_session" => facts.gui_session = status_flag(value),
+                    "autologin_user" => facts.autologin_user = status_text(value),
+                    _ => continue,
+                }
+                any_known_key = true;
+            }
+            // A bare `host` (a stray word, not the probe's line) would otherwise read as "no GUI
+            // session" and blame the wrong cause.
+            if any_known_key {
+                host = Some(facts);
+            }
+            continue;
+        }
+        let Some(slug) = first.strip_prefix("dashboard=") else {
+            continue;
+        };
+        let Some(id) = DashboardId::parse(slug)
+            .ok()
+            .filter(|id| set.get(*id).is_some())
+        else {
+            continue;
+        };
+        let mut status = DashboardRemoteStatus {
+            id,
+            loaded: false,
+            pid: None,
+            listening: false,
+            last_exit: None,
+        };
+        for (key, value) in status_tokens(tokens) {
+            match key {
+                "loaded" => status.loaded = status_flag(value),
+                "pid" => status.pid = value.parse::<u32>().ok().filter(|pid| *pid > 0),
+                "listening" => status.listening = status_flag(value),
+                "last_exit" => status.last_exit = status_text(value),
+                _ => {}
+            }
+        }
+        seen.retain(|earlier| earlier.id != id);
+        seen.push(status);
+    }
+    let dashboards = set
+        .services()
+        .iter()
+        .filter_map(|service| seen.iter().find(|status| status.id == service.id))
+        .cloned()
+        .collect();
+    DashboardStatusReport { dashboards, host }
+}
+
+/// Why a dashboard is unavailable, and where its log is. [R5.1]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardDiagnosis {
+    /// The first cause that applies, with what to do about it.
+    pub reason: String,
+    /// The dashboard's log on the Mac, always given.
+    pub log: String,
+}
+
+/// The dashboard's log on the Mac, as the operator would type it.
+fn dashboard_log_path(id: DashboardId) -> String {
+    match id {
+        DashboardId::MissionControl | DashboardId::PixelOffice => {
+            format!("~/.cheap-otto/logs/dashboards/{}.log", id.slug())
+        }
+        DashboardId::Reviewer => "~/.cheap-otto/logs/code-reviewer/ui-server.log".to_string(),
+    }
+}
+
+/// `None` when the dashboard is loaded and listening. Otherwise the first cause that applies, in
+/// the order of the table in design 3.4; the host rows are skipped when `host` is `None`. [R5.1]
+///
+/// A port that answers while the LaunchAgent is not loaded is held by another process (what a
+/// port-held install leaves behind), so it is explained rather than shown as healthy.
+#[must_use = "the diagnosis should be shown next to the dashboard"]
+pub fn explain_unavailable(
+    service: &DashboardService,
+    status: &DashboardRemoteStatus,
+    host: Option<&DashboardHostFacts>,
+) -> Option<DashboardDiagnosis> {
+    if status.loaded && status.listening {
+        return None;
+    }
+    let host_reason = host.and_then(|host| {
+        if !host.gui_session {
+            Some("No GUI session for the Mac user; log in to the Mac desktop or enable automatic login".to_string())
+        } else if service.id == DashboardId::MissionControl && !host.cheap_otto_bin {
+            Some("`cheap-otto` is not installed on the Mac; run `code-reviewer m1 sync`".to_string())
+        } else if service.id == DashboardId::PixelOffice && !host.pixel_agents_bin {
+            Some("`pixel-agents` is not installed on the Mac, so the service was skipped".to_string())
+        } else {
+            None
+        }
+    });
+    let install = match service.manager {
+        ServiceManager::CheapOtto => "`cheap-otto dashboards install --execute`",
+        ServiceManager::CodeReviewerProvisioner => "`code-reviewer m1 sync`",
+    };
+    let port = service.port;
+    let reason = host_reason.unwrap_or_else(|| match (status.loaded, status.listening) {
+        (false, true) => format!(
+            "The LaunchAgent is not loaded, but port {port} answers, so another process holds it (a port-held install leaves this); find it with `lsof -nP -iTCP:{port} -sTCP:LISTEN` on the Mac, then run {install}"
+        ),
+        (false, false) => format!(
+            "The LaunchAgent is not loaded; run {install}. A failed or port-held install leaves this too"
+        ),
+        (true, _) => match &status.last_exit {
+            Some(last_exit) => format!(
+                "The LaunchAgent is loaded but port {port} is not listening; launchd's last exit status is {last_exit}"
+            ),
+            None => format!(
+                "The LaunchAgent is loaded but port {port} is not listening; launchd reports no last exit status"
+            ),
+        },
+    });
+    Some(DashboardDiagnosis {
+        reason,
+        log: dashboard_log_path(service.id),
+    })
+}
+
+/// One printable row per dashboard in set order: loaded, pid, listening on the Mac, tunnelled to
+/// the workstation, and the reason and log when it is unavailable. [R5.1]
+///
+/// `tunnelled` holds the CLI's local port checks; a dashboard missing from it shows `-`. A
+/// dashboard the probe printed no line for is explained as such, with its log.
+#[must_use = "the status rows should be printed"]
+pub fn render_status_rows(
+    report: &DashboardStatusReport,
+    set: &DashboardSet,
+    tunnelled: &[(DashboardId, bool)],
+) -> Vec<String> {
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    set.services()
+        .iter()
+        .map(|service| {
+            let name = format!("{} ({})", service.display_name, service.port);
+            let tunnel = tunnelled
+                .iter()
+                .find(|(id, _)| *id == service.id)
+                .map_or("-", |(_, up)| yes_no(*up));
+            let status = report.dashboards.iter().find(|s| s.id == service.id);
+            let Some(status) = status else {
+                return format!(
+                    "{name}: no status from the Mac, tunnelled={tunnel}; reason: the probe printed no line for it; log: {}",
+                    dashboard_log_path(service.id)
+                );
+            };
+            let pid = status
+                .pid
+                .map_or_else(|| "-".to_string(), |pid| pid.to_string());
+            let row = format!(
+                "{name}: loaded={} pid={pid} listening={} tunnelled={tunnel}",
+                yes_no(status.loaded),
+                yes_no(status.listening)
+            );
+            match explain_unavailable(service, status, report.host.as_ref()) {
+                Some(why) => format!("{row}; reason: {}; log: {}", why.reason, why.log),
+                None => row,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,5 +2000,224 @@ mod tests {
         );
         assert_eq!(plan.set, set);
         Ok(())
+    }
+
+    // --- Status (T1.6) ---
+
+    /// Parses probe text in which `;` stands for a line break, so a case fits on one line.
+    fn probe(text: &str) -> DashboardStatusReport {
+        parse_status_output(&text.replace(';', "\n"), &DashboardSet::standard())
+    }
+
+    fn remote(
+        id: DashboardId,
+        up: [bool; 2],
+        pid: Option<u32>,
+        exit: Option<&str>,
+    ) -> DashboardRemoteStatus {
+        let [loaded, listening] = up;
+        let last_exit = exit.map(str::to_string);
+        DashboardRemoteStatus {
+            id,
+            loaded,
+            pid,
+            listening,
+            last_exit,
+        }
+    }
+
+    fn host(cheap_otto_bin: bool, pixel_agents_bin: bool, gui_session: bool) -> DashboardHostFacts {
+        let autologin_user = Some("admin".to_string());
+        DashboardHostFacts {
+            cheap_otto_bin,
+            pixel_agents_bin,
+            gui_session,
+            autologin_user,
+        }
+    }
+
+    #[test]
+    fn status_script_is_read_only() -> Result<(), crate::bridge::BridgeError> {
+        let set = DashboardSet::standard();
+        let script = render_status_script(&set);
+        for forbidden in ["bootstrap", "bootout", "kickstart", "kill ", "rm ", "mv "] {
+            assert!(!script.contains(forbidden), "{forbidden}");
+        }
+        assert!(script.contains("status_line reviewer com.cheapotto.code-reviewer.ui 7430\n"));
+        assert!(script.contains("last_exit=${last_exit:--}") && script.contains("autoLoginUser"));
+        let spec = build_status_spec(&tunnel_peer()?, &set);
+        let head = format!("{} {}", spec.program, spec.args[..7].join(" "));
+        assert_eq!(
+            head,
+            "ssh -o BatchMode=yes -o ConnectTimeout=3 -p 2222 admin@192.0.2.10"
+        );
+        assert_eq!(spec.args.len(), 8);
+        assert!(spec.args[7].starts_with("/bin/sh -c 'set -u\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_status_lines_for_all_dashboards() {
+        let raw = "dashboard=mission-control loaded=1 pid=812 listening=1 last_exit=-
+dashboard=pixel-office loaded=0 pid=- listening=0 last_exit=-
+dashboard=reviewer loaded=1 pid=- listening=0 last_exit=78:_EX_CONFIG
+host cheap_otto_bin=1 pixel_agents_bin=0 gui_session=1 autologin_user=admin
+";
+        let report = parse_status_output(raw, &DashboardSet::standard());
+        let exit = Some("78:_EX_CONFIG");
+        let expected = [
+            remote(DashboardId::MissionControl, [true, true], Some(812), None),
+            remote(DashboardId::PixelOffice, [false, false], None, None),
+            remote(DashboardId::Reviewer, [true, false], None, exit),
+        ];
+        assert_eq!(report.dashboards, expected);
+        assert_eq!(report.host, Some(host(true, false, true)));
+    }
+
+    #[test]
+    fn ignores_unknown_lines_keys_and_ids() {
+        let raw = "Last login: Mon Nov  9 on ttys000
+dashboard=grafana loaded=1 pid=1 listening=1
+dashboard=Reviewer loaded=1
+reviewer loaded=1
+  dashboard=pixel-office   loaded=1 color=blue pid=77 listening=1 extra
+host cheap_otto_bin=1 shoe_size=9 gui_session=1 autologin_user=-
+";
+        let report = parse_status_output(raw, &DashboardSet::standard());
+        let pixel = remote(DashboardId::PixelOffice, [true, true], Some(77), None);
+        assert_eq!(report.dashboards, [pixel]);
+        let mut expected_host = host(true, false, true);
+        expected_host.autologin_user = None;
+        assert_eq!(report.host, Some(expected_host));
+    }
+
+    #[test]
+    fn missing_host_line_yields_none() {
+        let report = probe("dashboard=mission-control loaded=1 pid=812 listening=1 last_exit=-");
+        assert_eq!((report.host, report.dashboards.len()), (None, 1));
+    }
+
+    #[test]
+    fn handles_empty_and_garbage_output_without_panicking() {
+        let set = DashboardSet::standard();
+        for raw in "|\n\n|dashboard=|=|host| \t \r\n|dashboard=\u{1F600}".split('|') {
+            let report = parse_status_output(raw, &set);
+            assert_eq!((report.dashboards.len(), report.host), (0, None), "{raw:?}");
+        }
+        let report = probe("dashboard=reviewer pid=abc loaded=maybe");
+        let nothing = remote(DashboardId::Reviewer, [false, false], None, None);
+        assert_eq!(report.dashboards, [nothing]);
+        // Overflowing and zero pids, control characters and a very long value stay harmless.
+        let long = "x".repeat(500);
+        let raw = format!(
+            "dashboard=reviewer pid=99999999999 last_exit={long}\ndashboard=pixel-office pid=0 last_exit=1\u{1b}[2J\nhost autologin_user=\u{7}"
+        );
+        let report = parse_status_output(&raw, &set);
+        let capped = Some(&long[..STATUS_VALUE_MAX_CHARS]);
+        let expected = [
+            remote(DashboardId::PixelOffice, [false, false], None, Some("1[2J")),
+            remote(DashboardId::Reviewer, [false, false], None, capped),
+        ];
+        assert_eq!(report.dashboards, expected);
+        assert_eq!(report.host.map(|facts| facts.autologin_user), Some(None));
+    }
+
+    #[test]
+    fn explains_every_unavailable_dashboard_with_reason_and_log() {
+        let ok = "host cheap_otto_bin=1 pixel_agents_bin=1 gui_session=1";
+        let not_loaded = "The LaunchAgent is not loaded; run `cheap-otto dashboards install --execute`. A failed or port-held install leaves this too";
+        let cases = [
+            (
+                "dashboard=mission-control loaded=0;host gui_session=0",
+                "No GUI session for the Mac user; log in to the Mac desktop or enable automatic login",
+            ),
+            (
+                "dashboard=mission-control loaded=0;host gui_session=1",
+                "`cheap-otto` is not installed on the Mac; run `code-reviewer m1 sync`",
+            ),
+            (
+                "dashboard=pixel-office loaded=0;host gui_session=1 cheap_otto_bin=1",
+                "`pixel-agents` is not installed on the Mac, so the service was skipped",
+            ),
+            ("dashboard=pixel-office loaded=0;{ok}", not_loaded),
+            (
+                "dashboard=reviewer loaded=0;{ok}",
+                "The LaunchAgent is not loaded; run `code-reviewer m1 sync`. A failed or port-held install leaves this too",
+            ),
+            (
+                "dashboard=mission-control loaded=0 listening=1;{ok}",
+                "The LaunchAgent is not loaded, but port 7420 answers, so another process holds it (a port-held install leaves this); find it with `lsof -nP -iTCP:7420 -sTCP:LISTEN` on the Mac, then run `cheap-otto dashboards install --execute`",
+            ),
+            (
+                "dashboard=reviewer loaded=1 listening=0 last_exit=78:_EX_CONFIG;{ok}",
+                "The LaunchAgent is loaded but port 7430 is not listening; launchd's last exit status is 78:_EX_CONFIG",
+            ),
+            (
+                "dashboard=mission-control loaded=1 listening=0 last_exit=-",
+                "The LaunchAgent is loaded but port 7420 is not listening; launchd reports no last exit status",
+            ),
+            // Without a host line, rows 1 to 3 are skipped and the LaunchAgent row explains it.
+            ("dashboard=mission-control loaded=0", not_loaded),
+            ("dashboard=pixel-office loaded=0", not_loaded),
+        ];
+        let set = DashboardSet::standard();
+        for (text, reason) in cases {
+            let report = probe(&text.replace("{ok}", ok));
+            let status = &report.dashboards[0];
+            let log = match status.id {
+                DashboardId::Reviewer => {
+                    "~/.cheap-otto/logs/code-reviewer/ui-server.log".to_string()
+                }
+                DashboardId::MissionControl | DashboardId::PixelOffice => {
+                    format!("~/.cheap-otto/logs/dashboards/{}.log", status.id.slug())
+                }
+            };
+            let service = set.get(status.id);
+            let got = service
+                .and_then(|service| explain_unavailable(service, status, report.host.as_ref()));
+            assert_eq!(
+                got.map(|d| (d.reason, d.log)),
+                Some((reason.to_string(), log)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn listening_dashboard_needs_no_explanation() {
+        let healthy = host(true, true, true);
+        for service in DashboardSet::standard().services() {
+            let up = remote(service.id, [true, true], Some(812), None);
+            assert_eq!(explain_unavailable(service, &up, Some(&healthy)), None);
+            assert_eq!(explain_unavailable(service, &up, None), None);
+        }
+    }
+
+    #[test]
+    fn status_rows_explain_port_held_skipped_and_unloaded_dashboards() {
+        let set = DashboardSet::standard();
+        // What the probe prints after an install found 7420 held by a foreign process (the
+        // LaunchAgent was booted out and never bootstrapped) and skipped the Pixel Office because
+        // pixel-agents is missing, while the Reviewer runs normally.
+        let raw = "dashboard=mission-control loaded=0 pid=- listening=1 last_exit=-
+dashboard=pixel-office loaded=0 pid=- listening=0 last_exit=-
+dashboard=reviewer loaded=1 pid=903 listening=1 last_exit=-
+host cheap_otto_bin=1 pixel_agents_bin=0 gui_session=1 autologin_user=-
+";
+        let tunnelled = [
+            (DashboardId::MissionControl, true),
+            (DashboardId::PixelOffice, false),
+        ];
+        let rows = render_status_rows(&parse_status_output(raw, &set), &set, &tunnelled);
+        let expected = [
+            "Mission Control (7420): loaded=no pid=- listening=yes tunnelled=yes; reason: The LaunchAgent is not loaded, but port 7420 answers, so another process holds it (a port-held install leaves this); find it with `lsof -nP -iTCP:7420 -sTCP:LISTEN` on the Mac, then run `cheap-otto dashboards install --execute`; log: ~/.cheap-otto/logs/dashboards/mission-control.log",
+            "Pixel Office (7421): loaded=no pid=- listening=no tunnelled=no; reason: `pixel-agents` is not installed on the Mac, so the service was skipped; log: ~/.cheap-otto/logs/dashboards/pixel-office.log",
+            "Reviewer (7430): loaded=yes pid=903 listening=yes tunnelled=-",
+        ];
+        assert_eq!(rows, expected);
+        // A dashboard the probe never mentioned is still explained.
+        let rows = render_status_rows(&probe(""), &set, &[]);
+        let missing = "Reviewer (7430): no status from the Mac, tunnelled=-; reason: the probe printed no line for it; log: ~/.cheap-otto/logs/code-reviewer/ui-server.log";
+        assert_eq!(rows.get(2).map(String::as_str), Some(missing));
     }
 }
