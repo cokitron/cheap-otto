@@ -530,3 +530,56 @@ fn multi_harness_delegate_inspect_ask_and_templates_work_end_to_end()
     let _ = fs::remove_dir_all(&temp);
     Ok(())
 }
+
+#[test]
+fn dashboards_tunnel_dry_run_prints_one_ssh_command_with_three_forwards()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = create_isolated_temp_dir("dashboards-tunnel-dry-run")?;
+    let state_dir = temp.join(".cheap-otto");
+    let state_str = state_dir.to_string_lossy().into_owned();
+
+    let (pair_ok, _, pair_err) = run_cli_in(
+        &temp,
+        &["pair", "--host", "192.0.2.10", "--out-dir", &state_str],
+    )?;
+    assert!(pair_ok, "pair failed: {pair_err}");
+
+    // No `--execute`: prints the plan only, probes no port and starts nothing.
+    let (ok, stdout, stderr) =
+        run_cli_in(&temp, &["dashboards", "tunnel", "--state-dir", &state_str])?;
+    assert!(ok, "dashboards tunnel failed: {stderr}");
+    assert_eq!(stdout.matches("-L 127.0.0.1:").count(), 3, "{stdout}");
+    assert_eq!(stdout.matches("$ ssh -N").count(), 1, "{stdout}");
+    assert!(stdout.contains("@192.0.2.10"), "{stdout}");
+    assert!(stdout.contains("Recorded tunnel : none"), "{stdout}");
+    assert!(!state_dir.join("tunnel.json").exists());
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}
+
+#[test]
+fn dashboards_tunnel_stop_without_record_is_a_no_op() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = create_isolated_temp_dir("dashboards-tunnel-stop")?;
+    let state_dir = temp.join(".cheap-otto");
+    let state_str = state_dir.to_string_lossy().into_owned();
+
+    // The one `--execute` a test may run: there is no record, so nothing is signalled.
+    let (ok, stdout, stderr) = run_cli_in(
+        &temp,
+        &[
+            "dashboards",
+            "tunnel",
+            "--stop",
+            "--execute",
+            "--state-dir",
+            &state_str,
+        ],
+    )?;
+    assert!(ok, "dashboards tunnel --stop failed: {stderr}");
+    assert!(stdout.contains("No recorded tunnel."), "{stdout}");
+    assert!(!state_dir.join("tunnel.json").exists());
+
+    let _ = fs::remove_dir_all(&temp);
+    Ok(())
+}

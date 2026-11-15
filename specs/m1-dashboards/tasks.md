@@ -265,7 +265,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T2.2 Tunnel management
 
-- [ ] Done
+- [x] Done
 - **Issue:** #17
 - **Covers:** R3.1 to R3.7
 - **Depends on:** T1.7
