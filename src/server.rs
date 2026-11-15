@@ -510,18 +510,22 @@ async fn handle_dashboards(State(state): State<Arc<ControlPlaneState>>) -> Respo
     };
     let mut dashboards = Vec::with_capacity(set.services().len());
     for service in set.services() {
-        let listening = tokio::time::timeout(
-            Duration::from_millis(250),
-            TcpStream::connect(("127.0.0.1", service.port)),
-        )
-        .await
-        .is_ok_and(|connected| connected.is_ok());
+        // Mission Control is answering this request, so it is listening whatever loopback
+        // family it bound (`--host ::1` would fail an IPv4 probe). The siblings bind 127.0.0.1.
+        let current = service.id == DashboardId::MissionControl;
+        let listening = current
+            || tokio::time::timeout(
+                Duration::from_millis(250),
+                TcpStream::connect(("127.0.0.1", service.port)),
+            )
+            .await
+            .is_ok_and(|connected| connected.is_ok());
         dashboards.push(json!({
             "id": service.id.slug(),
             "name": service.display_name,
             "port": service.port,
             "listening": listening,
-            "current": service.id == DashboardId::MissionControl,
+            "current": current,
         }));
     }
     Json(json!({ "dashboards": dashboards })).into_response()
@@ -2163,6 +2167,10 @@ mod tests {
             assert!(entry["name"].is_string(), "{entry}");
             let is_mission_control = entry["id"] == "mission-control";
             assert_eq!(entry["current"], is_mission_control, "{entry}");
+            if is_mission_control {
+                // It answers the request itself, whichever loopback family it bound.
+                assert_eq!(entry["listening"], true, "{entry}");
+            }
         }
         let _ = fs::remove_dir_all(&tmp);
     }

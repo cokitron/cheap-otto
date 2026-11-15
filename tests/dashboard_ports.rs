@@ -10,6 +10,8 @@ const REVIEWER_SERVER_SOURCE: &str = include_str!("../crates/code-reviewer/src/s
 #[test]
 fn reviewer_ports_match_the_registry() {
     for declaration in [
+        // `serve` binds this by default, so it must carry the same port as DEFAULT_UI_PORT.
+        format!("pub const DEFAULT_UI_BIND: &str = \"127.0.0.1:{REVIEWER_PORT}\";"),
         format!("pub const DEFAULT_UI_PORT: u16 = {REVIEWER_PORT};"),
         format!("pub const DEFAULT_PIXEL_PORT: u16 = {PIXEL_OFFICE_PORT};"),
         format!("pub const DEFAULT_MISSION_CONTROL_PORT: u16 = {MISSION_CONTROL_PORT};"),
