@@ -30,19 +30,34 @@ Each binary ships one web page compiled into the executable. There is no bundler
 - New Mission Control behaviour is a route in `build_router` plus a handler that calls a core planner (rule 03), then UI. Cover the route in the `#[tokio::test]` at the bottom of `src/server.rs` with `oneshot`.
 - The dashboard's routes are a `match (method, path)` in `crates/code-reviewer/src/server.rs`. `POST /api/actions/*`, `/api/tender/*`, `/api/settings/*` and `/api/repos/*` act for real: they start reviews, push fixes and rewrite `config/repos.toml`.
 - Validate path and body identifiers in the handler (`validate_safe_identifier`, `validate_repo_slug`) before using them in a command or a path.
-- Keep both servers bound to loopback and expose them remotely only through SSH tunnels. **Every request passes the request guard before routing** (rule 02, section 6). A `Host` that isn't the server gets `403`; so does a `POST`, `PUT`, `PATCH` or `DELETE` whose `Origin` isn't the server's own. Neither server sends CORS headers. Same-origin `fetch` and clients that send no `Origin` (CLI, `curl`, agents) are unaffected, so:
-  - keep `fetch` paths relative, and never point a page at another port's API without growing that server's allowlist first;
-  - send `Content-Type: application/json` with every body. Both pages' `api()` helpers do; the dashboard answers `415` otherwise;
-  - a new route is guarded automatically. In `oneshot` tests send a loopback `Host` header (see `guarded_request` in the `src/server.rs` tests), or the answer is `403`.
+- Keep both servers bound to loopback and expose them remotely only through SSH tunnels. Every request passes the request guard before routing (section 3).
 
-## 3. Style
+## 3. The request guard
 
-- When you restyle or extend either page, use the brand tokens from rule 08: black ground, white ink, Signal Yellow `#F7D842`, square corners, hard offset shadows, UPPERCASE mono labels. `ui_html.rs` already defines them as CSS variables at the top of its `<style>` block; copy from there.
+Neither server authenticates requests. The loopback bind keeps other machines out; the guard keeps out web pages in the operator's browser, which can reach loopback. Both servers run it on every request before any route: `src/request_guard.rs` behind the `guard_request` middleware in `src/server.rs`, and `crates/code-reviewer/src/request_guard.rs` called from `handle_http_connection`. The two files mirror each other; change them together.
+
+1. **Bind.** Both servers refuse to start unless the bind host is `127.0.0.1`, `localhost` or `::1` (`require_loopback_bind`), so a wildcard or LAN `--host` / `--bind` is an error.
+2. **Host.** `Host`, or for Mission Control the HTTP/2 or absolute-form request authority when `Host` is absent, must be `127.0.0.1`, `localhost` or `[::1]`. Anything else, or no usable authority, is `403` (DNS-rebinding defence). The dashboard reads only the `Host` header.
+3. **Origin.** A request that is not `GET`, `HEAD` or `OPTIONS` and carries an `Origin` must carry an allowlisted one, or it is `403`. The allowlist is the server's own origins (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`), held in the server state (`ControlPlaneState::request_guard`, `ServerContext::guard`).
+4. **No `Origin` passes rule 3.** That is the CLI, `curl` and external agents.
+5. **Dashboard only:** a `POST` with a body must be `Content-Type: application/json`, or it is `415`. Its handlers parse any body as JSON, and `text/plain` is the one cross-origin body a browser sends without a preflight. Mission Control gets the same from axum's `Json` extractor.
+
+What follows for page and API work:
+
+- Keep `fetch` paths relative. Neither server sends CORS headers, so a foreign page can't read a response or pass a preflight; don't add a CORS layer or an `Access-Control-Allow-*` header.
+- To let one local dashboard call another's API, grow that server's allowlist with `RequestGuard::trust_loopback_port` (or `trust_origin` in the root crate) and answer CORS for exactly those origins.
+- Send `Content-Type: application/json` with every body. Both pages' `api()` helpers do.
+- The allowlist is keyed on the listening port, so a tunnel must keep the port (`127.0.0.1:<port>:127.0.0.1:<port>`). Through a remapped port the page loads but its `POST`s get `403`.
+- A new route is guarded automatically. In `oneshot` tests send a loopback `Host` header (see `guarded_request` in the `src/server.rs` tests), or the answer is `403`.
+
+## 4. Style
+
+- When you restyle or extend either page, use the brand tokens from rule 09: black ground, white ink, Signal Yellow `#F7D842`, square corners, hard offset shadows, UPPERCASE mono labels. `ui_html.rs` already defines them as CSS variables at the top of its `<style>` block; copy from there.
 - Mission Control still uses the older blue theme. Don't mix the two looks inside one page: either leave a page's theme alone or convert the whole page.
 - Status is always a word plus a colour (`■ RUNNING`), never colour alone.
 - The pixel-agents office is a separate project shown in an iframe. It is the visual layer only: nothing in the control plane may depend on it being up.
 
-## 4. Previewing safely
+## 5. Previewing safely
 
 `.claude/launch.json` defines two preview servers on spare ports, so they never collide with a live tunnel on 7420 or 7430:
 

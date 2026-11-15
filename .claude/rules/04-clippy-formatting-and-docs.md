@@ -54,7 +54,7 @@ Run these before saying a change is done. They are quick; run them rather than p
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-3. `cargo test --workspace --all-targets`
+3. `cargo test --workspace --all-targets --locked`
 4. If CLI behaviour changed: run the subcommand as a dry run against a temp state dir, for example
    `cargo run -p cheap-otto -- delegate --project demo --id t1 --agent claude --task "x" --state-dir <tmp>`,
    and read the printed plan. Never add `--execute` or `--apply` to verify.

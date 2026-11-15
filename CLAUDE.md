@@ -11,6 +11,7 @@ A Rust 2024 Cargo workspace that turns a spare, lid-closed MacBook (`otto-mac`, 
 | `cheap-otto` | root package: `src/lib.rs` + `src/main.rs` | CLI for the dev bridge (`pair`, `sync`, `exec`, `shell`), the agent worktree farm (`delegate`, `inspect`, `ask`, `pull`), the `launchd` scheduler (`schedule`, `runs`), reversible power guardrails (`init`, `doctor`, `arbiter`, `restore`) and the Mission Control server (`serve`, `ui`, port 7420) |
 | `code-reviewer` | `crates/code-reviewer`, binary only | Autonomous multi-lens PR reviewer and Code Tender that run on the Mac, with a dashboard on port 7430 |
 | Site and brand | `docs/`, `.github/assets/`, `scripts/brand/` | Static GitHub Pages site (no build step), logo and hero images, and the scripts that generate them |
+| Governance | `CONTRIBUTING.md`, `SECURITY.md`, `cubic.yaml`, `.ai/`, `.github/` | PR-only `main`, the Cubic AI review config and the context files it reads, CI, issue and PR templates |
 
 ## Safety: the appliance is real
 
@@ -18,16 +19,16 @@ Assume the machine you are running on is paired with a live MacBook and live Git
 
 - **`cheap-otto` is dry-run by default for OS and remote actions.** Those subcommands print their plan and stop unless given `--execute` (alias `--apply`; `init`, `pair` and `restore` name it `--apply`). Commands that only mutate local JSON, including `template add` and `template remove`, have no gate and write immediately. `pair --tunnel` opens a live tunnel. Pass side-effecting flags only when the user asked for that specific action.
 - **`code-reviewer` is live by default.** `poll`, `tend-poll`, `review`, `tend`, `sync-docs`, `ui` and mutating `m1 …` subcommands act on GitHub or the Mac at once. Use `--dry-run` on the first four. Only `doctor`, `status`, `m1 status` and `watch list` are read-only.
-- **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls the binary and restarts the `launchd` jobs. Never run it unasked or from a feature branch.
+- **`code-reviewer m1 sync` deploys.** It force-pushes the current `HEAD` to the Mac as `otto-sync`, reinstalls both binaries and restarts the `launchd` jobs. Never run it unasked or from a feature branch.
 - **Dry runs still write state and may probe the Mac.** `init` and `pair` write directly to `--out-dir` (default `./.cheap-otto`) with no repo or home fallback. State-discovery commands such as `delegate` persist JSON into the state dir, which resolves `--state-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`. `doctor` and `init` read telemetry from the paired Mac over SSH. When you exercise the CLI, pass a temp `--out-dir` (`init`, `pair`) or `--state-dir` (the rest), and `--offline` on `init` and `doctor`.
 
 ## Commands
 
 ```bash
-# The CI gate (.github/workflows/ci.yml). Run all three before calling work done; together they take under a minute.
+# The CI gate (.github/workflows/ci.yml runs it on Linux, macOS and Windows). Run all three before calling work done; together they take under a minute.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --locked
 
 # One module, one test, one integration test
 cargo test -p cheap-otto --lib arbiter::tests
@@ -71,9 +72,12 @@ cargo run -p code-reviewer -- --help
 
 ## Conventions
 
-- **Commits:** Conventional Commits with a scope, matching the log: `fix(bridge): …`, `feat(code-reviewer): …`, `feat(code-tender): …`, `ci(release): …`.
-- **Branches:** `main` is the deploy branch. CI runs on pushes and PRs, GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries. Work on a branch and open a PR.
+- **Commits and PR titles:** Conventional Commits, `<type>(<scope>): <summary>`, with type one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`, `build`, `revert`. CI rejects a PR whose title does not match.
+- **Branches:** `main` is PR-only and squash-merged. Branch from `origin/main` with a prefix CI accepts: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/` or `claude/`.
+- **A PR merges only when** the four CI jobs pass (`PR Governance & Secret Guard`, and `Rust Gate` on three OSes), the Cubic AI review check passes, every review thread is resolved, and the branch is up to date with `main`.
+- **`main` deploys:** GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries.
 - **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
+- Rule 06 and `CONTRIBUTING.md` hold the full workflow; `SECURITY.md` says how to report a vulnerability.
 
 ## Path-scoped rules
 
@@ -86,7 +90,8 @@ cargo run -p code-reviewer -- --help
 | `03-architecture-and-testing.md` | `src/`, `tests/`, `crates/` | Core and shell split, test layout and naming, how to test without a Mac |
 | `04-clippy-formatting-and-docs.md` | Rust sources, manifests | Zero-warning policy, rustdoc, the completion checklist |
 | `05-crate-ecosystem-and-cli-patterns.md` | Manifests, `main.rs` files | Dependency policy, clap conventions, dry-run flags, state schema evolution |
-| `06-code-reviewer.md` | `crates/code-reviewer/` | Review pipeline, brains and KBs, Code Tender limits, deploying to the Mac |
-| `07-embedded-web-ui.md` | `ui_assets.rs`, `ui_html.rs`, both `server.rs` | Self-contained embedded pages, API parity, previewing safely |
-| `08-brand-and-pages-site.md` | `docs/`, `.github/assets/`, `scripts/brand/`, `README.md` | Brand tokens, logo rules, regenerating assets, Pages deploy |
-| `09-ci-release-and-github.md` | `.github/`, manifests | CI gate, release tags and targets, PR flow |
+| `06-git-workflow-and-governance.md` | Always | PR-only `main`, branch prefixes, Conventional Commits, squash merges, Cubic AI review and Code Tender coexistence, public sanitization |
+| `07-code-reviewer.md` | `crates/code-reviewer/` | Review pipeline, brains and KBs, Code Tender limits, token handling, deploying to the Mac |
+| `08-embedded-web-ui.md` | `ui_assets.rs`, `ui_html.rs`, both `server.rs` | Self-contained embedded pages, API parity, the request guard, previewing safely |
+| `09-brand-and-pages-site.md` | `docs/`, `.github/assets/`, `scripts/brand/`, `README.md` | Brand tokens, logo rules, regenerating assets, Pages deploy |
+| `10-ci-and-release.md` | `.github/`, manifests | CI jobs and required checks, release tags and targets, what never goes in a commit |
