@@ -1,0 +1,120 @@
+# Requirements: dashboards served from the M1
+
+## Introduction
+
+cheap-otto has three web dashboards. All of them belong on the MacBook (`otto-mac`), reached from the Windows workstation through SSH. Today each one is started and tunnelled by a different piece of code, and those pieces collide: two of them forward the same port, the shared SSH config forwards ports on every connection, and one dashboard is not a service at all. The result is dashboards that sometimes fail to open, die on reboot, and get restarted under each other.
+
+This spec makes the three dashboards one managed set: each runs as a `launchd` service on the Mac, one command on the workstation opens one tunnel for all of them, and one command reports their state. The evidence for every problem named here is in `design.md`, section 1.
+
+## Glossary
+
+| Term | Meaning |
+| --- | --- |
+| Mac | The headless MacBook, SSH alias `otto-mac` |
+| Workstation | The Windows PC the operator works on |
+| Dashboard | A long-running HTTP server on the Mac, bound to `127.0.0.1` |
+| Dashboard set | Mission Control (port 7420), Pixel Office (7421), Reviewer (7430) |
+| Managed service | A dashboard whose LaunchAgent is installed by `cheap-otto` (Mission Control, Pixel Office) |
+| Registered service | A dashboard that `cheap-otto` knows about but another tool installs (Reviewer, installed by `m1-provision.sh`) |
+| Tunnel | One `ssh -N` process on the workstation that forwards every dashboard port |
+| Registry | The single definition of dashboard ids, ports and labels in `src/dashboards.rs` |
+| Execute gate | `--execute` (alias `--apply`); without it a command only prints its plan |
+
+## Requirements
+
+### R1. Dashboards run as services on the Mac
+
+**User story:** As the operator, I want every dashboard to start by itself and come back after a crash, so that I never start one by hand.
+
+1. WHEN the operator runs the dashboard install command with the execute gate THEN the system SHALL install one LaunchAgent for each managed service, with `RunAtLoad` and `KeepAlive` set to true.
+2. WHEN a managed dashboard process exits for any reason THEN `launchd` SHALL start it again without operator action.
+3. WHEN the Mac user's GUI session starts THEN every installed dashboard service SHALL start without operator action.
+4. The system SHALL bind every dashboard to `127.0.0.1` and SHALL NOT generate any configuration that binds a dashboard to another address.
+5. WHEN the install command runs and a service's LaunchAgent file is unchanged and the service is loaded THEN the system SHALL leave that service running and SHALL NOT restart it.
+6. IF `pixel-agents` is not installed on the Mac THEN the install command SHALL skip the Pixel Office service, report that it was skipped and why, and still install the other services.
+7. IF the Mac has no GUI session for the user THEN the install command SHALL fail with a message that names the cause and the fix, and SHALL NOT report success.
+8. The system SHALL write each managed service's output to `~/.cheap-otto/logs/dashboards/<id>.log` on the Mac.
+9. WHEN the install command (re)installs a service THEN it SHALL first stop the legacy tmux sessions `cheapotto-serve` and `cheapotto-pixel` and any stray process holding that service's port, so the service can bind.
+
+### R2. One registry
+
+**User story:** As a maintainer, I want dashboard ids, ports and labels defined once, so that install, status, tunnel and the pages can never disagree.
+
+1. The system SHALL define the dashboard set (id, display name, port, `launchd` label, who installs it) in one module of the root crate, and install, uninstall, status, tunnel, `ui` and the hub API SHALL all read it from there.
+2. The system SHALL reject a dashboard set that contains port 0 or the same port twice.
+3. The system SHALL name managed LaunchAgents `com.cheapotto.dashboards.<id>`.
+4. WHEN a schedule is added for a project named `dashboards` THEN the system SHALL reject it with a typed error, so a schedule label can never collide with a dashboard label.
+5. The `code-reviewer` crate SHALL use the same port numbers as the registry, and a test SHALL fail if they differ.
+
+### R3. One tunnel
+
+**User story:** As the operator, I want one command to make every dashboard reachable on the workstation, so that opening one dashboard never breaks another.
+
+1. WHEN the operator runs `cheap-otto ui` with the execute gate THEN the system SHALL make every installed dashboard reachable on the workstation at `http://127.0.0.1:<port>` through exactly one SSH tunnel process.
+2. WHEN every dashboard port already answers on the workstation THEN the system SHALL NOT start another tunnel.
+3. The tunnel SHALL be spawned with discrete arguments, `-N`, `ExitOnForwardFailure=yes`, `ServerAliveInterval=30`, `ServerAliveCountMax=3`, and a loopback bind on both ends of every forward.
+4. WHEN the system starts a tunnel THEN it SHALL record the process id, ports, destination and start time in `tunnel.json` in the state directory.
+5. IF some dashboard ports answer on the workstation and others do not THEN the system SHALL stop the tunnel it recorded (if that process is alive) and start a new one; IF the ports are held by a process it did not record THEN it SHALL fail, name the ports, and print the command that finds the holder.
+6. IF the tunnel process exits before the ports answer THEN the system SHALL report failure and SHALL NOT print that the dashboards are ready or open a browser.
+7. The operator SHALL be able to see the tunnel's state and stop it with a command.
+8. The managed `Host` block that `cheap-otto` writes into `~/.ssh/config` SHALL NOT contain `LocalForward` lines, and rewriting the block SHALL remove any that an older version wrote.
+9. `code-reviewer ui` and `open-ui.ps1` SHALL NOT forward the Pixel Office port and SHALL NOT start a tunnel when the Reviewer port already answers on the workstation.
+
+### R4. One deploy
+
+**User story:** As the operator, I want the deploy I already run to leave every dashboard installed and current, so that there is no second procedure to remember.
+
+1. WHEN the operator runs `code-reviewer m1 sync` THEN the Mac SHALL have both `cheap-otto` and `code-reviewer` installed in `~/.cargo/bin`, built from the synced commit.
+2. WHEN provisioning runs on the Mac and the installed `cheap-otto` supports it THEN provisioning SHALL install or refresh the managed dashboard services using the install script that `cheap-otto` generates.
+3. IF dashboard installation fails during provisioning THEN provisioning SHALL print a warning and continue, so a dashboard problem never blocks a reviewer deploy.
+4. The install script SHALL be generated by one function, and the workstation path (over SSH) and the Mac path (provisioning) SHALL both run that same script.
+
+### R5. One status
+
+**User story:** As the operator, I want one command that tells me which dashboards are up and why one is not, so that I do not SSH in to find out.
+
+1. WHEN the operator runs the dashboard status command with the execute gate THEN the system SHALL report, for each dashboard: whether its LaunchAgent is loaded, its process id if running, whether its port is listening on the Mac, and whether its port answers on the workstation.
+2. The status command SHALL report whether `pixel-agents` and the `cheap-otto` binary are installed on the Mac, and whether automatic login is configured.
+3. IF automatic login is not configured THEN the status command SHALL warn that dashboards start only after the user logs in following a reboot.
+4. The status command SHALL offer `--json` output that contains the same facts and nothing else on stdout.
+5. The status command SHALL only read; it SHALL NOT start, stop or change anything.
+
+### R6. Dashboards link to each other
+
+**User story:** As the operator, I want to move between dashboards from any of them, so that I do not keep a list of ports.
+
+1. Mission Control SHALL serve `GET /api/dashboards`, returning each dashboard's id, display name, port and whether its port is listening on the machine running the server.
+2. WHEN a sibling dashboard is listening THEN Mission Control's page SHALL show a link to it, built from the page's own hostname and the sibling's port.
+3. The Reviewer dashboard's page SHALL show a link to Mission Control, built the same way.
+4. Links between dashboards SHALL be plain navigation and SHALL NOT require any dashboard to accept cross-origin API requests.
+
+### R7. Dashboards stay closed to hostile pages
+
+**User story:** As the operator, I want a web page in my browser to be unable to drive my dashboards, so that browsing is not a way into the Mac.
+
+1. Every dashboard server this project builds SHALL reject state-changing requests whose `Origin` is not in its allowlist and requests whose `Host` is not a loopback name. (Delivered by the origin-guard change that precedes this spec; this spec must not weaken it.)
+2. No task in this spec SHALL add a CORS allow header or widen a bind address.
+
+### R8. Existing commands keep working, and everything can be undone
+
+**User story:** As the operator, I want my habits and my exit to survive, so that this change costs me nothing.
+
+1. `cheap-otto ui --execute` SHALL remain the one command that leaves Mission Control open in the browser, and SHALL keep accepting `--port`, `--pixel-port`, `--state-dir` and `--no-open`.
+2. WHEN the operator runs the dashboard uninstall command with the execute gate THEN the system SHALL unload and delete only the managed dashboard LaunchAgents.
+3. `cheap-otto restore --unload-schedules` SHALL continue to remove every `com.cheapotto.*` LaunchAgent, including the dashboard services.
+4. Every new side-effecting command SHALL be a dry run without the execute gate and SHALL print the full plan first.
+
+### R9. The change is documented where people and agents look
+
+1. The README, the Pages site quickstart, `crates/code-reviewer/README.md`, both copies of the `update-m1` skill, `CLAUDE.md` and rules 06 and 07 SHALL describe the new commands and SHALL NOT describe the old tmux startup.
+
+## Out of scope
+
+- Restyling Mission Control to the brand. It keeps its current theme; that is a separate spec.
+- Authentication, multiple users, or reaching dashboards from anywhere but loopback through SSH.
+- Starting the tunnel automatically when the workstation logs in.
+- Changing the Mac's login settings. The spec only reports whether automatic login is on.
+- Replacing `pixel-agents` or changing how it draws.
+- Moving the Reviewer's LaunchAgent out of `m1-provision.sh`, or renaming its label.
+- Adding a ninth check to `cheap-otto doctor`.
+- Forwarding the dev ports (3000, 5173, 8080) through the dashboard tunnel. They keep their own tunnel (`cheap-otto pair --tunnel`).

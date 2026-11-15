@@ -75,6 +75,10 @@ cargo run -p code-reviewer -- --help
 - **Branches:** `main` is the deploy branch. CI runs on pushes and PRs, GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries. Work on a branch and open a PR.
 - **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
 
+## Specs
+
+Larger work is planned in `specs/<feature>/` as requirements, then design, then tasks, and each task has a GitHub issue. `specs/README.md` is the protocol and the step-by-step for carrying out a task; follow it when asked to implement one. Current spec: `specs/m1-dashboards/` (every dashboard as a `launchd` service on the Mac, one SSH tunnel).
+
 ## Path-scoped rules
 
 `.claude/rules/` holds detailed rules that load when you touch matching files:
@@ -90,3 +94,4 @@ cargo run -p code-reviewer -- --help
 | `07-embedded-web-ui.md` | `ui_assets.rs`, `ui_html.rs`, both `server.rs` | Self-contained embedded pages, API parity, previewing safely |
 | `08-brand-and-pages-site.md` | `docs/`, `.github/assets/`, `scripts/brand/`, `README.md` | Brand tokens, logo rules, regenerating assets, Pages deploy |
 | `09-ci-release-and-github.md` | `.github/`, manifests | CI gate, release tags and targets, PR flow |
+| `10-specs-protocol.md` | `specs/` | How to implement a spec task and how to edit a spec |
