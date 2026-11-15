@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::bridge::PeerNode;
 use crate::command::CommandSpec;
+use crate::worktree::posix_single_quote;
 
 /// Default port of Mission Control (`cheap-otto serve`).
 pub const MISSION_CONTROL_PORT: u16 = 7420;
@@ -550,6 +551,233 @@ pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord
         .collect();
     let expected = tunnel_args(&record.destination, record.ssh_port, &record.ports);
     is_ssh && !record.ports.is_empty() && args == expected
+}
+
+// ---------------------------------------------------------------------------------------------
+// Install: one POSIX `sh` script that installs the dashboard LaunchAgents on the Mac (design 3.3)
+// and the SSH plan that runs it from the workstation.
+// ---------------------------------------------------------------------------------------------
+
+/// Writes the Pixel Office settings `run_ui` used to write before starting `pixel-agents`.
+///
+/// A raw string, so the braces of the inline JavaScript need no escaping. The install script runs
+/// under `set -e`, so a failed write is reported as a warning instead of aborting the install.
+const PIXEL_AGENTS_CONFIG_SNIPPET: &str = r#"if command -v node >/dev/null 2>&1; then
+    mkdir -p "$HOME/.pixel-agents" &&
+      node -e 'const fs=require("fs"),p=process.env.HOME+"/.pixel-agents/config.json";let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};c.standalone=Object.assign({},c.standalone,{watchAllSessions:true});c.hooksConsent=Object.assign({},c.hooksConsent,{claude:"granted"});fs.writeFileSync(p,JSON.stringify(c,null,2));' ||
+      echo "dashboard=pixel-office warning=pixel-agents-config-not-written"
+  fi"#;
+
+/// Header of the install script: environment, `xml_escape`, the GUI-session guard and the
+/// cleanup of tmux sessions left by older versions of `cheap-otto ui`. [R1.7, R1.9]
+const INSTALL_SCRIPT_HEADER: &str = r#"set -eu
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+UID_NUM=$(id -u)
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/.cheap-otto/logs/dashboards"
+mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+FAILED=0
+# Values written into plist XML must be escaped; plain "$HOME" stays for shell use.
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+HOME_XML=$(xml_escape "$HOME")
+
+# [R1.7] LaunchAgents need the user's GUI session.
+if ! launchctl print "gui/$UID_NUM" >/dev/null 2>&1; then
+  echo "error=no-gui-session"
+  echo "hint=Log in to the Mac desktop once, or enable automatic login, then run this again."
+  exit 3
+fi
+
+# [R1.9] Sessions started by older versions of `cheap-otto ui`.
+if command -v tmux >/dev/null 2>&1; then
+  tmux kill-session -t cheapotto-serve 2>/dev/null || true
+  tmux kill-session -t cheapotto-pixel 2>/dev/null || true
+fi
+"#;
+
+/// `install_service` and `wait_port`, the two shell functions every service block calls.
+/// [R1.5, R1.9, R1.10]
+const INSTALL_SCRIPT_FUNCTIONS: &str = r#"
+# install_service <id> <label> <port>   (plist text on stdin)
+install_service() {
+  id="$1"; label="$2"; port="$3"
+  plist="$AGENTS_DIR/$label.plist"
+  tmp="$plist.tmp.$$"
+  # This function is called as an `if` condition, and POSIX turns `set -e` off inside a condition,
+  # so every step that can fail is checked here and reported with a cause.
+  if ! cat > "$tmp"; then
+    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    FAILED=1; rm -f "$tmp"; return 1
+  fi
+  # [R1.5] Unchanged and loaded: leave it alone.
+  if [ -f "$plist" ] && cmp -s "$tmp" "$plist" && launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    echo "dashboard=$id action=unchanged"
+    return 0
+  fi
+  launchctl bootout "gui/$UID_NUM/$label" 2>/dev/null || true
+  # bootout is asynchronous; bootstrapping too early fails with "Input/output error".
+  n=0
+  while launchctl print "gui/$UID_NUM/$label" >/dev/null 2>&1 && [ "$n" -lt 10 ]; do
+    n=$((n + 1)); sleep 0.5
+  done
+  # [R1.9] Whatever still listens on the port is a stray. Found by port, never by a name pattern:
+  # this script's own text is in the remote shell's argv, so a pattern would match the installer.
+  for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null || true
+    echo "dashboard=$id stray_killed=$pid"
+  done
+  # The killed listener may still be exiting; wait for the port to close before bootstrapping.
+  n=0
+  while [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ] && [ "$n" -lt 10 ]; do
+    n=$((n + 1)); sleep 0.5
+  done
+  held=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+  if [ -n "$held" ]; then
+    for pid in $held; do kill -9 "$pid" 2>/dev/null || true; done
+    n=0
+    while [ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ] && [ "$n" -lt 4 ]; do
+      n=$((n + 1)); sleep 0.5
+    done
+    held=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+    if [ -n "$held" ]; then
+      # [R1.9, R1.10] The port cannot be freed. Say why, where the log is and what launchd last saw,
+      # and return non-zero so the caller skips wait_port: the foreign listener would answer the
+      # port probe and this service would be reported as listening.
+      held=$(printf '%s' "$held" | tr '\n' ',')
+      last_exit=$(launchctl print "gui/$UID_NUM/$label" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+      echo "dashboard=$id listening=0 cause=port-held pid=$held last_exit=${last_exit:--} log=$LOG_DIR/$id.log"
+      FAILED=1
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  if ! mv "$tmp" "$plist"; then
+    echo "dashboard=$id listening=0 cause=plist-write-failed log=$LOG_DIR/$id.log"
+    FAILED=1; rm -f "$tmp"; return 1
+  fi
+  if ! launchctl bootstrap "gui/$UID_NUM" "$plist"; then
+    echo "dashboard=$id listening=0 cause=bootstrap-failed log=$LOG_DIR/$id.log"
+    FAILED=1; return 1
+  fi
+  echo "dashboard=$id action=installed"
+}
+
+# wait_port <id> <label> <port>
+wait_port() {
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if nc -z 127.0.0.1 "$3" 2>/dev/null; then echo "dashboard=$1 listening=1"; return 0; fi
+    i=$((i + 1)); sleep 0.5
+  done
+  # [R1.10] A service that never listens is a failure the caller must be able to diagnose:
+  # say why, where its log is, and what launchd last saw.
+  last_exit=$(launchctl print "gui/$UID_NUM/$2" 2>/dev/null | awk -F'= ' '/last exit code = /{print $2; exit}' | tr ' ' '_')
+  echo "dashboard=$1 listening=0 cause=not-listening-after-10s last_exit=${last_exit:--} log=$LOG_DIR/$1.log"
+  FAILED=1
+}
+"#;
+
+/// Renders the POSIX `sh` script that installs every dashboard LaunchAgent cheap-otto manages.
+/// [R1.5, R1.6, R1.7, R1.9, R1.10]
+///
+/// It runs under `/bin/sh` with `set -eu` and exits 0 when every step succeeded (skips are
+/// reported), 3 without a GUI session, and 4 when a service could not be installed or never
+/// listens; the other services are still attempted. Each service block is
+/// `if install_service <id> <label> <port> <<PLIST … PLIST then wait_port …; fi`, with the plist
+/// from [`render_service_plist_template`] in an unquoted heredoc, so the Mac's shell fills in the
+/// XML-escaped `$HOME_XML` and `$PIXEL_BIN_XML`. Ids are slugs, labels are rebuilt from the id
+/// and ports are `u16`, so nothing interpolated here needs quoting.
+#[must_use = "the install script should be run on the Mac or printed"]
+pub fn render_install_script(set: &DashboardSet) -> String {
+    let mut script = String::with_capacity(8192);
+    script.push_str(INSTALL_SCRIPT_HEADER);
+    script.push_str(INSTALL_SCRIPT_FUNCTIONS);
+    for service in set.managed() {
+        let Some(template) = render_service_plist_template(service, set) else {
+            continue;
+        };
+        let id = service.id.slug();
+        let label = managed_label(service.id);
+        let port = service.port;
+        script.push_str(&format!("\n# --- {id} ---\n"));
+        let (guard, preamble, skip_reason) = match service.id {
+            DashboardId::MissionControl => (
+                r#"if [ -x "$HOME/.cargo/bin/cheap-otto" ]; then"#,
+                String::new(),
+                "cheap-otto-not-installed",
+            ),
+            // [R1.6] Pixel Office is optional: without `pixel-agents` it is skipped, not failed.
+            DashboardId::PixelOffice => (
+                "PIXEL_BIN=$(command -v pixel-agents 2>/dev/null || true)\n\
+                 if [ -n \"$PIXEL_BIN\" ]; then",
+                format!(
+                    "  PIXEL_BIN_XML=$(xml_escape \"$PIXEL_BIN\")\n  {PIXEL_AGENTS_CONFIG_SNIPPET}\n"
+                ),
+                "pixel-agents-not-installed",
+            ),
+            DashboardId::Reviewer => continue,
+        };
+        // install_service returns non-zero when the service could not be installed (port held,
+        // plist not written, bootstrap failed); calling it as an `if` condition lets the other
+        // services proceed and skips wait_port for a service that did not start.
+        script.push_str(&format!(
+            "{guard}\n{preamble}  if install_service {id} {label} {port} <<PLIST\n{template}PLIST\n  then\n    wait_port {id} {label} {port}\n  fi\nelse\n  echo \"dashboard={id} action=skipped reason={skip_reason}\"\nfi\n"
+        ));
+    }
+    script.push_str("\nif [ \"$FAILED\" -ne 0 ]; then exit 4; fi\n");
+    script
+}
+
+/// A dashboard install, uninstall or restart plan: the script, what it will do and how to run it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardPlan {
+    /// The dashboards the plan was built for.
+    pub set: DashboardSet,
+    /// The POSIX script that runs on the Mac.
+    pub script: String,
+    /// Human-readable steps for the dry-run printout.
+    pub display_steps: Vec<String>,
+    /// `ssh -p <port> <user@host> /bin/sh -c '<script>'`.
+    pub spec: CommandSpec,
+}
+
+/// Builds the plan that installs the managed dashboard LaunchAgents over SSH. [R4.4]
+///
+/// The remote command is `/bin/sh -c '<script>'`: the Mac's login shell is zsh and the script
+/// must run under `sh`, and [`posix_single_quote`] makes the whole script one safe argument.
+/// `display_steps` has one `Ensure LaunchAgent <label> -> 127.0.0.1:<port>` line per managed
+/// service.
+#[must_use = "the install plan should be printed or executed"]
+pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan {
+    let script = render_install_script(set);
+    let display_steps = set
+        .managed()
+        .map(|service| {
+            format!(
+                "Ensure LaunchAgent {} -> 127.0.0.1:{}",
+                managed_label(service.id),
+                service.port
+            )
+        })
+        .collect();
+    let remote = format!("/bin/sh -c {}", posix_single_quote(&script));
+    let spec = CommandSpec::new(
+        "Install dashboard services on MacBook",
+        "ssh",
+        [
+            "-p".to_string(),
+            peer.ssh_port.to_string(),
+            peer.ssh_destination(),
+            remote,
+        ],
+    );
+    DashboardPlan {
+        set: set.clone(),
+        script,
+        display_steps,
+        spec,
+    }
 }
 
 #[cfg(test)]
@@ -1133,6 +1361,230 @@ mod tests {
         );
         let back: TunnelRecord = serde_json::from_str(&json)?;
         assert_eq!(back, record);
+        Ok(())
+    }
+
+    // --- Install script and plan (T1.4) ---
+
+    /// The text of the shell function `name`, from its definition to its closing brace.
+    fn shell_function<'a>(script: &'a str, name: &str) -> &'a str {
+        let start = script
+            .find(&format!("{name}() {{\n"))
+            .unwrap_or_else(|| panic!("{name} is not defined"));
+        let len = script[start..]
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{name} is not closed"));
+        &script[start..start + len + 3]
+    }
+
+    /// The text after `marker`, which must be present.
+    fn after<'a>(text: &'a str, marker: &str) -> &'a str {
+        let start = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing `{marker}`"));
+        &text[start + marker.len()..]
+    }
+
+    fn port_held_line(script: &str) -> &str {
+        script
+            .lines()
+            .find(|line| line.contains("cause=port-held"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn install_script_is_posix_and_guards_gui_session() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.starts_with("set -eu\n"), "{script}");
+        assert!(script.contains("error=no-gui-session"));
+        assert!(script.contains("exit 3"));
+        assert!(!script.contains("[["));
+        // The guard runs before anything is installed.
+        let guard = script.find("error=no-gui-session").unwrap_or(usize::MAX);
+        let first_call = script.find("if install_service ").unwrap_or(0);
+        assert!(guard < first_call);
+    }
+
+    #[test]
+    fn install_script_skips_unchanged_services_and_reports_actions() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.contains("cmp -s"));
+        assert!(script.contains("action=unchanged"));
+        assert!(script.contains("action=installed"));
+        assert!(script.contains("reason=cheap-otto-not-installed"));
+    }
+
+    #[test]
+    fn install_script_skips_pixel_office_when_binary_missing() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.contains("reason=pixel-agents-not-installed"));
+        // `PIXEL_BIN_XML` is only set, and only used, once pixel-agents was found (`set -u`).
+        let pixel_block = after(&script, "# --- pixel-office ---");
+        assert!(pixel_block.contains("PIXEL_BIN_XML=$(xml_escape \"$PIXEL_BIN\")"));
+        assert!(!script[..script.len() - pixel_block.len()].contains("$PIXEL_BIN_XML"));
+    }
+
+    #[test]
+    fn install_script_frees_ports_by_listener_not_by_name() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.contains("lsof -nP -iTCP:"));
+        assert!(!script.contains("pkill"));
+    }
+
+    #[test]
+    fn install_script_never_binds_non_loopback() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(!script.contains("0.0.0.0"));
+        assert!(script.contains("<string>127.0.0.1</string>"));
+    }
+
+    #[test]
+    fn install_script_waits_for_port_release_before_bootstrap() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.contains("kill -9"));
+        assert!(script.contains("cause=port-held"));
+        let wait_loop = script.find("while [ -n \"$(lsof -nP -iTCP:");
+        let bootstrap = script.find("launchctl bootstrap");
+        assert!(wait_loop.is_some() && bootstrap.is_some());
+        assert!(wait_loop < bootstrap, "{script}");
+    }
+
+    #[test]
+    fn install_script_reports_port_held_with_diagnostics_and_skips_wait()
+    -> Result<(), DashboardError> {
+        let set = DashboardSet::with_ports(8420, 8421, 8430)?;
+        let script = render_install_script(&set);
+        let line = port_held_line(&script);
+        for field in [
+            "listening=0",
+            "cause=port-held",
+            "last_exit=",
+            "log=$LOG_DIR/",
+        ] {
+            assert!(line.contains(field), "{line} lacks {field}");
+        }
+        let branch = after(&script, line);
+        let end = branch.find("fi\n").unwrap_or(branch.len());
+        assert!(branch[..end].trim_end().ends_with("return 1"), "{branch}");
+
+        for (id, label, port) in [
+            (
+                "mission-control",
+                "com.cheapotto.dashboards.mission-control",
+                8420,
+            ),
+            (
+                "pixel-office",
+                "com.cheapotto.dashboards.pixel-office",
+                8421,
+            ),
+        ] {
+            let call = format!("  if install_service {id} {label} {port} <<PLIST\n");
+            let body = after(&script, &call);
+            let then = format!("\nPLIST\n  then\n    wait_port {id} {label} {port}\n  fi\n");
+            assert!(body.contains(&then), "{id}: wait_port is not the if body");
+        }
+        assert_eq!(script.matches("if install_service ").count(), 2);
+        assert_eq!(script.matches("    wait_port ").count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn install_script_checks_each_step_because_errexit_is_off_in_conditions() {
+        let script = render_install_script(&DashboardSet::standard());
+        let function = shell_function(&script, "install_service");
+        for (step, cause) in [
+            ("if ! cat > \"$tmp\"", "cause=plist-write-failed"),
+            ("if ! mv \"$tmp\" \"$plist\"", "cause=plist-write-failed"),
+            ("if ! launchctl bootstrap", "cause=bootstrap-failed"),
+        ] {
+            let branch = after(function, step);
+            let end = branch.find("\n  fi\n").unwrap_or(branch.len());
+            let branch = &branch[..end];
+            for expected in [cause, "FAILED=1", "return 1"] {
+                assert!(branch.contains(expected), "{step} lacks {expected}");
+            }
+        }
+        let bootstrap_check = function
+            .find("if ! launchctl bootstrap")
+            .unwrap_or(usize::MAX);
+        let installed = function.find("action=installed").unwrap_or(0);
+        assert!(bootstrap_check < installed);
+        assert_eq!(script.matches("action=installed").count(), 1);
+    }
+
+    #[test]
+    fn install_script_exits_four_when_a_service_never_listens() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(shell_function(&script, "wait_port").contains("FAILED=1"));
+        assert!(script.ends_with("if [ \"$FAILED\" -ne 0 ]; then exit 4; fi\n"));
+    }
+
+    #[test]
+    fn install_script_reports_cause_log_and_last_exit_when_a_service_never_listens() {
+        let script = render_install_script(&DashboardSet::standard());
+        let line = script
+            .lines()
+            .find(|line| line.contains("cause=not-listening-after-10s"))
+            .unwrap_or_default();
+        for field in ["listening=0", "last_exit=", "log=$LOG_DIR/"] {
+            assert!(line.contains(field), "{line} lacks {field}");
+        }
+        assert!(
+            script.contains(
+                "wait_port mission-control com.cheapotto.dashboards.mission-control 7420\n"
+            )
+        );
+        assert!(
+            script.contains("wait_port pixel-office com.cheapotto.dashboards.pixel-office 7421\n")
+        );
+    }
+
+    #[test]
+    fn install_script_escapes_xml_values_for_plists() {
+        let script = render_install_script(&DashboardSet::standard());
+        assert!(script.contains("sed -e 's/&/\\&amp;/g'"));
+        assert!(script.contains("HOME_XML=$(xml_escape \"$HOME\")"));
+        // The heredocs are unquoted so `$HOME_XML` expands, and the templates use only escaped values.
+        assert!(!script.contains("<<'PLIST'"));
+        let plists: Vec<&str> = script.split("<<PLIST\n").skip(1).collect();
+        assert_eq!(plists.len(), 2);
+        for plist in plists {
+            let text = plist.split("\nPLIST\n").next().unwrap_or_default();
+            assert!(text.contains("$HOME_XML"));
+            assert!(!text.contains("$HOME/") && !text.contains("$PIXEL_BIN<"));
+        }
+    }
+
+    #[test]
+    fn install_plan_wraps_script_for_remote_sh() -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let plan = build_install_plan(&peer, &set);
+        assert_eq!(plan.spec.program, "ssh");
+        assert_eq!(plan.spec.args[..3], ["-p", "2222", "admin@192.0.2.10"]);
+        let remote = plan
+            .spec
+            .args
+            .last()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(remote.starts_with("/bin/sh -c '"), "{remote}");
+        // The script carries single quotes (the pixel-agents snippet), so they must be escaped.
+        assert!(plan.script.contains('\''));
+        assert_eq!(
+            remote,
+            format!("/bin/sh -c {}", posix_single_quote(&plan.script))
+        );
+        assert_eq!(plan.script, render_install_script(&set));
+        assert_eq!(
+            plan.display_steps,
+            [
+                "Ensure LaunchAgent com.cheapotto.dashboards.mission-control -> 127.0.0.1:7420",
+                "Ensure LaunchAgent com.cheapotto.dashboards.pixel-office -> 127.0.0.1:7421",
+            ]
+        );
+        assert_eq!(plan.set, set);
         Ok(())
     }
 }

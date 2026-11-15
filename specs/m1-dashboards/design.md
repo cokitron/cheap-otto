@@ -206,7 +206,7 @@ fi
 install_service() {
   id="$1"; label="$2"; port="$3"
   plist="$AGENTS_DIR/$label.plist"
-  tmp="$plist.tmp.$"
+  tmp="$plist.tmp.$$"
   # This function is called as an `if` condition, and POSIX turns `set -e` off inside a condition,
   # so every step that can fail is checked here and reported with a cause.
   if ! cat > "$tmp"; then
@@ -316,11 +316,12 @@ if [ "$FAILED" -ne 0 ]; then exit 4; fi
 
 - The heredoc delimiter is unquoted (`<<PLIST`) on purpose, so `$HOME_XML` and `$PIXEL_BIN_XML` expand. Shell paths used outside XML (the `$HOME/.cargo/bin/cheap-otto -x` test, `mkdir`) keep plain `$HOME`.
 - Strays are found by port with `lsof`, not by `pkill -f <pattern>`: the script's own text travels in the argv of the remote shell, so a pattern match would kill the installer.
-- The pixel-agents config snippet is the one `run_ui` runs today, moved here unchanged. Store it as a raw string constant so no brace escaping is needed:
+- The pixel-agents config snippet is the one `run_ui` runs today. `run_ui` ran it without `set -e`; here a failed write would abort the whole install under `set -e`, so the snippet chains the two steps and reports a failure as a warning instead. Store it as a raw string constant so no brace escaping is needed:
   ```rust
   const PIXEL_AGENTS_CONFIG_SNIPPET: &str = r#"if command -v node >/dev/null 2>&1; then
-    mkdir -p "$HOME/.pixel-agents"
-    node -e 'const fs=require("fs"),p=process.env.HOME+"/.pixel-agents/config.json";let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};c.standalone=Object.assign({},c.standalone,{watchAllSessions:true});c.hooksConsent=Object.assign({},c.hooksConsent,{claude:"granted"});fs.writeFileSync(p,JSON.stringify(c,null,2));'
+    mkdir -p "$HOME/.pixel-agents" &&
+      node -e 'const fs=require("fs"),p=process.env.HOME+"/.pixel-agents/config.json";let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch{};c.standalone=Object.assign({},c.standalone,{watchAllSessions:true});c.hooksConsent=Object.assign({},c.hooksConsent,{claude:"granted"});fs.writeFileSync(p,JSON.stringify(c,null,2));' ||
+      echo "dashboard=pixel-office warning=pixel-agents-config-not-written"
   fi"#;
   ```
 - Exit codes: 0 when every step succeeded (skips are reported), 3 for no GUI session, 4 when a managed service could not be installed or never listens (port held, plist not written, bootstrap failed, or not listening after 10 s); the other services are still attempted. Nothing in `install_service` relies on `set -e`, because it is off inside an `if` condition. Provisioning (3.10) treats any non-zero as a warning [R4.3]; `ui` treats it as fatal [R3.10].

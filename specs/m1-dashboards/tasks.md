@@ -20,26 +20,27 @@ Read `../README.md` (how to carry out a task), then `requirements.md` and `desig
 
 ## PR plan
 
-The 21 open tasks before the LIVE rollout ship as 14 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 13) because its second half needs the new `ui`. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
+The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one theme share a PR; T4.3 is split into two parts (PRs 4 and 14) because its second half needs the new `ui`. T1.5 moved from PR 7 into PR 9 so that four PRs (6, 7, 10 and 12) could run in parallel. Take the first row whose tasks are all unchecked in this file, whose issues are all open and unclaimed, and whose "needs" are merged. A row that runs past 600 lines is split at a green seam (`../README.md`, PR size budget).
 
 | PR | Tasks | Branch | Needs |
 | --- | --- | --- | --- |
-| 1 | T1.1 registry | `feat/m1-dashboards-t1-1-registry` | nothing |
-| 2 | T1.8 SSH config without forwards | `fix/m1-dashboards-t1-8-ssh-config-forwards` | nothing |
-| 3 | T4.1 testable two-binary deploy | `refactor/m1-dashboards-t4-1-build-script` | nothing |
-| 4 | T4.3 part a: reviewer fallback tunnel | `fix/m1-dashboards-t4-3a-fallback-tunnel` | nothing |
-| 5 | T1.2 reserved name, T1.3 LaunchAgent templates | `feat/m1-dashboards-t1-2-t1-3-plists` | PR 1 |
+| 1 | T1.1 registry (merged in #41) | `feat/m1-dashboards-t1-1-registry` | nothing |
+| 2 | T1.8 SSH config without forwards (merged in #42) | `fix/m1-dashboards-t1-8-ssh-config-forwards` | nothing |
+| 3 | T4.1 testable two-binary deploy (merged in #43) | `refactor/m1-dashboards-t4-1-build-script` | nothing |
+| 4 | T4.3 part a: reviewer fallback tunnel (merged in #44) | `fix/m1-dashboards-t4-3a-fallback-tunnel` | nothing |
+| 5 | T1.2 reserved name, T1.3 LaunchAgent templates (merged in #45→#41) | `feat/m1-dashboards-t1-2-t1-3-plists` | PR 1 |
 | 6 | T1.4 install script and plan | `feat/m1-dashboards-t1-4-install-script` | PR 5 |
-| 7 | T1.5 uninstall and restart, T1.6 status | `feat/m1-dashboards-t1-5-t1-6-status` | PR 6 |
-| 8 | T1.7 tunnel spec, decision and record | `feat/m1-dashboards-t1-7-tunnel` | PR 1 |
-| 9 | T2.1 `dashboards` subcommands | `feat/m1-dashboards-t2-1-subcommands` | PR 7 |
-| 10 | T2.2 tunnel management, T2.3 new `ui` | `feat/m1-dashboards-t2-2-t2-3-ui` | PRs 2, 8, 9 |
-| 11 | T3.1 hub API, T3.2 Mission Control links, T4.6 shared ports and link back | `feat/m1-dashboards-t3-links` | PR 1 |
-| 12 | T4.2 provisioning, T4.4 Pixel Office button | `feat/m1-dashboards-t4-2-t4-4-services` | PRs 3, 9 |
-| 13 | T4.3 part b: delegate to `cheap-otto ui`, T4.5 `open-ui.ps1` | `feat/m1-dashboards-t4-3b-t4-5-delegate` | PRs 4, 10 |
-| 14 | T5.1 user docs, T5.2 agent docs | `docs/m1-dashboards-t5-docs` | PRs 12, 13 |
+| 7 | T1.6 status script, parser and diagnosis | `feat/m1-dashboards-t1-6-status` | PR 1 |
+| 8 | T1.7 tunnel spec, decision and record (merged in #47) | `feat/m1-dashboards-t1-7-tunnel` | PR 1 |
+| 9 | T1.5 uninstall and restart, T2.1 `dashboards` subcommands | `feat/m1-dashboards-t1-5-t2-1-subcommands` | PRs 6, 7 |
+| 10 | T2.2 tunnel management | `feat/m1-dashboards-t2-2-tunnel` | PR 8 |
+| 11 | T3.1 hub API, T3.2 Mission Control links, T4.6 shared ports and link back (merged in #48→#41) | `feat/m1-dashboards-t3-links` | PR 1 |
+| 12 | T4.4 Pixel Office button | `feat/m1-dashboards-t4-4-pixel-button` | PR 1 |
+| 13 | T2.3 new `ui` | `feat/m1-dashboards-t2-3-ui` | PRs 2, 9, 10 |
+| 14 | T4.2 provisioning, T4.3 part b, T4.5 `open-ui.ps1` | `feat/m1-dashboards-t4-reviewer-alignment` | PRs 3, 4, 9, 13 |
+| 15 | T5.1 user docs, T5.2 agent docs | `docs/m1-dashboards-t5-docs` | PRs 13, 14 |
 
-After PR 14 the owner runs T6.1 and T6.2 on the real Mac; they produce no PR unless they find a bug.
+After PR 15 the owner runs T6.1 and T6.2 on the real Mac; they produce no PR unless they find a bug.
 
 ## Phase 0: prerequisite
 
@@ -121,7 +122,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 
 ### T1.4 Install script and install plan
 
-- [ ] Done
+- [x] Done
 - **Issue:** #11
 - **Covers:** R1.5, R1.6, R1.7, R1.9, R1.10, R4.4
 - **Depends on:** T1.3
@@ -395,7 +396,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
   - `delegation_and_fallback_commands_strip_github_credentials`: for the version probe, the delegated `ui` command and the fallback tunnel command, `Command::get_envs()` shows both `GH_TOKEN` and `GITHUB_TOKEN` removed (the same assertion style as the existing `strip_github_credentials` test in `brains.rs`).
 - **Parts** (one PR each, in this order; see the PR plan):
   - **a. Fallback tunnel** (PR 4, needs only T0.1): steps 1 and 5, and from step 4 `reviewer_fallback_tunnel_command` (through `strip_github_credentials`) and removing the `DEFAULT_PIXEL_PORT` forward. `open_tunneled_ui` always takes the fallback path for now. `cheap-otto dashboards status` does not exist yet, so the failure message names the port and suggests checking the Reviewer service with `code-reviewer m1 status`; part b switches the hint to `cheap-otto dashboards status --execute`. Tests: `fallback_tunnel_forwards_only_the_reviewer_port`, `fallback_poll_step_decides_ready_wait_exited_or_timed_out`. The PR says `part of #23`.
-  - **b. Delegate to `cheap-otto ui`** (PR 13, needs T2.3): steps 2 and 3, the rest of step 4, and the step 5 hint naming `cheap-otto dashboards status --execute`. Tests: `delegation_is_skipped_for_custom_host_or_port`, `delegation_and_fallback_commands_strip_github_credentials`. The PR closes #23.
+  - **b. Delegate to `cheap-otto ui`** (PR 14, needs T2.3): steps 2 and 3, the rest of step 4, and the step 5 hint naming `cheap-otto dashboards status --execute`. Tests: `delegation_is_skipped_for_custom_host_or_port`, `delegation_and_fallback_commands_strip_github_credentials`. The PR closes #23.
 - **Acceptance:** `cargo test -p code-reviewer server::tests` passes. Do not run `code-reviewer ui`.
 
 ### T4.4 The Pixel Office button starts the service, not an orphan
