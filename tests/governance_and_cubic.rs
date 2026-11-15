@@ -95,6 +95,191 @@ fn parse_cubic_custom_rules(yaml: &str) -> Vec<ParsedCustomRule> {
     rules
 }
 
+/// Keys that Cubic's schema allows in each object it closes with `additionalProperties: false`,
+/// listed under the dotted path of that object in `cubic.yaml`.
+///
+/// One key outside these lists makes Cubic reject the whole file and review with the settings
+/// saved in its dashboard, so none of the custom rules apply. Keep the lists in step with
+/// <https://cubic.dev/schema/cubic-repository-config.schema.json>.
+const CUBIC_CLOSED_OBJECTS: &[(&str, &[&str])] = &[
+    (
+        "reviews",
+        &[
+            "senior_reviewers",
+            "enabled",
+            "sensitivity",
+            "incremental_commits",
+            "check_drafts",
+            "architecture_diagrams",
+            "external_contributors_require_manual_review",
+            "show_ai_feedback_buttons",
+            "resolve_threads_when_addressed",
+            "merge_confidence_summary",
+            "auto_approve_behavior",
+            "auto_approve",
+            "auto_approve_custom_prompt",
+            "auto_approve_rules",
+            "ultrareview",
+            "auto_ultrareview",
+            "auto_ultrareview_custom_prompt",
+            "auto_ultrareview_file_patterns",
+            "custom_instructions",
+            "ignore",
+            "custom_rules",
+        ],
+    ),
+    (
+        "reviews.ignore",
+        &[
+            "files",
+            "head_branches",
+            "base_branches",
+            "pr_labels",
+            "pr_titles",
+            "max_changed_lines",
+        ],
+    ),
+    (
+        "reviews.auto_approve_rules",
+        &[
+            "exclude",
+            "only_files",
+            "exclude_external_contributors",
+            "allow_open_issues",
+            "exclude_authors",
+            "only_authors",
+            "exclude_head_branches",
+            "only_head_branches",
+            "exclude_base_branches",
+            "only_base_branches",
+            "exclude_labels",
+            "only_labels",
+            "exclude_titles",
+            "only_titles",
+        ],
+    ),
+    (
+        "reviews.custom_rules",
+        &[
+            "name",
+            "description",
+            "file_paths",
+            "include",
+            "exclude",
+            "only_repositories",
+            "exclude_repositories",
+        ],
+    ),
+    (
+        "pr_descriptions",
+        &[
+            "generate",
+            "instructions",
+            "cubic_review_link",
+            "skip_if_author_description",
+        ],
+    ),
+    (
+        "issues",
+        &[
+            "fix_with_cubic_buttons",
+            "pr_comment_fixes",
+            "fix_commits_to_pr",
+            "auto_fix_sign_commits",
+            "coding_agent_provider",
+            "auto_fix",
+            "auto_fix_rules",
+            "coding_agent_instructions",
+        ],
+    ),
+    (
+        "issues.auto_fix_rules",
+        &[
+            "exclude_authors",
+            "only_authors",
+            "exclude_head_branches",
+            "only_head_branches",
+            "exclude_base_branches",
+            "only_base_branches",
+            "exclude_labels",
+            "only_labels",
+            "exclude_titles",
+            "only_titles",
+        ],
+    ),
+];
+
+/// Splits `key: value` (or a bare `key:`) at the first colon when the text before it is a plain
+/// YAML key. Quoted scalars such as `"a: b"` are not keys.
+fn split_yaml_key(text: &str) -> Option<(&str, &str)> {
+    let (key, value) = text.split_once(':')?;
+    let is_plain_key = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let value_is_separated = value.is_empty() || value.starts_with(' ');
+    (is_plain_key && value_is_separated).then_some((key, value.trim()))
+}
+
+/// Lists every key in `yaml` that sits inside one of [`CUBIC_CLOSED_OBJECTS`] but is missing from
+/// that object's list, as a dotted path such as `reviews.merge_confidence`.
+///
+/// It reads the block style that `cubic.yaml` is written in: nesting by indentation, `- `
+/// sequence items, and `|` or `>` block scalars, whose text is skipped. Flow mappings
+/// (`{a: 1}`) are not read.
+fn unknown_cubic_keys(yaml: &str) -> Vec<String> {
+    let mut unknown = Vec::new();
+    // The keys that enclose the current line, each with the column it starts in.
+    let mut enclosing: Vec<(usize, &str)> = Vec::new();
+    let mut block_scalar_owner: Option<usize> = None;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut column = line.chars().take_while(|c| *c == ' ').count();
+        if let Some(owner) = block_scalar_owner {
+            if column > owner {
+                continue;
+            }
+            block_scalar_owner = None;
+        }
+
+        // In `- name: x` the key starts after the dash, level with the other keys of that item.
+        let mut text = trimmed;
+        while let Some(item) = text.strip_prefix("- ") {
+            let item = item.trim_start();
+            column += text.len() - item.len();
+            text = item;
+        }
+
+        let Some((key, value)) = split_yaml_key(text) else {
+            continue;
+        };
+        while enclosing.last().is_some_and(|(start, _)| *start >= column) {
+            enclosing.pop();
+        }
+        let parent = enclosing
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(".");
+        let rejected = CUBIC_CLOSED_OBJECTS
+            .iter()
+            .any(|(path, allowed)| *path == parent && !allowed.contains(&key));
+        if rejected {
+            unknown.push(format!("{parent}.{key}"));
+        }
+        if value.starts_with('|') || value.starts_with('>') {
+            block_scalar_owner = Some(column);
+        }
+        enclosing.push((column, key));
+    }
+
+    unknown
+}
+
 #[test]
 fn cubic_yaml_conforms_to_schema_budgets_and_tender_coexistence() -> Result<(), String> {
     let root = repo_root();
@@ -157,6 +342,61 @@ fn cubic_yaml_conforms_to_schema_budgets_and_tender_coexistence() -> Result<(), 
     }
 
     Ok(())
+}
+
+#[test]
+fn cubic_yaml_uses_only_keys_the_cubic_schema_allows() -> Result<(), String> {
+    let cubic_path = repo_root().join("cubic.yaml");
+    let raw = fs::read_to_string(&cubic_path)
+        .map_err(|e| format!("failed reading {}: {}", cubic_path.display(), e))?;
+
+    let unknown = unknown_cubic_keys(&raw);
+    if !unknown.is_empty() {
+        return Err(format!(
+            "cubic.yaml uses keys the Cubic schema rejects, so Cubic ignores the whole file: {}",
+            unknown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn unknown_cubic_keys_flags_misnamed_keys_and_skips_block_scalar_text() {
+    let yaml = [
+        "version: 1",
+        "reviews:",
+        "  merge_confidence: true",
+        "  custom_instructions: |",
+        "    not_a_key: prose inside a block scalar",
+        "  ignore:",
+        "    files:",
+        "      - \"a: b\"",
+        "    labels:",
+        "      - \"skip\"",
+        "  custom_rules:",
+        "    - name: \"x\"",
+        "      description: |",
+        "        severity: also prose",
+        "      severity: high",
+        "pr_descriptions:",
+        "  generate: true",
+        "issues:",
+        "  auto_fix: \"off\"",
+        "  autofix: \"off\"",
+        "unlisted_section:",
+        "  anything: 1",
+    ]
+    .join("\n");
+
+    assert_eq!(
+        unknown_cubic_keys(&yaml),
+        [
+            "reviews.merge_confidence",
+            "reviews.ignore.labels",
+            "reviews.custom_rules.severity",
+            "issues.autofix",
+        ]
+    );
 }
 
 #[test]
