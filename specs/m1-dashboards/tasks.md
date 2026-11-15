@@ -369,6 +369,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 ### T4.2 Provisioning installs the dashboard services
 
 - [x] Done
+- PR: #58
 - **Issue:** #22
 - **Covers:** R4.2, R4.3
 - **Depends on:** T2.1, T4.1
@@ -387,6 +388,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 - [x] Part a done
 - PR: #44
 - [x] Part b done
+- PR: #58
 - **Issue:** #23
 - **Covers:** R3.6, R3.9
 - **Depends on:** T0.1, T2.3
@@ -427,6 +429,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 ### T4.5 `open-ui.ps1` becomes a wrapper
 
 - [x] Done
+- PR: #58
 - **Issue:** #25
 - **Covers:** R3.9
 - **Depends on:** T4.3
