@@ -147,7 +147,7 @@ enum Commands {
         /// Reviewer port, on the Mac and on 127.0.0.1 here. Only the default 7430 can share the `cheap-otto ui` tunnel
         #[arg(long, default_value_t = DEFAULT_UI_PORT)]
         port: u16,
-        /// `cheap-otto` state directory holding `peer.json` (default: `.cheap-otto` in the workspace or a parent, then `~/.cheap-otto`)
+        /// `cheap-otto` state directory holding `peer.json`, passed on to `cheap-otto ui` (default: the first of `./.cheap-otto`, the git repo root's `.cheap-otto` and `~/.cheap-otto` that holds `peer.json`)
         #[arg(long)]
         state_dir: Option<PathBuf>,
         #[arg(long)]

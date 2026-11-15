@@ -203,7 +203,8 @@ pub fn open_tunneled_ui(
             found
         } else {
             println!(
-                "[ui] `cheap-otto ui` cannot reach {host}:{port}; using a Reviewer-only tunnel."
+                "[ui] No paired peer in `peer.json` lets `cheap-otto ui` reach {host}:{port}; \
+                 using a Reviewer-only tunnel."
             );
             None
         };
@@ -211,15 +212,13 @@ pub fn open_tunneled_ui(
         if let Some(bin) = cheap_otto {
             println!("[ui] Sharing the dashboard tunnel through `cheap-otto ui`...");
             // Inherited stdio, so the install and tunnel progress of `cheap-otto ui` stays visible.
-            let status = cheap_otto_ui_command(&bin, opts.state_dir).status()?;
-            if !status.success() {
-                return Err(format!(
-                    "`cheap-otto ui` failed ({status}), so the Reviewer dashboard on \
-                     127.0.0.1:{port} is not tunneled; check the services with \
-                     `cheap-otto dashboards status --execute`"
-                )
-                .into());
-            }
+            let exit_ok = cheap_otto_ui_command(&bin, opts.state_dir)
+                .status()?
+                .success();
+            // `cheap-otto ui` only warns about a dashboard that is not listening, so check the port.
+            let port_answers =
+                exit_ok && TcpStream::connect_timeout(&local_addr, Duration::from_secs(1)).is_ok();
+            delegated_ui_check(exit_ok, port_answers, port)?;
         } else {
             println!("[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host}...");
             let mut command = reviewer_fallback_tunnel_command(host, port);
@@ -236,17 +235,34 @@ pub fn open_tunneled_ui(
 }
 
 /// Whether `cheap-otto ui` can serve this request. It has no `--host` and always forwards the
-/// Reviewer on `DEFAULT_UI_PORT`, so only the paired peer (or no host at all) on 7430 qualifies.
+/// Reviewer on `DEFAULT_UI_PORT`, so it qualifies only when `peer.json` records a peer, the
+/// requested host is none or that peer, and the port is 7430. Without a recorded peer
+/// `cheap-otto ui` would fall back to its own default host, which may not be the Mac meant here.
 fn should_delegate_to_cheap_otto(
     requested_host: Option<&str>,
     peer_host: Option<&str>,
     port: u16,
 ) -> bool {
-    let host_matches = match requested_host {
-        None => true,
-        Some(requested) => peer_host == Some(requested),
+    let Some(peer) = peer_host else {
+        return false;
     };
-    host_matches && port == DEFAULT_UI_PORT
+    requested_host.is_none_or(|requested| requested == peer) && port == DEFAULT_UI_PORT
+}
+
+/// Judges a finished delegated `cheap-otto ui`: it must exit 0 and leave the Reviewer port
+/// answering, or the browser would open a dead page.
+fn delegated_ui_check(exit_ok: bool, port_answers: bool, port: u16) -> Result<(), String> {
+    let reason = if !exit_ok {
+        "`cheap-otto ui` failed"
+    } else if !port_answers {
+        "`cheap-otto ui` finished but the port does not answer"
+    } else {
+        return Ok(());
+    };
+    Err(format!(
+        "{reason}, so the Reviewer dashboard on 127.0.0.1:{port} is not reachable; \
+         check the services with `cheap-otto dashboards status --execute`"
+    ))
 }
 
 /// `cheap-otto` beside this executable, else `cheap-otto` on `PATH` when `--version` runs.
@@ -294,23 +310,42 @@ fn cheap_otto_ui_command(bin: &Path, state_dir: Option<&Path>) -> Command {
 
 /// The `alias` and `host` of the peer in `cheap-otto`'s `peer.json`, alias first, or empty.
 ///
-/// Looks in `--state-dir` when given, else in `.cheap-otto` in the current directory or a parent,
-/// then `~/.cheap-otto`, the same places `cheap-otto ui` resolves.
+/// Uses `--state-dir` alone when given. Otherwise the first `peer.json` in `./.cheap-otto`, the git
+/// repo root's `.cheap-otto`, then `~/.cheap-otto`: the order of `cheap-otto`'s
+/// `resolve_active_state_dir`, so both binaries read the same peer.
 fn read_peer_hosts(state_dir: Option<&Path>) -> Vec<String> {
     let candidates: Vec<PathBuf> = match state_dir {
         Some(dir) => vec![dir.to_path_buf()],
-        None => std::env::current_dir()
-            .map(|cwd| cwd.ancestors().map(|d| d.join(".cheap-otto")).collect())
-            .unwrap_or_else(|_| Vec::new())
-            .into_iter()
-            .chain(std::iter::once(home_dir().join(".cheap-otto")))
-            .collect(),
+        None => {
+            let mut dirs = vec![PathBuf::from(".cheap-otto")];
+            dirs.extend(git_repo_root().map(|root| root.join(".cheap-otto")));
+            dirs.push(home_dir().join(".cheap-otto"));
+            dirs
+        }
     };
     candidates
         .iter()
         .find_map(|dir| fs::read_to_string(dir.join("peer.json")).ok())
         .map(|text| parse_peer_hosts(&text))
         .unwrap_or_default()
+}
+
+/// `git rev-parse --show-toplevel`, without `GH_TOKEN` or `GITHUB_TOKEN`.
+fn git_repo_root_command() -> Command {
+    let mut cmd = Command::new(crate::brains::git_binary());
+    cmd.args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
+/// The current git repository's root, if the current directory is inside one.
+fn git_repo_root() -> Option<PathBuf> {
+    let output = git_repo_root_command().output().ok()?;
+    let root = String::from_utf8(output.stdout).ok()?;
+    let root = root.trim();
+    (output.status.success() && !root.is_empty()).then(|| PathBuf::from(root))
 }
 
 /// Reads `alias` and `host` from `peer.json` text, dropping any value `ssh` must not receive.
@@ -2227,7 +2262,8 @@ mod tests {
 
     #[test]
     fn delegation_is_skipped_for_custom_host_or_port() {
-        assert!(should_delegate_to_cheap_otto(None, None, 7430));
+        // No recorded peer: `cheap-otto ui` would pick its own default host, so never delegate.
+        assert!(!should_delegate_to_cheap_otto(None, None, 7430));
         assert!(should_delegate_to_cheap_otto(None, Some("otto-mac"), 7430));
         assert!(should_delegate_to_cheap_otto(
             Some("otto-mac"),
@@ -2266,7 +2302,8 @@ mod tests {
         let probe = cheap_otto_version_probe();
         assert_eq!(probe.get_program(), "cheap-otto");
         let fallback = reviewer_fallback_tunnel_command("otto-mac", 7430);
-        for cmd in [&probe, &ui, &bare, &fallback] {
+        let repo_root = git_repo_root_command();
+        for cmd in [&probe, &ui, &bare, &fallback, &repo_root] {
             let removed: Vec<_> = cmd
                 .get_envs()
                 .filter(|(_, v)| v.is_none())
@@ -2275,6 +2312,18 @@ mod tests {
             assert!(removed.contains(&"GH_TOKEN".to_string()), "{cmd:?}");
             assert!(removed.contains(&"GITHUB_TOKEN".to_string()), "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn delegated_ui_is_ready_only_when_it_exits_zero_and_the_port_answers() {
+        assert_eq!(delegated_ui_check(true, true, 7430), Ok(()));
+        for (exit_ok, port_answers) in [(true, false), (false, true), (false, false)] {
+            let error = delegated_ui_check(exit_ok, port_answers, 7430).unwrap_err();
+            assert!(error.contains("127.0.0.1:7430"), "{error}");
+            assert!(error.contains("cheap-otto dashboards status --execute"));
+        }
+        let dead_port = delegated_ui_check(true, false, 7430).unwrap_err();
+        assert!(dead_port.contains("does not answer"));
     }
 
     #[test]
