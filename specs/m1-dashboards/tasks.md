@@ -352,14 +352,15 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 - **Files:** `crates/code-reviewer/src/server.rs`
 - **Steps:**
   1. Add `fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String>`: `-N`, `-o ExitOnForwardFailure=yes`, `-o ServerAliveInterval=30`, `-o ServerAliveCountMax=3`, `-o ConnectTimeout=10`, `-o BatchMode=yes`, `-L 127.0.0.1:<port>:127.0.0.1:<port>`, `<host>`. Only one `-L`.
-  2. Add `fn find_cheap_otto_binary() -> Option<PathBuf>`: a file named `cheap-otto` or `cheap-otto.exe` in the directory of `std::env::current_exe()`; otherwise `Some(PathBuf::from("cheap-otto"))` if `cheap-otto --version` runs successfully; otherwise `None`.
+  2. Add `fn find_cheap_otto_binary() -> Option<PathBuf>`: a file named `cheap-otto` or `cheap-otto.exe` in the directory of `std::env::current_exe()`; otherwise `Some(PathBuf::from("cheap-otto"))` if `cheap-otto --version` runs successfully; otherwise `None`. Build that probe in `fn cheap_otto_version_probe() -> Command` and pass it through `crate::brains::strip_github_credentials`, so the probe does not inherit `GH_TOKEN` or `GITHUB_TOKEN`.
   3. Add `fn should_delegate_to_cheap_otto(requested_host: Option<&str>, peer_host: Option<&str>, port: u16) -> bool` (design 3.10 step 3): true only when the host is none or the peer in `peer.json` and `port == DEFAULT_UI_PORT`. Read the real `ui` arguments first: `cheap-otto ui` accepts `--port`, `--pixel-port`, `--state-dir`, `--no-open`, `--execute` and no `--host`.
-  4. Rewrite `open_tunneled_ui` to the five steps in design 3.10. Delegate with `cheap-otto ui --execute --no-open` (plus `--state-dir <dir>` when given) only when `should_delegate_to_cheap_otto` is true; otherwise use the fallback. Remove the `DEFAULT_PIXEL_PORT` forward.
+  4. Rewrite `open_tunneled_ui` to the five steps in design 3.10. Delegate with `cheap-otto ui --execute --no-open` (plus `--state-dir <dir>` when given) only when `should_delegate_to_cheap_otto` is true; otherwise use the fallback. Build the delegated command in `fn cheap_otto_ui_command(bin: &Path, state_dir: Option<&Path>) -> Command` and the fallback in `fn reviewer_fallback_tunnel_command(host: &str, port: u16) -> Command`; both call `strip_github_credentials` before returning. Remove the `DEFAULT_PIXEL_PORT` forward.
   5. Add `fn fallback_poll_step(port_open: bool, child_exited: bool, deadline_passed: bool) -> FallbackStep` (`Ready`, `Wait`, `FailExited`, `FailTimedOut`; an open port wins over the other two) and poll with it for up to 5 s. On either failure, kill the fallback child if it is still running and `wait()` on it, so no ssh process is left behind, then return `Err` with a message that names the port and suggests `cheap-otto dashboards status --execute`. Print "ready" and open the browser only on `Ready`.
 - **Tests** in `crates/code-reviewer/src/server.rs` (add a `#[cfg(test)] mod tests` if the file has none):
   - `fallback_tunnel_forwards_only_the_reviewer_port`: exactly one `-L`, it names the given port, `7421` does not appear, and the args contain `ServerAliveCountMax=3` and `ConnectTimeout=10`.
   - `delegation_is_skipped_for_custom_host_or_port`: a host other than the peer, or a port other than 7430, returns false; no host or the peer host on 7430 returns true.
   - `fallback_poll_step_decides_ready_wait_exited_or_timed_out`: all eight input combinations give the expected step.
+  - `delegation_and_fallback_commands_strip_github_credentials`: for the version probe, the delegated `ui` command and the fallback tunnel command, `Command::get_envs()` shows both `GH_TOKEN` and `GITHUB_TOKEN` removed (the same assertion style as the existing `strip_github_credentials` test in `brains.rs`).
 - **Acceptance:** `cargo test -p code-reviewer server::tests` passes. Do not run `code-reviewer ui`.
 
 ### T4.4 The Pixel Office button starts the service, not an orphan
@@ -368,11 +369,15 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 - **Issue:** #24
 - **Covers:** R1.2 (keeps Pixel Office under `launchd`)
 - **Depends on:** T0.1, T1.1
-- **Files:** `crates/code-reviewer/src/server.rs`
+- **Files:** `crates/code-reviewer/src/server.rs`, `tests/dashboard_labels.rs` (new, root crate)
 - **Steps:**
-  1. Add `const PIXEL_OFFICE_LAUNCHD_LABEL: &str = "com.cheapotto.dashboards.pixel-office";` with a comment that it must match `src/dashboards.rs` in the root crate.
-  2. In `start_pixel_agents_server`, after the "already listening" check and before the direct spawn: on macOS, get the uid from `id -u`, run `launchctl kickstart gui/<uid>/<label>`, and if it exits 0 go straight to the existing wait loop. On other systems, or if it fails, fall through to today's spawn.
-- **Acceptance:** Gate passes. `grep -n "PIXEL_OFFICE_LAUNCHD_LABEL" crates/code-reviewer/src/server.rs` shows the constant and its use.
+  1. Add `pub const PIXEL_OFFICE_LAUNCHD_LABEL: &str = "com.cheapotto.dashboards.pixel-office";` with a comment naming `src/dashboards.rs` in the root crate as the source of truth. A comment is not enough to keep the two in step, so add the parity test in step 3.
+  2. In `start_pixel_agents_server`, after the "already listening" check: on macOS (`cfg!(target_os = "macos")`), get the uid from `id -u` and run `launchctl kickstart gui/<uid>/<label>`. If it exits 0, go to the existing wait loop. If it fails, return `Err` saying the Pixel Office service is not installed and naming `cheap-otto dashboards install --execute`; do **not** fall through to the direct spawn, which would leave an orphan outside `launchd` holding the port. Keep the direct spawn only for non-macOS hosts. Decide between the three outcomes with a pure `fn pixel_start_action(is_macos: bool, kickstart_ok: Option<bool>) -> PixelStartAction` (`WaitForService`, `ReportNotInstalled`, `SpawnDirectly`).
+  3. Create `tests/dashboard_labels.rs` in the root crate with `#![forbid(unsafe_code)]`: `include_str!("../crates/code-reviewer/src/server.rs")` and assert it contains the literal declaration of `PIXEL_OFFICE_LAUNCHD_LABEL` with the label the registry gives for `DashboardId::PixelOffice` (`DashboardSet::standard()`).
+- **Tests:**
+  - in `crates/code-reviewer/src/server.rs`: `pixel_start_never_spawns_directly_on_macos`: on macOS a successful kickstart gives `WaitForService` and a failed one gives `ReportNotInstalled`; off macOS the result is `SpawnDirectly`.
+  - in `tests/dashboard_labels.rs`: `reviewer_pixel_office_label_matches_the_registry`.
+- **Acceptance:** Gate passes, including `cargo test -p cheap-otto --test dashboard_labels`. `grep -n "PIXEL_OFFICE_LAUNCHD_LABEL" crates/code-reviewer/src/server.rs` shows the constant and its use.
 
 ### T4.5 `open-ui.ps1` becomes a wrapper
 

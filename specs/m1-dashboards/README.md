@@ -11,7 +11,7 @@ cheap-otto has three dashboards: Mission Control (port 7420), the Pixel Office (
 ## What "done" looks like
 
 - With a logged-in GUI session on the Mac and `pixel-agents` installed, `code-reviewer m1 sync` leaves both binaries and all three dashboard services installed on the Mac. Without `pixel-agents`, the Pixel Office is skipped and reported.
-- `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error if an installed service fails to listen.
+- `cheap-otto ui --execute` on the workstation makes every installed dashboard reachable through a single `ssh` process and opens Mission Control. It stops with an error only if the install step fails, which includes a service that never starts listening during install. Once the tunnel is up, a dashboard that is not listening is reported as a warning, not a failure.
 - `cheap-otto dashboards status --execute` says which dashboards are up and why one is not. A skipped or failed dashboard stays unavailable and is reported there.
 - Mission Control and the Reviewer link to each other. The Pixel Office page is third-party and unmodified, so it has no links.
 - A dashboard that crashes comes back by itself.
@@ -44,7 +44,7 @@ Phase 2  T2.1 subcommands (needs T1.4, T1.5, T1.6)       │
          T2.2 tunnel management (needs T1.7)             │
          T2.3 rewrite ui (needs T1.8, T2.1, T2.2)        │
 Phase 3  T3.1 hub API (needs T0.1, T1.1) ── T3.2 links ◀─┘
-Phase 4  T4.1 both binaries (independent) ── T4.2 provisioning (needs T2.1)
+Phase 4  T4.1 both binaries (independent) ── T4.2 provisioning (needs T2.1, T4.1)
          T4.3 reviewer ui (needs T0.1, T2.3) ── T4.5 open-ui.ps1
          T4.4 pixel button (needs T0.1, T1.1)    T4.6 ports + link (needs T0.1, T1.1)
 Phase 5  T5.1 user docs (needs T2.3, T4.3), T5.2 agent docs (needs T2.3, T4.2)
@@ -57,7 +57,7 @@ Tasks on different branches of this tree can be done in parallel by different ag
 
 - Nothing before Phase 6 needs the real Mac. If a task seems to need it, the task is wrong or you are off the path: stop and say so in the issue.
 - The install script kills whatever listens on a dashboard's port on the Mac before starting the service. That only ever runs on the Mac, behind `--execute` or during a deploy.
-- The reviewer's own service (`com.cheapotto.code-reviewer.ui`) keeps being installed by `m1-provision.sh`. This spec reads its state and tunnels its port; it does not manage it.
+- The reviewer's own service (`com.cheapotto.code-reviewer.ui`) keeps being installed by `m1-provision.sh`. This spec does not install or uninstall it. It does read its state, tunnel its port and restart it (`cheap-otto dashboards restart --id reviewer` kickstarts that LaunchAgent).
 - A deploy (`code-reviewer m1 sync`) ships whatever is checked out. Only the owner runs it, from `main`.
 
 ## Coordination with other open work
