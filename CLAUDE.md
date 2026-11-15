@@ -72,8 +72,8 @@ cargo run -p code-reviewer -- --help
 
 ## Conventions
 
-- **Commits and PR titles:** Conventional Commits, `<type>(<scope>): <summary>`, with type one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`, `build`, `revert`. CI rejects a PR whose title does not match.
-- **Branches:** `main` is PR-only and squash-merged. Branch from `origin/main` with a prefix CI accepts: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/` or `claude/`.
+- **Commits and PR titles:** Conventional Commits, `<type>(<scope>): <summary>` or `<type>: <summary>` (the scope is optional), with type one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`, `build`, `revert`. CI rejects a PR whose title does not match.
+- **Branches:** `main` is PR-only and squash-merged. Branch from `origin/main` with a prefix CI accepts: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/` or `claude/`. `dependabot/` is also accepted, for Dependabot's own branches.
 - **A PR merges only when** the four CI jobs pass (`PR Governance & Secret Guard`, and `Rust Gate` on three OSes), the Cubic AI review check passes, every review thread is resolved, and the branch is up to date with `main`.
 - **`main` deploys:** GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries.
 - **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
