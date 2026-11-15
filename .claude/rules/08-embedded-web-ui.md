@@ -18,6 +18,15 @@ Each binary ships one web page compiled into the executable. There is no bundler
 | Mission Control | `MISSION_CONTROL_HTML` in `src/ui_assets.rs` | axum, `src/server.rs` | 7420 (pixel-agents office on 7421) | Older dark theme (blue accent, rounded cards) |
 | Reviewer + Code Tender dashboard | `DASHBOARD_HTML` in `crates/code-reviewer/src/ui_html.rs` | hand-rolled `std::net` server | 7430 | Neo-brutalist: the brand's source of truth |
 
+## How they run
+
+On the appliance every dashboard is a `launchd` LaunchAgent on the Mac, bound to `127.0.0.1`, and the workstation reaches all of them through one SSH tunnel.
+
+- **The registry is `src/dashboards.rs`.** `DashboardSet::standard()` lists Mission Control (7420, `com.cheapotto.dashboards.mission-control`), the pixel-agents office (7421, `com.cheapotto.dashboards.pixel-office`) and the Reviewer (7430, `com.cheapotto.code-reviewer.ui`). Port constants in `crates/code-reviewer/src/server.rs` mirror it, checked by `tests/dashboard_ports.rs` and `tests/dashboard_labels.rs`. Change a port or label there first.
+- **Services.** `cheap-otto dashboards install --execute` (and `m1 sync`, through `m1-provision.sh`) writes the two `com.cheapotto.dashboards.*` plists with `KeepAlive`, logging to `~/.cheap-otto/logs/dashboards/<id>.log`. The Reviewer's own plist stays with `m1-provision.sh`. `cheap-otto ui` no longer starts `serve` or `pixel-agents` in tmux. On macOS the reviewer page's Pixel Office button kickstarts the LaunchAgent instead of spawning a process (`pixel_start_action`); the one remaining direct start is `code-reviewer ui`'s `nohup code-reviewer serve` when the Reviewer's LaunchAgent cannot be kickstarted.
+- **One tunnel.** `cheap-otto ui --execute` installs the services, opens one `ssh -N` with a `-L 127.0.0.1:<port>:127.0.0.1:<port>` per dashboard, records it in `tunnel.json`, and opens the page `--open` names. `code-reviewer ui` delegates to it. `cheap-otto dashboards status --execute` says which dashboard is loaded, listening and tunnelled, and why not.
+- **Links between pages.** Mission Control polls `GET /api/dashboards` and shows a plain link to each other dashboard that is listening (`loadSiblingDashboards`); the reviewer's top bar links to Mission Control on 7420. They are navigation only: no page calls another dashboard's API.
+
 ## 1. The page is one raw string
 
 - Mission Control is `r####"…"####`; the dashboard is `r##"…"##`. The text `"####` (or `"##`) must never appear inside, or the literal ends early. If new content needs that sequence, add a `#` to both delimiters.
@@ -28,7 +37,7 @@ Each binary ships one web page compiled into the executable. There is no bundler
 
 ## 2. The API is the product
 
-- Control-plane calls use relative `fetch('/api/…')` requests. Mission Control also embeds the separately served pixel-agents office: it asks `/api/pixel-office` for the port and token, then points the iframe at `http://<page host>:<pixel_port>/?token=<encoded token>` (`loadPixelOffice` in `src/ui_assets.rs`; the `?token=` suffix is URL-encoded with `encodeURIComponent` and only added when a token is returned). That is the one non-relative URL; keep it optional and don't add others. Anything the page can do, an external agent can do with the same request, so design routes for both: JSON in, JSON out, stable field names.
+- Control-plane calls use relative `fetch('/api/…')` requests. Mission Control also embeds the separately served pixel-agents office: it asks `/api/pixel-office` for the port and token, then points the iframe at `http://<page host>:<pixel_port>/?token=<encoded token>` (`loadPixelOffice` in `src/ui_assets.rs`; the `?token=` suffix is URL-encoded with `encodeURIComponent` and only added when a token is returned). That iframe and the plain links between dashboards ("How they run") are the only non-relative URLs; keep them optional, built from `location.hostname` and a registry port, and don't add others. Anything the page can do, an external agent can do with the same request, so design routes for both: JSON in, JSON out, stable field names.
 - New Mission Control behaviour is a route in `build_router` plus a handler that calls a core planner (rule 03), then UI. Cover the route in the `#[tokio::test]` at the bottom of `src/server.rs` with `oneshot`.
 - The dashboard's routes are a `match (method, path)` in `crates/code-reviewer/src/server.rs`. `POST /api/actions/*`, `/api/tender/*`, `/api/settings/*` and `/api/repos/*` act for real: they start reviews, push fixes and rewrite `config/repos.toml`.
 - Validate path and body identifiers in the handler (`validate_safe_identifier`, `validate_repo_slug`) before using them in a command or a path.

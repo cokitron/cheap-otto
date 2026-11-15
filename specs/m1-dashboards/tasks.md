@@ -37,7 +37,7 @@ The 21 open tasks before the LIVE rollout ship as 15 PRs. Small tasks on one the
 | 11 | T3.1 hub API, T3.2 Mission Control links, T4.6 shared ports and link back (merged in #48→#41) | `feat/m1-dashboards-t3-links` | PR 1 |
 | 12 | T4.4 Pixel Office button (merged in #49) | `feat/m1-dashboards-t4-4-pixel-button` | PR 1 |
 | 13 | T2.3 new `ui` (merged in #56) | `feat/m1-dashboards-t2-3-ui` | PRs 2, 9, 10 |
-| 14 | T4.2 provisioning, T4.3 part b, T4.5 `open-ui.ps1` | `feat/m1-dashboards-t4-reviewer-alignment` | PRs 3, 4, 9, 13 |
+| 14 | T4.2 provisioning, T4.3 part b, T4.5 `open-ui.ps1` (merged in #58) | `feat/m1-dashboards-t4-reviewer-alignment` | PRs 3, 4, 9, 13 |
 | 15 | T5.1 user docs, T5.2 agent docs | `docs/m1-dashboards-t5-docs` | PRs 13, 14 |
 
 After PR 15 the owner runs T6.1 and T6.2 on the real Mac; they produce no PR unless they find a bug.
@@ -466,7 +466,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T5.1 User documentation
 
-- [ ] Done
+- [x] Done
 - **Issue:** #27
 - **Covers:** R9.1
 - **Depends on:** T2.3, T4.3
@@ -484,7 +484,7 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T5.2 Agent documentation
 
-- [ ] Done
+- [x] Done
 - **Issue:** #28
 - **Covers:** R9.1
 - **Depends on:** T2.3, T4.2

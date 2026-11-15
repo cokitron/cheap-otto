@@ -22,7 +22,7 @@
 Instead of tying up your Windows terminal, branch, and CPU waiting for coding agents or heavy test suites, `cheap-otto` pairs your **Windows PC** and **headless MacBook** over LAN or Tailscale SSH so they work as **one machine**:
 1. **Cross-OS Dev Bridge & Interactive Terminal (`pair`, `sync`, `exec`, `shell`):** Sync your active Windows repo to the MacBook in seconds (protecting uncommitted manual M1 edits by default), run native macOS/ARM64 builds from Windows, forward dev ports (`3000`, `5173`, `8080`) to Windows `localhost`, or log straight into a persistent `manual` `tmux` terminal on the M1 (`cheap-otto shell`).
 2. **Multi-Harness Parallel Agent Farm & Per-Agent Direct Querying (`harnesses`, `delegate`, `inspect`, `ask`, `pull`):** Switch effortlessly between **Claude Code** (`claude`), **Antigravity** (`agy`), **Kiro CLI** (`kiro`), and **Custom Shell** (`custom`), pick exact `--model` (`sonnet`, `opus`, `gemini-4-carbon-high`, etc.) and `--effort` (`low`..`max`), and query or instruct any individual agent directly (`cheap-otto inspect --id <id>` / `cheap-otto ask --id <id> --prompt "..."`) with full `--resume` conversation continuity.
-3. **Mission Control Web GUI + `pixel-agents` Visual Office (`serve`, `ui`, `template`):** Watch your agents work inside a live **Pixel Office** (`pixel-agents` Flat & 3D Diorama views on `:7421` — strictly decoupled as the visual layer) alongside a full **Mission Control GUI & REST API** (`http://localhost:7420`) with repeatable task playbooks (`cheap-otto template`) that work identically from the browser and from external AI agents (`--json` / `/api/*`).
+3. **Mission Control Web GUI + `pixel-agents` Visual Office (`serve`, `ui`, `dashboards`, `template`):** Watch your agents work inside a live **Pixel Office** (`pixel-agents` Flat & 3D Diorama views on `:7421` — strictly decoupled as the visual layer) alongside a full **Mission Control GUI & REST API** (`http://localhost:7420`) with repeatable task playbooks (`cheap-otto template`) that work identically from the browser and from external AI agents (`--json` / `/api/*`). Both, and the Reviewer on `:7430`, run as `launchd` services on the Mac and reach Windows through one SSH tunnel.
 3. **Recurring CI & Scheduled Agents (`schedule`, `runs`):** Set up recurring native macOS `launchd` jobs (`--every 15m --on-change`, `--daily 02:00`, `--weekly MON@03:00`) for commit-polled CI pipelines or overnight autonomous agent runs with Draft PRs—gated automatically by AC-power and passive M1 thermal checks, with structured JSONL history (`cheap-otto runs`).
 4. **100% Reversible Clamshell & Battery Guardrails (`init`, `doctor`, `arbiter`, `restore`):** Disables AC lid-close sleep (`disablesleep 1`), caps battery charge at **78%** so staying plugged in 24/7 never swells the battery, keeps 5-minute battery fallback sleep if unplugged, and arbitrates unified RAM/thermals on fanless M1/M2/M3 MacBook Airs.
 
@@ -60,6 +60,10 @@ cargo run -p cheap-otto -- doctor
 # Pass --apply to merge into ~/.ssh/config & verify SSH reachability, or --tunnel to forward ports live
 cargo run -p cheap-otto -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --apply
 
+# `ssh otto-mac` does not forward dev ports (the dashboards get their own tunnel, section 4).
+# Forward 3000, 5173 and 8080 to Windows localhost while you need them; Ctrl+C stops it
+cargo run -p cheap-otto -- pair --host 192.168.1.42 --user admin --alias otto-mac --ports 3000,5173,8080 --tunnel
+
 # Sync your active Windows Git repo (project & branch auto-detected!) to the MacBook
 cargo run -p cheap-otto -- sync --execute
 
@@ -92,9 +96,17 @@ cheap-otto pull --id fix-auth-race --execute --merge
 
 ### 4. Mission Control Web GUI, `pixel-agents` Visual Office & Playbook Templates (`src/server.rs`, `src/template.rs`)
 ```bash
-# Start `pixel-agents` (:7421, strictly visual Flat & 3D Diorama office) + `cheap-otto serve` (:7420),
-# establish SSH localhost port-forwarding, and open Mission Control at http://localhost:7420
+# Ensures the three dashboard services on the Mac (Mission Control :7420, `pixel-agents` office :7421,
+# Reviewer :7430; `launchd` LaunchAgents that come back after a crash), opens one tunnel, opens Mission Control
 cheap-otto ui --execute
+cheap-otto ui --execute --open reviewer   # same tunnel, opens the Reviewer instead
+
+# Which dashboards are loaded, listening on the Mac and tunnelled here, and why one is not
+cheap-otto dashboards status --execute
+
+# Stop the shared tunnel; remove the Mission Control and Pixel Office services from the Mac
+cheap-otto dashboards tunnel --stop --execute
+cheap-otto dashboards uninstall --execute
 
 # Save repeatable task playbooks usable from both the Web GUI and agentic CLI (`--json`)
 cheap-otto template add \
@@ -164,7 +176,7 @@ Included in the workspace as the `code-reviewer` crate ([full docs](crates/code-
 cp crates/code-reviewer/config/repos.example.toml crates/code-reviewer/config/repos.toml
 cargo run -p code-reviewer -- doctor
 cargo run -p code-reviewer -- m1 --host otto-mac sync --sync-tokens
-cargo run -p code-reviewer -- ui --host otto-mac
+cargo run -p code-reviewer -- ui   # opens the Reviewer through the shared `cheap-otto ui` tunnel
 ```
 
 ---

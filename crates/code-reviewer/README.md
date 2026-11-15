@@ -82,9 +82,12 @@ cp crates/code-reviewer/config/repos.example.toml crates/code-reviewer/config/re
 # 2. Verify environment & CLI auth
 cargo run -p code-reviewer -- doctor
 
-# 3. Deploy & provision onto your paired `otto-mac` M1 appliance (`launchd` 2m poller + `:7430` UI)
+# 3. Deploy & provision onto your paired `otto-mac` M1 appliance: installs both binaries (`cheap-otto`,
+#    `code-reviewer`), the `launchd` 2m poller + `:7430` UI, and the Mission Control + Pixel Office services
 cargo run -p code-reviewer -- m1 --host otto-mac sync --sync-tokens
 
-# 4. Open the SSH-tunneled Web Dashboard GUI (`http://127.0.0.1:7430`)
-cargo run -p code-reviewer -- ui --host otto-mac
+# 4. Open the Web Dashboard GUI (`http://127.0.0.1:7430`) through the one shared tunnel that
+#    `cheap-otto ui` keeps for all three dashboards (it never opens a second one). A `--host` other
+#    than the peer in `.cheap-otto/peer.json`, or a non-default `--port`, gets a Reviewer-only tunnel.
+cargo run -p code-reviewer -- ui
 ```
