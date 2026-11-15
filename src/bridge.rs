@@ -32,6 +32,9 @@ pub enum BridgeError {
     /// Empty remote command string was passed to `exec`.
     #[error("remote command cannot be empty")]
     EmptyCommand,
+    /// A deserialized peer profile disagrees with the profile rebuilt from its validated inputs.
+    #[error("invalid peer profile: {0}")]
+    InvalidPeerProfile(String),
 }
 
 /// Network transport used to reach the headless MacBook.
@@ -44,7 +47,11 @@ pub enum BridgeTransport {
 }
 
 /// Paired headless MacBook profile saved in `.cheap-otto/peer.json` on the Windows PC.
+///
+/// Deserialization re-validates through [`PeerNode::new`], so a crafted `peer.json` cannot smuggle
+/// an option-shaped host or user into the `ssh` argument vector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PeerNodeWire")]
 pub struct PeerNode {
     /// Short SSH host alias (e.g., `"otto-mac"`).
     pub alias: String,
@@ -58,6 +65,50 @@ pub struct PeerNode {
     pub remote_workspace_root: String,
     /// Detected network transport tier.
     pub transport: BridgeTransport,
+}
+
+/// Unvalidated on-disk shape of [`PeerNode`], checked by its `TryFrom` impl.
+#[derive(Deserialize)]
+struct PeerNodeWire {
+    alias: String,
+    host: String,
+    ssh_user: String,
+    ssh_port: u16,
+    remote_workspace_root: String,
+    transport: BridgeTransport,
+}
+
+impl TryFrom<PeerNodeWire> for PeerNode {
+    type Error = BridgeError;
+
+    /// Rebuilds the profile with [`PeerNode::new`] and requires every field to match the payload.
+    ///
+    /// # Errors
+    /// Returns the [`PeerNode::new`] error for an unsafe host, user, alias or port, and
+    /// [`BridgeError::InvalidPeerProfile`] when a field differs from its canonical value
+    /// (untrimmed or empty alias, host or user, or a derived `transport` or workspace root).
+    fn try_from(wire: PeerNodeWire) -> Result<Self, Self::Error> {
+        let rebuilt = PeerNode::new(&wire.alias, &wire.host, &wire.ssh_user, wire.ssh_port)?;
+        let mismatch = if rebuilt.alias != wire.alias {
+            Some("alias")
+        } else if rebuilt.host != wire.host {
+            Some("host")
+        } else if rebuilt.ssh_user != wire.ssh_user {
+            Some("ssh_user")
+        } else if rebuilt.remote_workspace_root != wire.remote_workspace_root {
+            Some("remote_workspace_root")
+        } else if rebuilt.transport != wire.transport {
+            Some("transport")
+        } else {
+            None
+        };
+        match mismatch {
+            Some(field) => Err(BridgeError::InvalidPeerProfile(format!(
+                "field '{field}' does not match its validated value"
+            ))),
+            None => Ok(rebuilt),
+        }
+    }
 }
 
 /// Plan for syncing the active Windows project directory to the MacBook over SSH + Git.
@@ -637,5 +688,160 @@ mod tests {
             bad_proj,
             BridgeError::InvalidProjectName("../etc/passwd".to_string())
         );
+    }
+
+    fn peer_json(
+        alias: &str,
+        host: &str,
+        user: &str,
+        port: u16,
+        root: &str,
+        transport: &str,
+    ) -> String {
+        serde_json::json!({
+            "alias": alias,
+            "host": host,
+            "ssh_user": user,
+            "ssh_port": port,
+            "remote_workspace_root": root,
+            "transport": transport,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn peer_node_round_trips_non_default_valid_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let peer = PeerNode::new("m1-air", "100.101.102.103", "dev.user", 2222)?;
+        let restored: PeerNode = serde_json::from_str(&serde_json::to_string(&peer)?)?;
+        assert_eq!(restored, peer);
+        assert_eq!(restored.transport, BridgeTransport::Tailscale);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_node_deserialize_rejects_hostile_inputs() {
+        let root = "~/otto-workspaces";
+        let cases = [
+            (
+                peer_json(
+                    "otto-mac",
+                    "-oProxyCommand=x",
+                    "admin",
+                    22,
+                    root,
+                    "LocalLan",
+                ),
+                BridgeError::InvalidHost("-oProxyCommand=x".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "192.0.2.1;id", "admin", 22, root, "LocalLan"),
+                BridgeError::InvalidHost("192.0.2.1;id".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "$(id).local", "admin", 22, root, "LocalLan"),
+                BridgeError::InvalidHost("$(id).local".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "192.0.2.1'", "admin", 22, root, "LocalLan"),
+                BridgeError::InvalidHost("192.0.2.1'".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "", "admin", 22, root, "LocalLan"),
+                BridgeError::InvalidHost(String::new()),
+            ),
+            (
+                peer_json(
+                    "otto-mac",
+                    "192.0.2.1",
+                    "-oProxyCommand=x",
+                    22,
+                    root,
+                    "LocalLan",
+                ),
+                BridgeError::InvalidSshUser("-oProxyCommand=x".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "192.0.2.1", "ad\"min", 22, root, "LocalLan"),
+                BridgeError::InvalidSshUser("ad\"min".to_string()),
+            ),
+            (
+                peer_json("-bad", "192.0.2.1", "admin", 22, root, "LocalLan"),
+                BridgeError::InvalidProjectName("-bad".to_string()),
+            ),
+            (
+                peer_json("otto-mac", "192.0.2.1", "admin", 0, root, "LocalLan"),
+                BridgeError::InvalidPort(0),
+            ),
+        ];
+        for (json, expected) in cases {
+            let err = serde_json::from_str::<PeerNode>(&json).unwrap_err();
+            assert_eq!(err.to_string(), expected.to_string(), "payload: {json}");
+        }
+    }
+
+    #[test]
+    fn peer_node_deserialize_rejects_each_mutated_derived_field() {
+        let canonical_root = "~/otto-workspaces";
+        let cases = [
+            (
+                "transport",
+                peer_json(
+                    "otto-mac",
+                    "192.0.2.10",
+                    "admin",
+                    22,
+                    canonical_root,
+                    "Tailscale",
+                ),
+            ),
+            (
+                "remote_workspace_root",
+                peer_json(
+                    "otto-mac",
+                    "192.0.2.10",
+                    "admin",
+                    22,
+                    "/tmp/evil",
+                    "LocalLan",
+                ),
+            ),
+            (
+                "alias",
+                peer_json("", "192.0.2.10", "admin", 22, canonical_root, "LocalLan"),
+            ),
+            (
+                "host",
+                peer_json(
+                    "otto-mac",
+                    " 192.0.2.10",
+                    "admin",
+                    22,
+                    canonical_root,
+                    "LocalLan",
+                ),
+            ),
+            (
+                "ssh_user",
+                peer_json(
+                    "otto-mac",
+                    "192.0.2.10",
+                    "admin ",
+                    22,
+                    canonical_root,
+                    "LocalLan",
+                ),
+            ),
+        ];
+        for (field, json) in cases {
+            let err = serde_json::from_str::<PeerNode>(&json).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                BridgeError::InvalidPeerProfile(format!(
+                    "field '{field}' does not match its validated value"
+                ))
+                .to_string(),
+                "payload: {json}"
+            );
+        }
     }
 }
