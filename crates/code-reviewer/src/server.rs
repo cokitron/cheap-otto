@@ -45,6 +45,10 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_UI_BIND: &str = "127.0.0.1:7430";
 pub const DEFAULT_UI_PORT: u16 = 7430;
 pub const DEFAULT_PIXEL_PORT: u16 = 7421;
+/// Mission Control (`cheap-otto serve`), which `DASHBOARD_HTML` links to. The ports above and
+/// this one mirror the registry in `src/dashboards.rs` of the root crate, the source of truth;
+/// `tests/dashboard_ports.rs` there fails if they drift.
+pub const DEFAULT_MISSION_CONTROL_PORT: u16 = 7420;
 
 struct CachedHostProbe {
     captured_at: Instant,
@@ -82,6 +86,9 @@ pub fn run_ui_server(
     println!(
         "[code-reviewer-ui] Trusted origins: {}",
         guard.trusted_origins().join(", ")
+    );
+    println!(
+        "[code-reviewer-ui] Mission Control (the dashboard hub): http://127.0.0.1:{DEFAULT_MISSION_CONTROL_PORT}/"
     );
 
     let ctx = Arc::new(ServerContext {
@@ -2291,5 +2298,13 @@ mod tests {
         handle_http_connection(&mut stream, &test_context()).unwrap();
         assert_eq!(stream.reads, 1);
         assert!(String::from_utf8_lossy(&stream.output).starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    }
+
+    #[test]
+    fn dashboard_html_links_mission_control_on_the_shared_port() {
+        let html = crate::ui_html::DASHBOARD_HTML;
+        assert!(html.contains("id=\"mission-control-link\""));
+        assert!(html.contains("MISSION CONTROL ↗"));
+        assert!(html.contains(&format!(":{DEFAULT_MISSION_CONTROL_PORT}/")));
     }
 }

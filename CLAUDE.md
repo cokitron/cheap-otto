@@ -74,6 +74,7 @@ cargo run -p code-reviewer -- --help
 
 - **Commits and PR titles:** Conventional Commits, `<type>(<scope>): <summary>` or `<type>: <summary>` (the scope is optional), with type one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`, `build`, `revert`. CI rejects a PR whose title does not match.
 - **Branches:** `main` is PR-only and squash-merged. Branch from `origin/main` with a prefix CI accepts: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/` or `claude/`. `dependabot/` is also accepted, for Dependabot's own branches.
+- **PR size:** at most 600 changed lines (tests included, `Cargo.lock` excluded) and one theme per PR; check with `git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'`. Bundle small related tasks as the spec's PR plan says, and split bigger work into parts that each leave `main` green (`specs/README.md`, PR size budget). Purely mechanical changes (lockfile, generated assets, renames, dependency bumps) may exceed it when the PR says so and contains nothing else.
 - **A PR merges only when** the four CI jobs pass (`PR Governance & Secret Guard`, and `Rust Gate` on three OSes), the Cubic AI review check passes, every review thread is resolved, and the branch is up to date with `main`.
 - **`main` deploys:** GitHub Pages serves `main:/docs`, and a `v*` tag builds release binaries.
 - **Versions:** both `Cargo.toml` files carry the version and it must match the release tag.
