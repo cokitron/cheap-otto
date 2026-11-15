@@ -29,7 +29,9 @@ use crate::m1::{
     print_m1_live_status, push_bytes_to_m1, run_ssh_script, sync_everything_to_m1,
     sync_github_tokens_to_m1, sync_m1_reviews_to_drive,
 };
-use crate::server::{DEFAULT_UI_BIND, DEFAULT_UI_PORT, open_tunneled_ui, run_ui_server};
+use crate::server::{
+    DEFAULT_UI_BIND, DEFAULT_UI_PORT, TunneledUiOptions, open_tunneled_ui, run_ui_server,
+};
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, CompletedBannerOutcome, LedgerStore,
     StatusBannerContext, TenderPrSnapshot, TenderPrState, TenderTriggerDecision, TrackedPrState,
@@ -135,14 +137,19 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_UI_BIND)]
         bind: String,
     },
-    /// Ensure the M1 Web Dashboard server is running, open an SSH tunnel (`127.0.0.1:7430`), and launch the GUI in your browser.
+    /// Ensure the M1 Web Dashboard server is running, reach it through the shared `cheap-otto ui` tunnel (or a Reviewer-only fallback), and launch the GUI in your browser.
     Ui {
-        #[arg(long, default_value = DEFAULT_M1_HOST)]
-        host: String,
+        /// SSH host of the Mac. Omit it, or name the peer in `peer.json`, to share the `cheap-otto ui` tunnel; any other host gets a Reviewer-only fallback tunnel
+        #[arg(long)]
+        host: Option<String>,
         #[arg(long, default_value = DEFAULT_M1_REPO_PATH)]
         remote_repo: String,
+        /// Reviewer port, on the Mac and on 127.0.0.1 here. Only the default 7430 can share the `cheap-otto ui` tunnel
         #[arg(long, default_value_t = DEFAULT_UI_PORT)]
         port: u16,
+        /// `cheap-otto` state directory holding `peer.json` (default: `.cheap-otto` in the workspace or a parent, then `~/.cheap-otto`)
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
         #[arg(long)]
         no_open: bool,
     },
@@ -344,8 +351,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             host,
             remote_repo,
             port,
+            state_dir,
             no_open,
-        } => open_tunneled_ui(&workspace, &host, &remote_repo, port, no_open)?,
+        } => open_tunneled_ui(
+            &workspace,
+            &TunneledUiOptions {
+                host: host.as_deref(),
+                remote_repo: &remote_repo,
+                port,
+                state_dir: state_dir.as_deref(),
+                no_open,
+            },
+        )?,
         Commands::M1 {
             host,
             remote_repo,

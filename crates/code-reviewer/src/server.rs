@@ -16,7 +16,7 @@ use crate::config::{
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
-use crate::m1::remote_shell_path_expr;
+use crate::m1::{DEFAULT_M1_HOST, remote_shell_path_expr};
 use crate::request_guard::{RequestGuard, host_name_of, require_json_body, require_loopback_bind};
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
@@ -139,23 +139,46 @@ fn validate_ssh_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts or reuses an SSH local port-forward (`127.0.0.1:<port> -> <host>:127.0.0.1:<port>`)
-/// and opens the Internal CI Dashboard in the user's default browser.
+/// What `code-reviewer ui` was asked to open.
+pub struct TunneledUiOptions<'a> {
+    /// `--host`; `None` means the peer recorded in `peer.json`, else `otto-mac`.
+    pub host: Option<&'a str>,
+    pub remote_repo: &'a str,
+    pub port: u16,
+    /// `--state-dir`, handed on to `cheap-otto ui` and used to find `peer.json`.
+    pub state_dir: Option<&'a Path>,
+    pub no_open: bool,
+}
+
+/// Reuses a tunnel already answering on `127.0.0.1:<port>`, otherwise reaches the Reviewer through
+/// the one shared `cheap-otto ui` tunnel, and opens the dashboard in the default browser.
 ///
-/// The tunnel forwards only the Reviewer port: Pixel Office belongs to the single
-/// `cheap-otto ui` tunnel, and forwarding it here as well would collide with that one.
+/// Only when `cheap-otto ui` cannot express the request (a custom host or port) or `cheap-otto` is
+/// not installed does it open its own fallback tunnel, which forwards only the Reviewer port:
+/// Pixel Office belongs to the shared tunnel, and forwarding it here as well would collide.
 pub fn open_tunneled_ui(
     workspace: &Path,
-    host: &str,
-    remote_repo: &str,
-    port: u16,
-    no_open: bool,
+    opts: &TunneledUiOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_ssh_host(host)?;
+    if let Some(host) = opts.host {
+        validate_ssh_host(host)?;
+    }
+    let port = opts.port;
     let local_addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
     let url = format!("http://{}", local_addr);
 
     if TcpStream::connect_timeout(&local_addr, Duration::from_millis(350)).is_err() {
+        let peer_hosts = read_peer_hosts(opts.state_dir);
+        // Prefer the peer entry the operator named, so `--host <peer address>` still delegates.
+        let peer_host = peer_hosts
+            .iter()
+            .map(String::as_str)
+            .find(|peer| Some(*peer) == opts.host)
+            .or_else(|| peer_hosts.first().map(String::as_str));
+        let host = opts.host.or(peer_host).unwrap_or(DEFAULT_M1_HOST);
+        validate_ssh_host(host)?;
+        let remote_repo = opts.remote_repo;
+
         // Ensure remote `com.cheapotto.code-reviewer.ui` (or detached `code-reviewer serve`) is running on M1
         let ensure_remote = format!(
             "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n\
@@ -170,17 +193,137 @@ pub fn open_tunneled_ui(
         );
         let _ = crate::m1::run_ssh_script(host, &ensure_remote);
 
-        println!("[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host}...");
-        let mut command = reviewer_fallback_tunnel_command(host, port);
-        let mut child = command.current_dir(workspace).spawn()?;
-        wait_for_fallback_tunnel(&mut child, &local_addr, port)?;
+        let cheap_otto = if should_delegate_to_cheap_otto(opts.host, peer_host, port) {
+            let found = find_cheap_otto_binary();
+            if found.is_none() {
+                println!(
+                    "[ui] `cheap-otto` was not found; falling back to a Reviewer-only tunnel."
+                );
+            }
+            found
+        } else {
+            println!(
+                "[ui] `cheap-otto ui` cannot reach {host}:{port}; using a Reviewer-only tunnel."
+            );
+            None
+        };
+
+        if let Some(bin) = cheap_otto {
+            println!("[ui] Sharing the dashboard tunnel through `cheap-otto ui`...");
+            // Inherited stdio, so the install and tunnel progress of `cheap-otto ui` stays visible.
+            let status = cheap_otto_ui_command(&bin, opts.state_dir).status()?;
+            if !status.success() {
+                return Err(format!(
+                    "`cheap-otto ui` failed ({status}), so the Reviewer dashboard on \
+                     127.0.0.1:{port} is not tunneled; check the services with \
+                     `cheap-otto dashboards status --execute`"
+                )
+                .into());
+            }
+        } else {
+            println!("[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host}...");
+            let mut command = reviewer_fallback_tunnel_command(host, port);
+            let mut child = command.current_dir(workspace).spawn()?;
+            wait_for_fallback_tunnel(&mut child, &local_addr, port)?;
+        }
     }
 
     println!("[ui] Code Reviewer Dashboard ready at: {}", url);
-    if !no_open {
+    if !opts.no_open {
         open_browser(&url);
     }
     Ok(())
+}
+
+/// Whether `cheap-otto ui` can serve this request. It has no `--host` and always forwards the
+/// Reviewer on `DEFAULT_UI_PORT`, so only the paired peer (or no host at all) on 7430 qualifies.
+fn should_delegate_to_cheap_otto(
+    requested_host: Option<&str>,
+    peer_host: Option<&str>,
+    port: u16,
+) -> bool {
+    let host_matches = match requested_host {
+        None => true,
+        Some(requested) => peer_host == Some(requested),
+    };
+    host_matches && port == DEFAULT_UI_PORT
+}
+
+/// `cheap-otto` beside this executable, else `cheap-otto` on `PATH` when `--version` runs.
+fn find_cheap_otto_binary() -> Option<PathBuf> {
+    let own_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    if let Some(dir) = own_dir {
+        let beside = ["cheap-otto", "cheap-otto.exe"]
+            .into_iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file());
+        if beside.is_some() {
+            return beside;
+        }
+    }
+    let on_path = cheap_otto_version_probe()
+        .status()
+        .is_ok_and(|status| status.success());
+    on_path.then(|| PathBuf::from("cheap-otto"))
+}
+
+/// The silent `cheap-otto --version` probe, without `GH_TOKEN` or `GITHUB_TOKEN`.
+fn cheap_otto_version_probe() -> Command {
+    let mut cmd = Command::new("cheap-otto");
+    cmd.arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
+/// `cheap-otto ui --execute --no-open [--state-dir <dir>]`, without `GH_TOKEN` or `GITHUB_TOKEN`.
+/// `--no-open` because this command opens the Reviewer page itself, not Mission Control.
+fn cheap_otto_ui_command(bin: &Path, state_dir: Option<&Path>) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.args(["ui", "--execute", "--no-open"]);
+    if let Some(dir) = state_dir {
+        cmd.arg("--state-dir").arg(dir);
+    }
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
+/// The `alias` and `host` of the peer in `cheap-otto`'s `peer.json`, alias first, or empty.
+///
+/// Looks in `--state-dir` when given, else in `.cheap-otto` in the current directory or a parent,
+/// then `~/.cheap-otto`, the same places `cheap-otto ui` resolves.
+fn read_peer_hosts(state_dir: Option<&Path>) -> Vec<String> {
+    let candidates: Vec<PathBuf> = match state_dir {
+        Some(dir) => vec![dir.to_path_buf()],
+        None => std::env::current_dir()
+            .map(|cwd| cwd.ancestors().map(|d| d.join(".cheap-otto")).collect())
+            .unwrap_or_else(|_| Vec::new())
+            .into_iter()
+            .chain(std::iter::once(home_dir().join(".cheap-otto")))
+            .collect(),
+    };
+    candidates
+        .iter()
+        .find_map(|dir| fs::read_to_string(dir.join("peer.json")).ok())
+        .map(|text| parse_peer_hosts(&text))
+        .unwrap_or_default()
+}
+
+/// Reads `alias` and `host` from `peer.json` text, dropping any value `ssh` must not receive.
+fn parse_peer_hosts(json: &str) -> Vec<String> {
+    let Ok(peer) = serde_json::from_str::<Value>(json) else {
+        return Vec::new();
+    };
+    ["alias", "host"]
+        .into_iter()
+        .filter_map(|key| peer.get(key).and_then(Value::as_str))
+        .filter(|host| validate_ssh_host(host).is_ok())
+        .map(String::from)
+        .collect()
 }
 
 /// The `ssh` arguments for the fallback tunnel: one `-L` for the Reviewer port, nothing else.
@@ -269,7 +412,7 @@ fn wait_for_fallback_tunnel(
         let _ = child.wait();
         return Err(format!(
             "could not tunnel the Reviewer dashboard on 127.0.0.1:{port}: {reason}; \
-             check the Reviewer service with `code-reviewer m1 status`"
+             check the services with `cheap-otto dashboards status --execute`"
         ));
     }
 }
@@ -2071,12 +2214,77 @@ mod tests {
     fn open_tunneled_ui_rejects_an_option_looking_host_before_any_ssh() {
         let result = open_tunneled_ui(
             Path::new("."),
-            "-oProxyCommand=touch /tmp/x",
-            "~/otto-workspaces/cheap-otto",
-            7430,
-            true,
+            &TunneledUiOptions {
+                host: Some("-oProxyCommand=touch /tmp/x"),
+                remote_repo: "~/otto-workspaces/cheap-otto",
+                port: 7430,
+                state_dir: None,
+                no_open: true,
+            },
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn delegation_is_skipped_for_custom_host_or_port() {
+        assert!(should_delegate_to_cheap_otto(None, None, 7430));
+        assert!(should_delegate_to_cheap_otto(None, Some("otto-mac"), 7430));
+        assert!(should_delegate_to_cheap_otto(
+            Some("otto-mac"),
+            Some("otto-mac"),
+            7430
+        ));
+        assert!(!should_delegate_to_cheap_otto(
+            Some("other-mac"),
+            Some("otto-mac"),
+            7430
+        ));
+        assert!(!should_delegate_to_cheap_otto(Some("otto-mac"), None, 7430));
+        assert!(!should_delegate_to_cheap_otto(None, Some("otto-mac"), 8430));
+        assert!(!should_delegate_to_cheap_otto(
+            Some("otto-mac"),
+            Some("otto-mac"),
+            7421
+        ));
+    }
+
+    #[test]
+    fn delegation_and_fallback_commands_strip_github_credentials() {
+        let state_dir = Path::new("state");
+        let ui = cheap_otto_ui_command(Path::new("cheap-otto"), Some(state_dir));
+        let ui_args: Vec<_> = ui
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            ui_args,
+            ["ui", "--execute", "--no-open", "--state-dir", "state"]
+        );
+        let bare = cheap_otto_ui_command(Path::new("cheap-otto"), None);
+        assert_eq!(bare.get_args().count(), 3);
+
+        let probe = cheap_otto_version_probe();
+        assert_eq!(probe.get_program(), "cheap-otto");
+        let fallback = reviewer_fallback_tunnel_command("otto-mac", 7430);
+        for cmd in [&probe, &ui, &bare, &fallback] {
+            let removed: Vec<_> = cmd
+                .get_envs()
+                .filter(|(_, v)| v.is_none())
+                .map(|(k, _)| k.to_string_lossy().to_string())
+                .collect();
+            assert!(removed.contains(&"GH_TOKEN".to_string()), "{cmd:?}");
+            assert!(removed.contains(&"GITHUB_TOKEN".to_string()), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn peer_hosts_come_from_peer_json_and_drop_unsafe_values() {
+        let peer = r#"{"alias":"otto-mac","host":"192.0.2.10","ssh_user":"otto","ssh_port":22}"#;
+        assert_eq!(parse_peer_hosts(peer), ["otto-mac", "192.0.2.10"]);
+        let hostile = r#"{"alias":"-oProxyCommand=x","host":"a;$(id)"}"#;
+        assert!(parse_peer_hosts(hostile).is_empty());
+        assert!(parse_peer_hosts("").is_empty());
+        assert!(parse_peer_hosts("not json").is_empty());
     }
 
     #[test]
