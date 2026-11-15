@@ -1,0 +1,48 @@
+name: Bug Report
+description: Report a reproducible bug in cheap-otto or crates/code-reviewer
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Crate / Component
+      options:
+        - cheap-otto (Cross-OS Bridge / Worktree Farm / Mission Control UI)
+        - crates/code-reviewer (Multi-Lens Reviewer / Poller / Dashboard)
+        - crates/code-reviewer (Code Tender)
+        - macOS Appliance / launchd / pmset scripts
+        - CI / Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal sanitized commands or inputs that reproduce the issue (do not include tokens or private host credentials).
+      placeholder: |
+        1. Run `cargo run -- ...`
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs Actual Behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or Commit SHA
+      description: The cheap-otto release version or git commit SHA where the bug occurs.
+      placeholder: "v0.2.0 or 0127169"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS & Rust Toolchain
+      placeholder: "Windows 11 / macOS 15 ARM64, rustc 1.85+"
+    validations:
+      required: true

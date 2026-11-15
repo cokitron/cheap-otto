@@ -53,7 +53,7 @@ Two themes. Night Shift is primary; Paper is for docs and print.
 | `docs/assets/otto-mark*.svg`, `otto-wordmark-*.svg`, `otto-pixel*.svg` | `scripts/brand/gen-logos.js` (pixel grids in code; rects only, so no font is needed) |
 | `.github/assets/readme-hero-{dark,light}.png`, `docs/assets/social-preview.png` | `scripts/brand/hero.html` rendered by headless Chrome |
 
-- Regenerate everything with `bash scripts/brand/render.sh`. Pass a temp dir (`render.sh <dir>`) to inspect output without touching tracked files. The output is deterministic: an unchanged template reproduces the committed files byte for byte.
+- Regenerate everything with `bash scripts/brand/render.sh`. Pass a temp dir (`render.sh <dir>`) to inspect output without touching tracked files. The SVGs from `gen-logos.js` are deterministic. The PNGs are visually reproducible only with the same browser version and fonts, so a re-render may differ in bytes and must be reviewed visually.
 - **Never hand-edit a generated SVG or PNG.** Change the generator or the template, re-run, look at the result, commit both.
 - Use the `-ink` wordmark and plain mark on light grounds, `-white` and `-on-dark` on dark grounds. Don't recolour the yellow slab, rotate the mark or smooth Otto: scale him in whole multiples with `image-rendering: pixelated`.
 - The GitHub social preview can only be set by hand: Settings → General → Social preview → upload `docs/assets/social-preview.png`. Tell the user when that file changes.

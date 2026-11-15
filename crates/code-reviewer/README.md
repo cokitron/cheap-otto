@@ -67,7 +67,9 @@ Code Tender listens for actionable PR review comments and review summaries on wa
 
 - **Web UI Navigation:** Switch cleanly between `🔍 Multi-Lens Code Reviewer` (`/reviewer`) and `🛠️ Code Tender` (`/tender`) in the top dashboard bar (`http://127.0.0.1:7430/`), or jump per-PR between views.
 - **Agents (`tender-agents/`):** `01-tender-triage`, `02-tender-fixer`, `03-tender-verifier`.
-- **Safety Boundaries:** Enforces `BOT_TENDER_MARKER` loop prevention, ignores clean `PASS`/`APPROVED` reviews and resolved threads, restricts auto-tending to non-fork PRs by `allowed_authors` (defaulting to `[accounts.primary, accounts.secondary]`), blocks secret/env edits, and strips `GH_TOKEN`/`GITHUB_TOKEN` from child LLM agent processes.
+- **Stage-1 Poll-Time Author & Fork Isolation (`tender_allowed_authors`):** Open-source repositories reviewed by external AI reviewers (such as **Cubic AI** via `/cubic.yaml`) can set `enabled = false`, `tender_enabled = true`, `tender_allowed_authors = ["<owner-login>"]`. During Stage 1 of `tend-poll`, every cross-repository fork (`isCrossRepository`) is always dropped. A PR authored outside an explicit per-repository allowlist is dropped; when that allowlist is unset, previously watched PRs are retained as an explicit override and new PRs use the default `[accounts.primary, accounts.secondary]` allowlist, in compiled Rust (`0` thread GraphQL queries, `0` worktree checkouts, `0` AI calls).
+- **Private Runtime KB Overlay (`~/.code-reviewer/kb/`):** Learned brain rules and Code Tender KB updates persist under `~/.code-reviewer/kb/` (`0700`) and merge cleanly over committed universal `[*]` defaults, keeping private repository identifiers out of public git commits.
+- **Safety Boundaries:** Enforces `BOT_TENDER_MARKER` loop prevention, ignores clean `PASS`/`APPROVED` and Cubic zero-issue summaries plus resolved threads, blocks secret/env edits, and strips `GH_TOKEN`/`GITHUB_TOKEN` from child LLM agent processes.
 
 ---
 

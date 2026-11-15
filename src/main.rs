@@ -818,7 +818,30 @@ struct RunsOptions<'a> {
     execute: bool,
 }
 
+const CLI_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Windows defaults the process main thread to a 1 MiB stack (vs. 8 MiB on macOS/Linux),
+    // which can overflow in unoptimized CI debug builds when `clap` constructs all subcommands.
+    let handle = std::thread::Builder::new()
+        .name("cheap-otto-cli".to_string())
+        .stack_size(CLI_STACK_SIZE_BYTES)
+        .spawn(|| run_cli().map_err(|err| format!("{err:?}")))?;
+
+    match handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(debug_msg)) => {
+            eprintln!("Error: {debug_msg}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("Error: cheap-otto CLI worker thread panicked");
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {

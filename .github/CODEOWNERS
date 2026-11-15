@@ -1,0 +1,7 @@
+# Default owner for everything in the repository
+* @cokitron
+/.github/ @cokitron
+/cubic.yaml @cokitron
+/.ai/ @cokitron
+/.claude/ @cokitron
+/crates/code-reviewer/ @cokitron

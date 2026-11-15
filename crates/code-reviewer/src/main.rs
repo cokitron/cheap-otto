@@ -6,6 +6,7 @@ mod diff;
 mod drive;
 mod github;
 mod m1;
+mod request_guard;
 mod server;
 mod state;
 mod tender;
@@ -39,7 +40,7 @@ use crate::state::{
 };
 use crate::tender::{execute_tender_pr_cycle, sync_watched_prs_from_snapshots_with_gh};
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -201,33 +202,42 @@ enum M1Action {
 #[derive(Debug, Subcommand)]
 enum WatchAction {
     List,
-    Add {
-        /// Repository slug `<owner>/<repo>`.
-        full_name: String,
-        #[arg(long, default_value = "main")]
-        default_branch: String,
-        /// `swap` (primary <-> secondary) or `forced`.
-        #[arg(long, default_value = "swap")]
-        account_policy: String,
-        #[arg(long)]
-        forced_account: Option<String>,
-        /// `comment_only` or `formal_verdict`.
-        #[arg(long, default_value = "formal_verdict")]
-        event_policy: String,
-        #[arg(long)]
-        gdrive_folder_id: Option<String>,
-        #[arg(long)]
-        local_repo_path: Option<String>,
-        #[arg(long)]
-        local_check_cmd: Option<String>,
-        #[arg(long)]
-        no_review: bool,
-        #[arg(long)]
-        no_tender: bool,
-    },
-    Remove {
-        full_name: String,
-    },
+    Add(Box<WatchAddArgs>),
+    Remove { full_name: String },
+}
+
+#[derive(Debug, Args)]
+struct WatchAddArgs {
+    /// Repository slug `<owner>/<repo>`.
+    full_name: String,
+    #[arg(long, default_value = "main")]
+    default_branch: String,
+    /// `swap` (primary <-> secondary) or `forced`.
+    #[arg(long, default_value = "swap")]
+    account_policy: String,
+    #[arg(long)]
+    forced_account: Option<String>,
+    /// `comment_only` or `formal_verdict`.
+    #[arg(long, default_value = "formal_verdict")]
+    event_policy: String,
+    #[arg(long)]
+    gdrive_folder_id: Option<String>,
+    #[arg(long)]
+    local_repo_path: Option<String>,
+    #[arg(long)]
+    local_check_cmd: Option<String>,
+    /// Comma-separated GitHub logins strictly allowed for Code Tender on this repo.
+    #[arg(long)]
+    tender_authors: Option<String>,
+    /// Comma-separated GitHub logins allowed for internal multi-lens reviews on this repo.
+    #[arg(long)]
+    review_authors: Option<String>,
+    #[arg(long)]
+    skip_forks: bool,
+    #[arg(long)]
+    no_review: bool,
+    #[arg(long)]
+    no_tender: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,10 +255,30 @@ enum KbAction {
     },
 }
 
+const CLI_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
+    let spawned = std::thread::Builder::new()
+        .name("code-reviewer-cli".to_string())
+        .stack_size(CLI_STACK_SIZE_BYTES)
+        .spawn(|| run().map_err(|err| err.to_string()));
+
+    match spawned {
+        Ok(handle) => match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("error: code-reviewer CLI worker thread panicked");
+                std::process::exit(1);
+            }
+        },
+        Err(err) => {
+            eprintln!("error: failed to spawn CLI thread: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -505,29 +535,35 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
         WatchAction::List => {
             for r in &cfg.repos {
                 println!(
-                    "- {} [enabled={}] branch={} account_policy={:?} forced_account={:?} event_policy={:?} drive_folder={:?}",
+                    "- {} [review={} tender={}] branch={} account_policy={:?} forced_account={:?} tender_authors={:?} skip_forks={} event_policy={:?}",
                     r.full_name,
                     r.enabled,
+                    r.tender_enabled,
                     r.default_branch,
                     r.account_policy,
                     r.forced_account,
+                    r.tender_allowed_authors,
+                    r.skip_fork_prs,
                     r.review_event_policy,
-                    r.gdrive_folder_id
                 );
             }
         }
-        WatchAction::Add {
-            full_name,
-            default_branch,
-            account_policy,
-            forced_account,
-            event_policy,
-            gdrive_folder_id,
-            local_repo_path,
-            local_check_cmd,
-            no_review,
-            no_tender,
-        } => {
+        WatchAction::Add(args) => {
+            let WatchAddArgs {
+                full_name,
+                default_branch,
+                account_policy,
+                forced_account,
+                event_policy,
+                gdrive_folder_id,
+                local_repo_path,
+                local_check_cmd,
+                tender_authors,
+                review_authors,
+                skip_forks,
+                no_review,
+                no_tender,
+            } = *args;
             let acct_pol = if account_policy.eq_ignore_ascii_case("forced") {
                 AccountPolicy::Forced
             } else {
@@ -537,6 +573,14 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
                 ReviewEventPolicy::CommentOnly
             } else {
                 ReviewEventPolicy::FormalVerdict
+            };
+            let parse_csv = |opt: Option<String>| -> Vec<String> {
+                opt.unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
             };
             cfg.upsert_repo(WatchedRepoConfig {
                 full_name: full_name.clone(),
@@ -550,6 +594,9 @@ fn run_watch(config_path: &Path, action: WatchAction) -> Result<(), Box<dyn std:
                 local_check_cmd,
                 enabled: !no_review,
                 tender_enabled: !no_tender,
+                tender_allowed_authors: parse_csv(tender_authors),
+                review_allowed_authors: parse_csv(review_authors),
+                skip_fork_prs: skip_forks,
             })?;
             cfg.save(config_path)?;
             println!("Registered watched repository `{}`.", full_name);
@@ -656,6 +703,20 @@ fn run_poll(
         // 1. Evaluate open PRs & dispatch independent async PR worker sessions in parallel (intercalating claude <-> agy)
         let mut overflow_queue_index = 0usize;
         for pr_detail in &batch.open_prs {
+            if repo_cfg.skip_fork_prs && pr_detail.snapshot.is_fork {
+                println!(
+                    "[SKIP-FORK] {}#{} is a cross-repository fork (author `{}`)",
+                    repo_cfg.full_name, pr_detail.snapshot.pr_number, pr_detail.snapshot.author
+                );
+                continue;
+            }
+            if !cfg.is_review_author_allowed(repo_cfg, &pr_detail.snapshot.author) {
+                println!(
+                    "[SKIP-AUTHOR] {}#{} author `{}` not in `review_allowed_authors`",
+                    repo_cfg.full_name, pr_detail.snapshot.pr_number, pr_detail.snapshot.author
+                );
+                continue;
+            }
             if let Some(running) = ActiveWorkerState::is_pr_worker_running(
                 &state_dir,
                 &repo_cfg.full_name,
@@ -1764,11 +1825,25 @@ fn run_tender_poll(
     let initial_ledger = LedgerStore::load_or_default(&state_dir)?;
 
     for repo_cfg in &cfg.repos {
-        let has_explicit_watched_pr = initial_ledger
+        // Derived from the ledger independent of the allowlist: strict allowlists leave
+        // `explicit_watched_prs` empty by design, which must not skip watched PRs on tender-disabled repos.
+        let has_watched_open = initial_ledger
             .tender_pull_requests
             .values()
             .any(|t| t.repo.eq_ignore_ascii_case(&repo_cfg.full_name) && t.watched && t.is_open);
-        if !repo_cfg.tender_enabled && !has_explicit_watched_pr {
+        let explicit_watched_prs: Vec<u64> = if repo_cfg.tender_allowed_authors.is_empty() {
+            initial_ledger
+                .tender_pull_requests
+                .values()
+                .filter(|t| {
+                    t.repo.eq_ignore_ascii_case(&repo_cfg.full_name) && t.watched && t.is_open
+                })
+                .map(|t| t.pr_number)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !repo_cfg.tender_enabled && !has_watched_open {
             continue;
         }
         if let Some(filter) = only_repo
@@ -1780,7 +1855,25 @@ fn run_tender_poll(
             .forced_account
             .as_deref()
             .unwrap_or(cfg.accounts.primary.as_str());
-        let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+        let poll_outcome = gh.poll_tender_repository_for_repo(
+            poll_account,
+            &cfg,
+            repo_cfg,
+            &explicit_watched_prs,
+        )?;
+        for fork_pr in &poll_outcome.skipped_forks {
+            println!(
+                "[TENDER-POLL-SKIP-FORK] {}#{} skipped at Stage-1 poll (cross-repository fork; 0 thread queries, 0 AI tokens)",
+                repo_cfg.full_name, fork_pr
+            );
+        }
+        for (other_pr, other_author) in &poll_outcome.skipped_authors {
+            println!(
+                "[TENDER-POLL-SKIP-AUTHOR] {}#{} author `{}` skipped at Stage-1 poll (not in allowed authors; 0 thread queries, 0 AI tokens)",
+                repo_cfg.full_name, other_pr, other_author
+            );
+        }
+        let snapshots = poll_outcome.snapshots;
         if !dry_run {
             let _ = sync_watched_prs_from_snapshots_with_gh(
                 &cfg,
@@ -1788,6 +1881,9 @@ fn run_tender_poll(
                 &state_dir,
                 Some(&gh),
                 &snapshots,
+                poll_outcome
+                    .open_list_complete
+                    .then_some(poll_outcome.open_pr_numbers.as_slice()),
             );
         }
         let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
@@ -1814,8 +1910,11 @@ fn run_tender_poll(
             if !repo_cfg.tender_enabled && !explicitly_watched {
                 continue;
             }
-            let allowed =
-                explicitly_watched || cfg.is_tender_author_allowed(repo_cfg, &snap.author);
+            let allowed = if !repo_cfg.tender_allowed_authors.is_empty() {
+                cfg.is_tender_author_allowed(repo_cfg, &snap.author)
+            } else {
+                explicitly_watched || cfg.is_tender_author_allowed(repo_cfg, &snap.author)
+            };
             let decision = evaluate_tender_trigger(
                 existing,
                 snap,
@@ -2080,7 +2179,32 @@ fn run_single_pr_tend(
         .forced_account
         .as_deref()
         .unwrap_or(cfg.accounts.primary.as_str());
-    let snapshots = gh.poll_tender_repository(poll_account, &repo_cfg.full_name)?;
+    let explicit_for_tend: Vec<u64> = if repo_cfg.tender_allowed_authors.is_empty() {
+        vec![pr_number]
+    } else {
+        Vec::new()
+    };
+    let poll_outcome =
+        gh.poll_tender_repository_for_repo(poll_account, &cfg, repo_cfg, &explicit_for_tend)?;
+    if poll_outcome.skipped_forks.contains(&pr_number) {
+        return Err(format!(
+            "refusing to run Code Tender on {}#{}: cross-repository fork PRs are never tended",
+            repo_cfg.full_name, pr_number
+        )
+        .into());
+    }
+    if let Some((_, blocked_author)) = poll_outcome
+        .skipped_authors
+        .iter()
+        .find(|(n, _)| *n == pr_number)
+    {
+        return Err(format!(
+            "refusing to run Code Tender on {}#{}: PR author `{}` is not in `tender_allowed_authors` ({:?})",
+            repo_cfg.full_name, pr_number, blocked_author, repo_cfg.tender_allowed_authors
+        )
+        .into());
+    }
+    let snapshots = poll_outcome.snapshots;
     if !dry_run {
         let _ = sync_watched_prs_from_snapshots_with_gh(
             &cfg,
@@ -2088,12 +2212,31 @@ fn run_single_pr_tend(
             &state_dir,
             Some(&gh),
             &snapshots,
+            poll_outcome
+                .open_list_complete
+                .then_some(poll_outcome.open_pr_numbers.as_slice()),
         );
     }
     let snap = snapshots
         .iter()
         .find(|p| p.pr_number == pr_number)
         .ok_or_else(|| format!("open PR #{} not found on {}", pr_number, repo_cfg.full_name))?;
+    if snap.is_fork {
+        return Err(format!(
+            "refusing to run Code Tender on {}#{}: cross-repository fork PRs are never tended",
+            repo_cfg.full_name, pr_number
+        )
+        .into());
+    }
+    if !repo_cfg.tender_allowed_authors.is_empty()
+        && !cfg.is_tender_author_allowed(repo_cfg, &snap.author)
+    {
+        return Err(format!(
+            "refusing to run Code Tender on {}#{}: PR author `{}` is not in `tender_allowed_authors` ({:?})",
+            repo_cfg.full_name, pr_number, snap.author, repo_cfg.tender_allowed_authors
+        )
+        .into());
+    }
 
     let ledger_snap = LedgerStore::load_or_default(&state_dir)?;
     let key = LedgerStore::pr_key(&repo_cfg.full_name, pr_number);

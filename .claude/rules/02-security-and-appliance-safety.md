@@ -36,7 +36,8 @@ There are two layers, and they have different rules.
 - **Remote command: a POSIX string the Mac's shell will interpret.** The last argument to `ssh` is shell text, so every interpolated value must be one of:
   - a typed number (`u8`, `u16`, `u32`, `u8::from(bool)`);
   - an identifier that passed a validator: `validate_safe_identifier` (project names, task ids, aliases, users, tmux sessions), `validate_model_identifier` or `validate_session_identifier`. All three allow only a small ASCII set and reject a leading `-`, so a value can't be read as a flag;
-  - free text wrapped by `posix_single_quote` (prompts, verify commands, questions).
+  - free text wrapped by `posix_single_quote` (prompts, questions).
+  - **Known exception:** the verify command. `build_agent_ask_plan` interpolates `verify_and_commit` raw (`src/agent_session.rs:431-437`), as do the follow-up and task handlers in `src/server.rs` (`verify_command`, around lines 772-779 and 1306-1317). Treat it as trusted operator input: it must never carry PR, agent or API-derived text. It is **not** only operator-reachable today: it is set by the CLI `--verify` flag and by the `verify_command` field of Mission Control REST requests, and that API is unauthenticated (section 6). This is an open injection gap, not a satisfied rule. Fixing it means validated command arguments or an operator-configured allowlist; until then, don't add new paths that feed it.
   New interpolation points need one of these three, plus a test with a hostile input such as `x'; rm -rf ~ #`.
 - **`launchd` plists** are XML: pass every interpolated string through `xml_escape` (`src/schedule.rs`).
 - **Multi-line remote scripts go over stdin.** `code-reviewer` uses `run_ssh_script` (`ssh host sh -s`), which also normalises CRLF. Prefer it to nesting quotes, especially from PowerShell.
@@ -46,9 +47,10 @@ There are two layers, and they have different rules.
 
 ## 4. Tokens & Agent Subprocesses (`code-reviewer`)
 
-- GitHub access is `gh` with a per-account `GH_TOKEN` read from `~/.code-reviewer/tokens/<user>.token` (mode 600). It never mutates the global `gh` login.
-- Every LLM agent and check-command subprocess is spawned with `.env_remove("GH_TOKEN")` and `.env_remove("GITHUB_TOKEN")`. A new spawn site for `claude`, `agy` or a repo check must do the same.
-- Code Tender refuses to commit `.env`, `.env.*` (except `.env.example`), keys and submodule changes; it checks `git status --porcelain` before every commit. Extend that guard rather than working around it.
+The detail (which spawn sites strip tokens today, the known gaps, the pre-commit guard) is in rule 07, section 6. The rules that apply everywhere:
+
+- GitHub access is `gh` with a per-account `GH_TOKEN` read from `~/.code-reviewer/tokens/<user>.token`. It never mutates the global `gh` login.
+- A new spawn site for `claude`, `agy` or a repo check command must call `.env_remove("GH_TOKEN")` and `.env_remove("GITHUB_TOKEN")`.
 - Bot-authored comments carry `BOT_COMMENT_MARKER` or `BOT_TENDER_MARKER`. Loop prevention depends on them, so every comment or review body the tool posts must carry one.
 - Never log or print a token, and never write one outside `tokens_dir`.
 
@@ -67,8 +69,11 @@ There are two layers, and they have different rules.
 ## 6. Network Exposure
 
 - `cheap-otto serve` defaults to `127.0.0.1:7420` and `code-reviewer serve` to `127.0.0.1:7430`. Port forwards are written `127.0.0.1:<port>:127.0.0.1:<port>`.
+- Both servers refuse to start unless the bind host is `127.0.0.1`, `localhost` or `::1` (`require_loopback_bind` in each `request_guard.rs`), so a wildcard or LAN `--host` / `--bind` is an error.
 - Never default a listener to `0.0.0.0`. Reaching a server from another machine means an SSH tunnel over LAN or Tailscale.
-- Neither server authenticates requests, and Mission Control currently answers any origin (`CorsLayer::permissive()`). The loopback binding is the only barrier, and a web page open in the operator's browser can still reach loopback. Treat every endpoint that executes input (for example `POST /api/terminal/{session}`, which types into a tmux session) as reachable by a hostile page: validate identifiers, and don't add new ones without an origin check. Tightening CORS is welcome; widening the bind needs auth first.
+- Neither server authenticates requests. The loopback binding keeps other machines out; a **request guard** keeps out web pages in the operator's browser, which can reach loopback. It runs on every request before any route (`src/request_guard.rs` and `crates/code-reviewer/src/request_guard.rs`, which mirror each other): a non-loopback `Host` is `403`, and so is a state-changing request whose `Origin` is not the server's own. The full rules are in rule 08, section 3.
+- Neither server sends CORS headers. Don't add a CORS layer or an `Access-Control-Allow-*` header.
+- The guard is not authentication: any local process can still call the API. Keep validating identifiers in every handler that executes input (for example `POST /api/terminal/{session}`, which types into a tmux session). A non-loopback bind is rejected; adding one would need authentication first.
 
 ---
 

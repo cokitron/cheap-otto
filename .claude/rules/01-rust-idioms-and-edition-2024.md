@@ -28,9 +28,9 @@ The two crates differ in strictness. The root `cheap-otto` library holds itself 
 
 ## 2. Error Handling Discipline
 
-- **Root library modules** define one domain error enum each with `thiserror` v2: `#[derive(Debug, Error, PartialEq, Eq)]` (`BridgeError`, `WorktreeError`, `HarnessError`, `ScheduleError`, …). Keep `PartialEq, Eq` so tests can `assert_eq!` on exact variants.
+- **Fallible root library modules** define a domain error enum with `thiserror` v2: `#[derive(Debug, Error, PartialEq, Eq)]` (`BridgeError`, `WorktreeError`, `HarnessError`, `ScheduleError`, …). Keep `PartialEq, Eq` so tests can `assert_eq!` on exact variants.
 - **`code-reviewer` modules** use `#[derive(Debug, Error)]` (`GitHubError`, `StateError`, `BrainError`, …) because they wrap I/O errors.
-- **Binary entry points** (`src/main.rs`, `crates/code-reviewer/src/main.rs`) return `Result<(), Box<dyn std::error::Error>>` and propagate with `?`.
+- **Binary execution paths** return `Result<(), Box<dyn std::error::Error>>` and propagate with `?`. In `src/main.rs` that is `main` itself; in `crates/code-reviewer/src/main.rs` it is `run()`, and `main` converts an error to an exit status.
 - **No `.unwrap()`, `.expect()`, `panic!()`, `todo!()` or `unimplemented!()` outside `#[cfg(test)]`.** Both crates are at zero today, so keep them there.
   - Use combinators (`ok_or`, `ok_or_else`, `unwrap_or`, `unwrap_or_default`, `map_or`) or pattern matching (`if let`, `let … else`, which the code uses widely).
   - Handlers that must not fail on a spawn error discard it explicitly: `let _ = Command::new(…)…`.
@@ -41,7 +41,7 @@ The two crates differ in strictness. The root `cheap-otto` library holds itself 
 ## 3. Ownership, Borrowing & Memory Efficiency
 
 - **Borrow in signatures.** Take `&str`, `&Path` and `&[T]`, not `String`, `&PathBuf` or `&Vec<T>`, unless ownership moves.
-- **Bundle many borrowed parameters into an options struct** rather than silencing `clippy::too_many_arguments`. `src/main.rs` does this for every handler: `struct DelegateOptions<'a> { … }` and `fn run_delegate(opts: &DelegateOptions<'_>)`.
+- **Bundle many borrowed parameters into an options struct** rather than silencing `clippy::too_many_arguments`; use this for handlers with several related inputs. `run_delegate` is one example: `struct DelegateOptions<'a> { … }` and `fn run_delegate(opts: &DelegateOptions<'_>)`.
 - **Return `&'static str` or `&'static [T]` for fixed catalogs** (display names, harness flag names) to avoid allocation.
 - **Pre-allocate when the size is known**, as in `Vec::with_capacity(8)` in `SystemProbeInput::evaluate_health`.
 

@@ -40,7 +40,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - **Module docs:** every module starts with a `//!` header that says what it owns and how it fits the larger flow. Update it when the module's job changes.
 - **Public API docs:** every public struct, enum, field and function in the root library has a `///` comment explaining why it exists and what it preserves. Fewer than ten items lack one today, so don't add to that count.
 - **`# Errors` section** on public functions returning `Result`, naming the variants and the conditions.
-- **clap doc comments are the help text.** A `///` on a subcommand or flag shows up in `--help`, so write it for the operator: purpose, units, default.
+- **clap doc comments are the help text.** A `///` on a subcommand or flag shows up in `--help`, so new flags and subcommands must have one, written for the operator: purpose, plus units and defaults when relevant.
 - **Comments explain why.**
   - Good: `// Keep normal battery sleep intact (5 min) in case AC power is disconnected for long periods`
   - Good: `// Rule 1: Fanless Thermal Guard (pause heavy queues when thermal state >= Serious)`
@@ -54,7 +54,7 @@ Run these before saying a change is done. They are quick; run them rather than p
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-3. `cargo test --workspace --all-targets`
+3. `cargo test --workspace --all-targets --locked`
 4. If CLI behaviour changed: run the subcommand as a dry run against a temp state dir, for example
    `cargo run -p cheap-otto -- delegate --project demo --id t1 --agent claude --task "x" --state-dir <tmp>`,
    and read the printed plan. Never add `--execute` or `--apply` to verify.
