@@ -49,7 +49,7 @@ There are two layers, and they have different rules.
 
 The detail (which spawn sites strip tokens today, the known gaps, the pre-commit guard) is in rule 07, section 6. The rules that apply everywhere:
 
-- GitHub access is `gh` with a per-account `GH_TOKEN` read from `<accounts.tokens_dir>/<user>.token` (default `~/.code-reviewer/tokens`). It never mutates the global `gh` login.
+- GitHub access is `gh` with a per-account `GH_TOKEN` read from `<accounts.tokens_dir>/<user>.token`. `accounts.tokens_dir` is a required config key with no built-in default; keep it at `~/.code-reviewer/tokens`, the only directory `m1 sync --sync-tokens` writes to (rule 07, section 6). `gh` never mutates the global login.
 - A new spawn site for `claude`, `agy` or a repo check command must call `.env_remove("GH_TOKEN")` and `.env_remove("GITHUB_TOKEN")`.
 - Bot-authored comments carry `BOT_COMMENT_MARKER` or `BOT_TENDER_MARKER`. Loop prevention depends on them, so every comment or review body the tool posts must carry one.
 - Never log or print a token, and never write one outside `tokens_dir`.
@@ -71,7 +71,7 @@ The detail (which spawn sites strip tokens today, the known gaps, the pre-commit
 - `cheap-otto serve` defaults to `127.0.0.1:7420` and `code-reviewer serve` to `127.0.0.1:7430`. Port forwards are written `127.0.0.1:<port>:127.0.0.1:<port>`.
 - Both servers refuse to start unless the bind host is `127.0.0.1`, `localhost` or `::1` (`require_loopback_bind` in each `request_guard.rs`), so a wildcard or LAN `--host` / `--bind` is an error.
 - Never default a listener to `0.0.0.0`. Reaching a server from another machine means an SSH tunnel over LAN or Tailscale.
-- Neither server authenticates requests. The loopback binding keeps other machines out; a **request guard** keeps out web pages in the operator's browser, which can reach loopback. It runs on every request before any route (`src/request_guard.rs` and `crates/code-reviewer/src/request_guard.rs`, which mirror each other): a non-loopback `Host` is `403`, and so is a state-changing request whose `Origin` is not the server's own. The full rules are in rule 08, section 3, which also loads when either `request_guard.rs` is edited.
+- Neither server authenticates requests. The loopback binding keeps other machines out; a **request guard** keeps out web pages in the operator's browser, which can reach loopback. It runs on every request before any route (`src/request_guard.rs` and `crates/code-reviewer/src/request_guard.rs`, which mirror each other): a non-loopback `Host` is `403`, and so is a state-changing request whose `Origin` is not on the server's allowlist (its own origins, unless another exact origin was added). The full rules are in rule 08, section 3, which also loads when either `request_guard.rs` is edited.
 - Neither server sends CORS headers today. Never add a general or wildcard CORS layer. The one sanctioned case is an exact-origin allowance for another local dashboard, set up as rule 08, section 3 describes.
 - The guard is not authentication: any local process can still call the API. Keep validating identifiers in every handler that executes input (for example `POST /api/terminal/{session}`, which types into a tmux session). A non-loopback bind is rejected; adding one would need authentication first.
 
