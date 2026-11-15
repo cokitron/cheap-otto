@@ -79,6 +79,8 @@ pub const MISSION_CONTROL_HTML: &str = r####"<!DOCTYPE html>
   .pill.err { color: var(--err); border-color: rgba(248,81,73,0.35); }
   .pill.purple { color: var(--purple); border-color: rgba(188,140,255,0.35); }
   .hud-pills { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  a.pill { color: var(--accent); text-decoration: none; }
+  a.pill:hover { color: var(--accent-hover); border-color: var(--accent); }
   .view-modes { display: flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 8px; border: 1px solid var(--border); }
   .view-modes button {
     background: transparent;
@@ -272,6 +274,7 @@ pub const MISSION_CONTROL_HTML: &str = r####"<!DOCTYPE html>
   <div class="brand">
     <span>🦀 cheap-otto</span>
     <span class="pill purple">M1 Mission Control</span>
+    <span class="hud-pills" id="siblingDashboards"></span>
   </div>
   <div class="hud-pills" id="hudPills">
     <span class="pill">Connecting to M1...</span>
@@ -564,6 +567,25 @@ async function loadPixelOffice() {
 }
 
 function reloadOfficeFrame() { loadPixelOffice(); }
+
+// Plain links to the other dashboards that are up. Navigation only: no dashboard calls
+// another's API, so no CORS is involved. Polled, so a dashboard that starts or stops later
+// gains or loses its link; a failed fetch empties the container and shows no error.
+async function loadSiblingDashboards() {
+  const box = document.getElementById('siblingDashboards');
+  try {
+    const data = await api('/api/dashboards');
+    const host = window.location.hostname || 'localhost';
+    const links = (data.dashboards || [])
+      .filter(d => d.listening && !d.current && Number.isInteger(d.port))
+      .map(d => {
+        // The office may require its token; reuse the URL loadPixelOffice built with it.
+        const href = (d.id === 'pixel-office' && pixelOfficeUrl) ? pixelOfficeUrl : `http://${host}:${d.port}/`;
+        return `<a class="pill" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(d.name)} ↗</a>`;
+      });
+    box.innerHTML = links.join('');
+  } catch (_) { box.innerHTML = ''; }
+}
 
 async function loadHealth() {
   try {
@@ -986,6 +1008,8 @@ async function refreshAll() {
 
 (async function boot() {
   await loadPixelOffice();
+  loadSiblingDashboards();
+  setInterval(loadSiblingDashboards, 10000);
   await loadHarnessesAndProjects();
   await refreshAll();
   setInterval(refreshAll, 3000);
@@ -994,3 +1018,23 @@ async function refreshAll() {
 </body>
 </html>
 "####;
+
+#[cfg(test)]
+mod tests {
+    use super::MISSION_CONTROL_HTML;
+
+    /// The repo has no JS runtime (rule 08: no bundler, no `node_modules`), so this pins the
+    /// pieces of `loadSiblingDashboards` that keep its links safe; the browser check in the PR
+    /// covers the rendering.
+    #[test]
+    fn sibling_dashboard_links_skip_current_and_stopped_dashboards_and_escape_text() {
+        for needle in [
+            "<span class=\"hud-pills\" id=\"siblingDashboards\"></span>",
+            ".filter(d => d.listening && !d.current && Number.isInteger(d.port))",
+            "href=\"${escapeHtml(href)}\" target=\"_blank\" rel=\"noopener\">${escapeHtml(d.name)} ↗</a>",
+            "setInterval(loadSiblingDashboards, 10000);",
+        ] {
+            assert!(MISSION_CONTROL_HTML.contains(needle), "missing: {needle}");
+        }
+    }
+}

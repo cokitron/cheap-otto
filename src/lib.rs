@@ -9,6 +9,7 @@ pub mod agent_session;
 pub mod arbiter;
 pub mod bridge;
 pub mod command;
+pub mod dashboards;
 pub mod doctor;
 pub mod hardware;
 pub mod harness;
