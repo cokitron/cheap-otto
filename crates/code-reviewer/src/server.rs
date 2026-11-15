@@ -1958,6 +1958,7 @@ fn spawn_pixel_agents_directly() -> Result<(), String> {
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
+    crate::brains::strip_github_credentials(&mut cmd);
 
     cmd.spawn()
         .map(|_| ())
