@@ -337,7 +337,8 @@ Everything in this phase stays synchronous and avoids async runtimes, HTTP clien
 
 ### T4.1 `m1 sync` installs both binaries
 
-- [ ] Done
+- [x] Done
+- **PR:** #43
 - **Issue:** #21
 - **Covers:** R4.1
 - **Depends on:** nothing
