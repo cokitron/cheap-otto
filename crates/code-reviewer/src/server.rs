@@ -198,7 +198,9 @@ pub fn open_tunneled_ui(
             delegated_ui_check(exit_ok, port_answers, port)?;
         } else {
             println!("[ui] Opening background SSH tunnel http://127.0.0.1:{port} -> {host}...");
-            let mut command = reviewer_fallback_tunnel_command(host, port);
+            let resolved = resolve_ssh_effective_config(host)?;
+            let mut command =
+                reviewer_fallback_tunnel_command_with_config(host, port, Some(&resolved));
             let mut child = command.current_dir(workspace).spawn()?;
             wait_for_fallback_tunnel(&mut child, &local_addr, port)?;
         }
@@ -338,9 +340,107 @@ fn parse_peer_hosts(json: &str) -> Vec<String> {
         .collect()
 }
 
-/// The `ssh` arguments for the fallback tunnel: one `-L` for the Reviewer port, nothing else.
-fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
+/// Connection-only settings resolved from `ssh -G -- <host>`, excluding all port forwardings so
+/// `-F none` can connect through aliases without inheriting `LocalForward` entries (such as `7421`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResolvedSshConfig {
+    hostname: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_files: Vec<String>,
+    identities_only: bool,
+    proxy_jump: Option<String>,
+    proxy_command: Option<String>,
+    host_key_alias: Option<String>,
+    strict_host_key_checking: Option<String>,
+}
+
+/// Pure parser for `ssh -G` output. Keeps connection settings and drops `localforward`,
+/// `remoteforward` and `dynamicforward` so bound sibling ports (like `7421`) never collide.
+fn parse_ssh_effective_config(raw: &str) -> ResolvedSshConfig {
+    let mut cfg = ResolvedSshConfig::default();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let Some((key, value)) = trimmed.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() || value.chars().any(char::is_control) {
+            continue;
+        }
+        match key.to_ascii_lowercase().as_str() {
+            "hostname" => cfg.hostname = Some(value.to_string()),
+            "user" => cfg.user = Some(value.to_string()),
+            "port" => {
+                if let Ok(port) = value.parse::<u16>()
+                    && port > 0
+                {
+                    cfg.port = Some(port);
+                }
+            }
+            "identityfile" => cfg.identity_files.push(value.to_string()),
+            "identitiesonly" => cfg.identities_only = value.eq_ignore_ascii_case("yes"),
+            "proxyjump" if !value.eq_ignore_ascii_case("none") => {
+                cfg.proxy_jump = Some(value.to_string());
+            }
+            "proxycommand" if !value.eq_ignore_ascii_case("none") => {
+                cfg.proxy_command = Some(value.to_string());
+            }
+            "hostkeyalias" if !value.eq_ignore_ascii_case("none") => {
+                cfg.host_key_alias = Some(value.to_string());
+            }
+            "stricthostkeychecking" if !value.eq_ignore_ascii_case("ask") => {
+                cfg.strict_host_key_checking = Some(value.to_string());
+            }
+            // `localforward`, `remoteforward`, `dynamicforward` and all other directives are
+            // deliberately ignored so `-F none` carries only the single Reviewer `-L` forward.
+            _ => {}
+        }
+    }
+    cfg
+}
+
+/// Builds `ssh -G -- <host>` with GitHub credentials stripped. Opens no network socket.
+fn ssh_effective_config_command(host: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-G", "--", host])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::brains::strip_github_credentials(&mut cmd);
+    cmd
+}
+
+/// Evaluates local OpenSSH configuration for `host` via `ssh -G -- <host>`.
+fn resolve_ssh_effective_config(host: &str) -> Result<ResolvedSshConfig, String> {
+    validate_ssh_host(host)?;
+    let out = ssh_effective_config_command(host)
+        .output()
+        .map_err(|err| format!("failed to run `ssh -G` for `{host}`: {err}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!("`ssh -G -- {host}` exited with {}", out.status)
+        } else {
+            format!("`ssh -G -- {host}` failed: {detail}")
+        });
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(parse_ssh_effective_config(&stdout))
+}
+
+/// The `ssh` arguments for the fallback tunnel with `-F none` so `~/.ssh/config` `LocalForward`
+/// entries (such as port `7421` when Pixel Office is already bound) are never inherited, plus one
+/// `-L` for the Reviewer port and any resolved connection settings.
+fn reviewer_fallback_tunnel_args_with_config(
+    host: &str,
+    port: u16,
+    resolved: Option<&ResolvedSshConfig>,
+) -> Vec<String> {
     let mut args: Vec<String> = [
+        "-F",
+        "none",
         "-N",
         "-o",
         "ExitOnForwardFailure=yes",
@@ -352,11 +452,51 @@ fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
         "ConnectTimeout=10",
         "-o",
         "BatchMode=yes",
-        "-L",
     ]
     .into_iter()
     .map(String::from)
     .collect();
+
+    if let Some(cfg) = resolved {
+        if let Some(hostname) = &cfg.hostname {
+            args.push("-o".to_string());
+            args.push(format!("HostName={hostname}"));
+        }
+        if let Some(user) = &cfg.user {
+            args.push("-o".to_string());
+            args.push(format!("User={user}"));
+        }
+        if let Some(ssh_port) = cfg.port {
+            args.push("-p".to_string());
+            args.push(ssh_port.to_string());
+        }
+        for identity in &cfg.identity_files {
+            args.push("-i".to_string());
+            args.push(identity.clone());
+        }
+        if cfg.identities_only {
+            args.push("-o".to_string());
+            args.push("IdentitiesOnly=yes".to_string());
+        }
+        if let Some(jump) = &cfg.proxy_jump {
+            args.push("-J".to_string());
+            args.push(jump.clone());
+        }
+        if let Some(proxy_cmd) = &cfg.proxy_command {
+            args.push("-o".to_string());
+            args.push(format!("ProxyCommand={proxy_cmd}"));
+        }
+        if let Some(alias) = &cfg.host_key_alias {
+            args.push("-o".to_string());
+            args.push(format!("HostKeyAlias={alias}"));
+        }
+        if let Some(strict) = &cfg.strict_host_key_checking {
+            args.push("-o".to_string());
+            args.push(format!("StrictHostKeyChecking={strict}"));
+        }
+    }
+
+    args.push("-L".to_string());
     args.push(format!("127.0.0.1:{port}:127.0.0.1:{port}"));
     // `--` ends option parsing so the host can never be read as an ssh flag.
     args.push("--".to_string());
@@ -364,15 +504,32 @@ fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
     args
 }
 
+/// Pure fallback tunnel argument builder without pre-resolved `ssh -G` output.
+#[cfg(test)]
+fn reviewer_fallback_tunnel_args(host: &str, port: u16) -> Vec<String> {
+    reviewer_fallback_tunnel_args_with_config(host, port, None)
+}
+
 /// The fallback `ssh` tunnel process, with no stdio and without `GH_TOKEN` or `GITHUB_TOKEN`.
-fn reviewer_fallback_tunnel_command(host: &str, port: u16) -> Command {
+fn reviewer_fallback_tunnel_command_with_config(
+    host: &str,
+    port: u16,
+    resolved: Option<&ResolvedSshConfig>,
+) -> Command {
     let mut cmd = Command::new("ssh");
-    cmd.args(reviewer_fallback_tunnel_args(host, port))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    cmd.args(reviewer_fallback_tunnel_args_with_config(
+        host, port, resolved,
+    ))
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
     crate::brains::strip_github_credentials(&mut cmd);
     cmd
+}
+
+#[cfg(test)]
+fn reviewer_fallback_tunnel_command(host: &str, port: u16) -> Command {
+    reviewer_fallback_tunnel_command_with_config(host, port, None)
 }
 
 /// What one tick of the fallback tunnel poll decides.
@@ -2148,7 +2305,7 @@ mod tests {
         ] {
             assert!(args.iter().any(|arg| arg == option), "missing {option}");
         }
-        assert_eq!(args.first().map(String::as_str), Some("-N"));
+        assert_eq!(args[..3], ["-F", "none", "-N"]);
         assert_eq!(args.last().map(String::as_str), Some("otto-mac"));
         assert_eq!(
             args.get(args.len().saturating_sub(2)).map(String::as_str),
@@ -2156,6 +2313,7 @@ mod tests {
         );
 
         let custom = reviewer_fallback_tunnel_args("otto-mac", 8430);
+        assert_eq!(custom[..2], ["-F", "none"]);
         assert!(custom.contains(&"127.0.0.1:8430:127.0.0.1:8430".to_string()));
         assert!(!custom.iter().any(|arg| arg.contains("7430")));
 
@@ -2168,6 +2326,79 @@ mod tests {
             .collect();
         assert!(removed.contains(&"GH_TOKEN".to_string()));
         assert!(removed.contains(&"GITHUB_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn fallback_tunnel_resolves_ssh_config_without_inheriting_forwards() {
+        // Simulates `ssh -G -- otto-mac` when `~/.ssh/config` still contains a `LocalForward`
+        // for Pixel Office (`7421` already bound by another tunnel), plus `RemoteForward` and
+        // `DynamicForward`: none may enter the fallback args, so `ExitOnForwardFailure=yes`
+        // checks only the requested Reviewer port.
+        let ssh_g = "\
+host otto-mac
+user admin
+hostname 192.0.2.42
+port 2222
+identityfile ~/.ssh/id_ed25519
+identityfile ~/.ssh/id_rsa
+identitiesonly yes
+proxyjump bastion.example:22
+proxycommand none
+hostkeyalias otto-mac-key
+stricthostkeychecking accept-new
+localforward [127.0.0.1]:7421 [127.0.0.1]:7421
+localforward [127.0.0.1]:5173 [127.0.0.1]:5173
+remoteforward 9000 127.0.0.1:9000
+dynamicforward 1080
+";
+        let resolved = parse_ssh_effective_config(ssh_g);
+        assert_eq!(
+            resolved,
+            ResolvedSshConfig {
+                hostname: Some("192.0.2.42".to_string()),
+                user: Some("admin".to_string()),
+                port: Some(2222),
+                identity_files: vec!["~/.ssh/id_ed25519".to_string(), "~/.ssh/id_rsa".to_string(),],
+                identities_only: true,
+                proxy_jump: Some("bastion.example:22".to_string()),
+                proxy_command: None,
+                host_key_alias: Some("otto-mac-key".to_string()),
+                strict_host_key_checking: Some("accept-new".to_string()),
+            }
+        );
+
+        let args = reviewer_fallback_tunnel_args_with_config("otto-mac", 7430, Some(&resolved));
+        assert_eq!(args[..2], ["-F", "none"]);
+        let l_forwards: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.as_str() == "-L")
+            .map(|(i, _)| args.get(i + 1).cloned().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            l_forwards,
+            vec!["127.0.0.1:7430:127.0.0.1:7430".to_string()]
+        );
+        for forbidden in ["7421", "5173", "9000", "1080", "-R", "-D", "LocalForward"] {
+            assert!(
+                !args.iter().any(|arg| arg.contains(forbidden)),
+                "unexpected {forbidden} in {args:?}"
+            );
+        }
+        for expected in [
+            "HostName=192.0.2.42",
+            "User=admin",
+            "2222",
+            "~/.ssh/id_ed25519",
+            "~/.ssh/id_rsa",
+            "IdentitiesOnly=yes",
+            "bastion.example:22",
+            "HostKeyAlias=otto-mac-key",
+            "StrictHostKeyChecking=accept-new",
+        ] {
+            assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
+        }
+        assert_eq!(args.last().map(String::as_str), Some("otto-mac"));
     }
 
     #[test]
@@ -2279,8 +2510,14 @@ mod tests {
         let probe = cheap_otto_version_probe();
         assert_eq!(probe.get_program(), "cheap-otto");
         let fallback = reviewer_fallback_tunnel_command("otto-mac", 7430);
+        let ssh_cfg = ssh_effective_config_command("otto-mac");
+        let cfg_args: Vec<_> = ssh_cfg
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(cfg_args, ["-G", "--", "otto-mac"]);
         let repo_root = git_repo_root_command();
-        for cmd in [&probe, &ui, &bare, &fallback, &repo_root] {
+        for cmd in [&probe, &ui, &bare, &fallback, &ssh_cfg, &repo_root] {
             let removed: Vec<_> = cmd
                 .get_envs()
                 .filter(|(_, v)| v.is_none())
