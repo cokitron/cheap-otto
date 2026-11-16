@@ -608,18 +608,43 @@ pub fn write_private_kb_file(path: &Path, contents: &str, append: bool) -> std::
 const KB_TOMBSTONE_PREFIX: &str = "<!-- otto-kb-deleted: ";
 const KB_TOMBSTONE_SUFFIX: &str = " -->";
 
+// `&` is escaped first so a literal `--&gt;` in a rule cannot be mistaken for an encoded `-->`.
+fn escape_kb_tombstone_key(key: &str) -> String {
+    key.replace('&', "&amp;").replace("-->", "--&gt;")
+}
+
+// Single left-to-right pass, the exact inverse of `escape_kb_tombstone_key`.
+fn unescape_kb_tombstone_key(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while let Some(c) = rest.chars().next() {
+        if let Some(after) = rest.strip_prefix("&amp;") {
+            out.push('&');
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("--&gt;") {
+            out.push_str("-->");
+            rest = after;
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
 fn format_kb_tombstone(norm_key: &str) -> String {
-    let escaped = norm_key.replace("-->", "--&gt;");
+    let escaped = escape_kb_tombstone_key(norm_key);
     format!("{KB_TOMBSTONE_PREFIX}{escaped}{KB_TOMBSTONE_SUFFIX}")
 }
 
 fn parse_kb_tombstone_key(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    let inner = trimmed
-        .strip_prefix(KB_TOMBSTONE_PREFIX)?
-        .strip_suffix(KB_TOMBSTONE_SUFFIX)?
-        .replace("--&gt;", "-->");
-    let key = inner.trim().to_ascii_lowercase();
+    let inner = unescape_kb_tombstone_key(
+        trimmed
+            .strip_prefix(KB_TOMBSTONE_PREFIX)?
+            .strip_suffix(KB_TOMBSTONE_SUFFIX)?,
+    );
+    let key = inner.trim().to_string();
     (!key.is_empty()).then_some(key)
 }
 
@@ -628,7 +653,8 @@ fn normalize_kb_line_key(line: &str) -> Option<String> {
     if trimmed.is_empty() || parse_kb_tombstone_key(trimmed).is_some() {
         return None;
     }
-    let key = trimmed.trim_start_matches("- ").trim().to_ascii_lowercase();
+    // Case-preserving: a case-only edit is a real edit and must survive a reload.
+    let key = trimmed.trim_start_matches("- ").trim().to_string();
     (!key.is_empty()).then_some(key)
 }
 
@@ -649,16 +675,27 @@ pub fn merge_kb_markdown(committed: &str, runtime_overlay: &str) -> String {
     // line revives a previously tombstoned entry (e.g. via `append_tender_kb_entry`).
     let mut deleted_keys = std::collections::BTreeSet::new();
     let mut overlay_entries: Vec<(String, &str)> = Vec::new();
+    // A rule directly after a tombstone (no blank line between) replaces that rule in place.
+    let mut replacements: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut prev_tombstone: Option<String> = None;
     for line in runtime_overlay.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            prev_tombstone = None;
             continue;
         }
         if let Some(key) = parse_kb_tombstone_key(trimmed) {
             overlay_entries.retain(|(existing_key, _)| existing_key != &key);
-            deleted_keys.insert(key);
+            deleted_keys.insert(key.clone());
+            prev_tombstone = Some(key);
         } else if let Some(key) = normalize_kb_line_key(line) {
             deleted_keys.remove(&key);
+            if let Some(tombstoned) = prev_tombstone.take()
+                && tombstoned != key
+            {
+                replacements.insert(tombstoned, key.clone());
+            }
             if !overlay_entries
                 .iter()
                 .any(|(existing_key, _)| existing_key == &key)
@@ -684,6 +721,15 @@ pub fn merge_kb_markdown(committed: &str, runtime_overlay: &str) -> String {
         }
         if let Some(key) = normalize_kb_line_key(line) {
             if deleted_keys.contains(&key) {
+                if let Some(replacement_key) = replacements.get(&key)
+                    && !surviving_base_keys.contains(replacement_key)
+                    && let Some((_, replacement)) = overlay_entries
+                        .iter()
+                        .find(|(entry_key, _)| entry_key == replacement_key)
+                {
+                    merged_lines.push(replacement);
+                    surviving_base_keys.insert(replacement_key.clone());
+                }
                 continue;
             }
             surviving_base_keys.insert(key);
@@ -726,22 +772,52 @@ pub fn strip_committed_kb_lines(committed: &str, edited_full: &str) -> String {
         }
     }
 
-    let mut edited_keys = std::collections::BTreeSet::new();
+    let edited_keys: std::collections::BTreeSet<String> = edited_full
+        .lines()
+        .filter_map(normalize_kb_line_key)
+        .collect();
+
+    // A new line sitting where a deleted committed rule used to be is an in-place edit of it;
+    // every other new line is a plain addition and goes after the tombstones.
+    let mut replacements: std::collections::BTreeMap<usize, String> =
+        std::collections::BTreeMap::new();
     let mut kept_lines: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut next_base = 0usize;
     for line in edited_full.lines() {
-        if let Some(key) = normalize_kb_line_key(line)
-            && edited_keys.insert(key.clone())
-            && !base_norm.contains(&key)
+        let Some(key) = normalize_kb_line_key(line) else {
+            continue;
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        if let Some(idx) = base_keys_ordered.iter().position(|k| k == &key) {
+            next_base = idx + 1;
+        } else if base_keys_ordered
+            .get(next_base)
+            .is_some_and(|k| !edited_keys.contains(k))
+            && !replacements.contains_key(&next_base)
         {
+            replacements.insert(next_base, line.to_string());
+        } else {
             kept_lines.push(line.to_string());
         }
     }
 
-    let mut out_lines: Vec<String> = base_keys_ordered
-        .into_iter()
-        .filter(|key| !edited_keys.contains(key))
-        .map(|key| format_kb_tombstone(&key))
-        .collect();
+    let mut out_lines: Vec<String> = Vec::new();
+    for (idx, key) in base_keys_ordered.iter().enumerate() {
+        if edited_keys.contains(key) {
+            continue;
+        }
+        out_lines.push(format_kb_tombstone(key));
+        if let Some(replacement) = replacements.remove(&idx) {
+            out_lines.push(replacement);
+        }
+    }
+    // A blank line stops the merge from reading the first addition as a replacement of the last tombstone.
+    if !kept_lines.is_empty() && !out_lines.is_empty() {
+        out_lines.push(String::new());
+    }
     out_lines.extend(kept_lines);
 
     if out_lines.is_empty() {
@@ -988,7 +1064,13 @@ mod tests {
         let edited = "# Code Tender KB\n\n- `[*]` Rule alpha --> updated.\n";
         let overlay = strip_committed_kb_lines(committed, edited);
         assert!(overlay.contains("<!-- otto-kb-deleted:"), "{overlay}");
-        assert!(!overlay.contains("Rule beta"), "{overlay}");
+        // Keys are case-preserving now, so the tombstone itself spells `Rule beta`; only a live rule line would be a leak.
+        assert!(
+            !overlay
+                .lines()
+                .any(|l| l.starts_with("- ") && l.contains("Rule beta")),
+            "{overlay}"
+        );
 
         let reloaded = merge_kb_markdown(committed, &overlay);
         assert_eq!(reloaded, edited);
@@ -1006,8 +1088,54 @@ mod tests {
         let revived = merge_kb_markdown(committed, &revived_overlay);
         assert_eq!(
             revived,
-            "# Code Tender KB\n\n- `[*]` Rule beta.\n- `[*]` Rule alpha --> updated.\n"
+            // The edited alpha keeps its original slot ahead of beta instead of trailing after it.
+            "# Code Tender KB\n\n- `[*]` Rule alpha --> updated.\n- `[*]` Rule beta.\n"
         );
+    }
+
+    #[test]
+    fn case_only_edit_of_committed_kb_rule_survives_reload() {
+        let committed = "# KB\n\n- `[*]` Rule alpha.\n";
+        let edited = "# KB\n\n- `[*]` Rule Alpha.\n";
+        let overlay = strip_committed_kb_lines(committed, edited);
+        assert!(overlay.contains("- `[*]` Rule Alpha."), "{overlay}");
+        assert_eq!(merge_kb_markdown(committed, &overlay), edited);
+    }
+
+    #[test]
+    fn kb_tombstone_escape_round_trips_literal_entities() {
+        for raw in [
+            "a --> b",
+            "a --&gt; b",
+            "a &amp; b",
+            "--->",
+            "&",
+            "--&amp;>",
+        ] {
+            assert_eq!(
+                unescape_kb_tombstone_key(&escape_kb_tombstone_key(raw)),
+                raw
+            );
+        }
+        let committed = "- `[*]` Keep --&gt; and &amp; literal.\n- `[*]` Other.\n";
+        let edited = "- `[*]` Other.\n";
+        let overlay = strip_committed_kb_lines(committed, edited);
+        assert_eq!(merge_kb_markdown(committed, &overlay), edited);
+    }
+
+    #[test]
+    fn edited_committed_kb_rule_keeps_its_original_position() {
+        let committed = "# KB\n\n- one.\n- two.\n- three.\n";
+        let edited = "# KB\n\n- one.\n- TWO.\n- three.\n";
+        let overlay = strip_committed_kb_lines(committed, edited);
+        let reloaded = merge_kb_markdown(committed, &overlay);
+        assert_eq!(reloaded, edited);
+        assert_eq!(strip_committed_kb_lines(committed, &reloaded), overlay);
+
+        // A deletion plus an unrelated addition must not turn the addition into an edit.
+        let edited = "# KB\n\n- one.\n- three.\n- four.\n";
+        let overlay = strip_committed_kb_lines(committed, edited);
+        assert_eq!(merge_kb_markdown(committed, &overlay), edited);
     }
 
     #[test]
