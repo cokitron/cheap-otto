@@ -65,7 +65,7 @@
 <span class="c"># take it back down</span>
 <span class="p">$</span> cheap-otto dashboards tunnel --stop --execute
 <span class="p">$</span> cheap-otto dashboards uninstall --execute</pre></div>
-    <p>Like every cheap-otto command that touches the Mac, <code>ui</code> is a dry run until you add <code>--execute</code>. This is what it prints without it, with the default peer:</p>
+    <p>Like other dashboard-changing cheap-otto commands, <code>ui</code> is a dry run until you add <code>--execute</code>. This is what it prints without it, with the default peer:</p>
     <div class="term"><div class="term-bar"><span>cheap-otto ui</span><span>dry run</span></div><pre><span class="p">$</span> cheap-otto ui
 === cheap-otto: dashboards on the paired MacBook ===
 Paired MacBook  : otto-mac (admin@100.101.102.103)
@@ -87,7 +87,7 @@ Browser         : http://localhost:7420
       <li><strong>Re-running is safe.</strong> The install script prints <code>action=unchanged</code> for a service that is already right, and frees a port another process holds before it starts one.</li>
       <li><strong>One tunnel, recorded.</strong> <code>tunnel.json</code> holds its pid and ports. A second <code>ui</code> reuses it, and the tool refuses to kill a listener it did not start.</li>
       <li><strong>The pages link to each other.</strong> Mission Control asks <code>GET /api/dashboards</code> which ones are up and links to them. The Reviewer links back to Mission Control.</li>
-      <li><strong><code>ssh otto-mac</code> is quiet.</strong> It no longer forwards dev ports, so it can't collide with the tunnel. Forward 3000, 5173 and 8080 when you need them with <code>cheap-otto pair … --tunnel</code>.</li>
+      <li><strong><code>ssh otto-mac</code> is quiet.</strong> It no longer forwards dev ports, so it can't collide with the tunnel. Forward 3000, 5173 and 8080 when you need them with <code>cheap-otto pair --host &lt;mac-address&gt; --user &lt;mac-user&gt; --tunnel</code>. Replace the angle-bracket values with your own; they are placeholders. <code>--tunnel</code> starts the live tunnel without <code>--apply</code>.</li>
       <li><strong>No more orphans.</strong> The Reviewer's "start Pixel Office" button kicks the LaunchAgent instead of spawning a process outside <code>launchd</code>.</li>
     </ul>
 
