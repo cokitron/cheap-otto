@@ -353,6 +353,9 @@ struct ResolvedSshConfig {
     proxy_command: Option<String>,
     host_key_alias: Option<String>,
     strict_host_key_checking: Option<String>,
+    user_known_hosts_file: Option<String>,
+    global_known_hosts_file: Option<String>,
+    identity_agent: Option<String>,
 }
 
 /// Pure parser for `ssh -G` output. Keeps connection settings and drops `localforward`,
@@ -391,6 +394,13 @@ fn parse_ssh_effective_config(raw: &str) -> ResolvedSshConfig {
             }
             "stricthostkeychecking" if !value.eq_ignore_ascii_case("ask") => {
                 cfg.strict_host_key_checking = Some(value.to_string());
+            }
+            // Trust store and agent socket settings, so `-F none` does not break hosts that
+            // keep their known hosts or SSH agent outside the OpenSSH defaults.
+            "userknownhostsfile" => cfg.user_known_hosts_file = Some(value.to_string()),
+            "globalknownhostsfile" => cfg.global_known_hosts_file = Some(value.to_string()),
+            "identityagent" if !value.eq_ignore_ascii_case("none") => {
+                cfg.identity_agent = Some(value.to_string());
             }
             // `localforward`, `remoteforward`, `dynamicforward` and all other directives are
             // deliberately ignored so `-F none` carries only the single Reviewer `-L` forward.
@@ -493,6 +503,18 @@ fn reviewer_fallback_tunnel_args_with_config(
         if let Some(strict) = &cfg.strict_host_key_checking {
             args.push("-o".to_string());
             args.push(format!("StrictHostKeyChecking={strict}"));
+        }
+        if let Some(file) = &cfg.user_known_hosts_file {
+            args.push("-o".to_string());
+            args.push(format!("UserKnownHostsFile={file}"));
+        }
+        if let Some(file) = &cfg.global_known_hosts_file {
+            args.push("-o".to_string());
+            args.push(format!("GlobalKnownHostsFile={file}"));
+        }
+        if let Some(agent) = &cfg.identity_agent {
+            args.push("-o".to_string());
+            args.push(format!("IdentityAgent={agent}"));
         }
     }
 
@@ -2364,6 +2386,7 @@ dynamicforward 1080
                 proxy_command: None,
                 host_key_alias: Some("otto-mac-key".to_string()),
                 strict_host_key_checking: Some("accept-new".to_string()),
+                ..ResolvedSshConfig::default()
             }
         );
 
@@ -2399,6 +2422,51 @@ dynamicforward 1080
             assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
         }
         assert_eq!(args.last().map(String::as_str), Some("otto-mac"));
+    }
+
+    #[test]
+    fn fallback_tunnel_preserves_known_hosts_and_identity_agent() {
+        let ssh_g = "\
+host otto-mac
+userknownhostsfile ~/.ssh/team_known_hosts
+globalknownhostsfile /etc/ssh/ssh_known_hosts
+identityagent /tmp/agent.sock
+localforward [127.0.0.1]:7421 [127.0.0.1]:7421
+";
+        let resolved = parse_ssh_effective_config(ssh_g);
+        assert_eq!(
+            resolved,
+            ResolvedSshConfig {
+                user_known_hosts_file: Some("~/.ssh/team_known_hosts".to_string()),
+                global_known_hosts_file: Some("/etc/ssh/ssh_known_hosts".to_string()),
+                identity_agent: Some("/tmp/agent.sock".to_string()),
+                ..ResolvedSshConfig::default()
+            }
+        );
+
+        let args = reviewer_fallback_tunnel_args_with_config("otto-mac", 7430, Some(&resolved));
+        assert_eq!(args[..2], ["-F", "none"]);
+        let l_index = args.iter().position(|arg| arg == "-L");
+        for expected in [
+            "UserKnownHostsFile=~/.ssh/team_known_hosts",
+            "GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts",
+            "IdentityAgent=/tmp/agent.sock",
+        ] {
+            let at = args.iter().position(|arg| arg == expected);
+            assert!(at.is_some(), "missing {expected}");
+            assert!(at < l_index, "{expected} must precede -L");
+            assert_eq!(args[at.unwrap() - 1], "-o");
+        }
+        assert!(!args.iter().any(|arg| arg.contains("7421")));
+        assert_eq!(args[args.len() - 2..], ["--", "otto-mac"]);
+    }
+
+    #[test]
+    fn fallback_tunnel_skips_identity_agent_none() {
+        let resolved = parse_ssh_effective_config("identityagent none\n");
+        assert_eq!(resolved.identity_agent, None);
+        let args = reviewer_fallback_tunnel_args_with_config("otto-mac", 7430, Some(&resolved));
+        assert!(!args.iter().any(|arg| arg.starts_with("IdentityAgent=")));
     }
 
     #[test]
