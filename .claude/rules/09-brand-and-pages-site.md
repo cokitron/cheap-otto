@@ -62,6 +62,7 @@ Two themes. Night Shift is primary; Paper is for docs and print.
 
 - GitHub Pages serves `main:/docs` at `https://cokitron.github.io/cheap-otto/`. A merge to `main` deploys; there is no build step and no workflow. `docs/.nojekyll` must stay.
 - `docs/index.html` is one self-contained file: inline CSS and JS, tokens as CSS variables under `[data-theme="night"]` and `[data-theme="paper"]`. The only external request is Google Fonts. Keep it a single file with no framework and no bundler.
+- **The blog** is `docs/blog/`: `index.html` lists the posts newest first, each post is `YYYY-MM-DD-<slug>.html`, and every page shares `blog.css` (the same tokens, cut down) and the `otto-theme` theme switch. A post is hand-written HTML with no build step, linked from the index and the `Blog` links in `docs/index.html`. It follows the voice above: every command runs as written, or marks its placeholders in angle brackets (such as `<mac-address>`) and says they are placeholders, never a literal `…`, every number comes from the repo or GitHub (PRs, diffs, test counts), and sample output is a real dry run.
 - **The demos mirror the code.** When the Rust side changes, update the site in the same PR:
   - the arbiter demo's `evaluate()` and reason strings ↔ `ArbiterPolicy::evaluate` in `src/arbiter.rs`;
   - the doctor demo's eight check names ↔ `src/doctor.rs`;

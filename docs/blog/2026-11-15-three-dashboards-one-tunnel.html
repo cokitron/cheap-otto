@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three dashboards, one tunnel · cheap-otto blog</title>
+<meta name="description" content="15 PRs in one afternoon moved Mission Control, the Pixel Office and the Reviewer onto launchd services on the Mac, behind one SSH tunnel.">
+<meta name="theme-color" content="#F7D842">
+<meta property="og:title" content="Three dashboards, one tunnel · cheap-otto">
+<meta property="og:description" content="15 PRs, one afternoon: every cheap-otto dashboard now runs as a launchd service on the old MacBook, behind one SSH tunnel.">
+<meta property="og:image" content="https://cokitron.github.io/cheap-otto/assets/social-preview.png">
+<meta property="og:url" content="https://cokitron.github.io/cheap-otto/blog/2026-11-15-three-dashboards-one-tunnel.html">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="../assets/otto-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('otto-theme'); } catch (e) {}
+    if (t !== 'night' && t !== 'paper') { t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'night'; }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="blog.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brandmark" href="../" aria-label="cheap-otto home">cheap-<b>otto</b></a>
+    <div class="top-nav">
+      <nav class="modenav" aria-label="Site"><a href="../">Home</a><a href="./" class="on">Blog</a></nav>
+      <div class="modenav" role="group" aria-label="Theme"><button type="button" data-theme-btn="night">Night</button><button type="button" data-theme-btn="paper">Paper</button></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <article>
+    <div class="post-head">
+      <div class="sechead"><span class="sectag">Shipped</span><span class="secsub"><time datetime="2026-11-15">15 Nov 2026</time> · m1-dashboards · tracking issue <a href="https://github.com/cokitron/cheap-otto/issues/6">#6</a></span></div>
+      <h1>Three dashboards. One tunnel.</h1>
+      <p class="lede">cheap-otto has three web dashboards: Mission Control on <code>:7420</code>, the pixel-agents office on <code>:7421</code> and the Reviewer with Code Tender on <code>:7430</code>. Until this week they were started three different ways, and their SSH tunnels fought over the same ports. Opening one could break another, and Mission Control did not survive a reboot. Now all three are <code>launchd</code> services on the old MacBook, and one command brings them to your Windows browser through one <code>ssh</code> process.</p>
+    </div>
+
+    <div class="stats">
+      <div class="card stat y"><span class="label">PRs</span><span class="num">15</span><p>the whole plan, merged in about four hours, plus one security prerequisite</p></div>
+      <div class="card stat"><span class="label">Lines</span><span class="num">+5,494</span><p>and −342 across 31 files, each PR planned to fit a 600-line budget</p></div>
+      <div class="card stat"><span class="label">Tests</span><span class="num">260</span><p>up from 160; none needs a Mac, a network or the clock</p></div>
+      <div class="card stat"><span class="label">Review threads</span><span class="num">73/89</span><p>answered on the Mac by Code Tender, the repo's own reviewer-fixer</p></div>
+    </div>
+
+    <h2>What you run now</h2>
+    <p>One command installs or updates the services on the Mac, opens the tunnel and opens Mission Control. The rest tell you what is up, or take it back down.</p>
+    <div class="term"><div class="term-bar"><span>windows → otto-mac</span><span>cheap-otto</span></div><pre><span class="c"># Mission Control + Pixel Office services (the office needs pixel-agents), one tunnel, browser</span>
+<span class="p">$</span> cheap-otto ui --execute
+<span class="p">$</span> cheap-otto ui --execute --open reviewer
+<span class="c"># loaded? listening on the Mac? tunnelled here? and if not, why</span>
+<span class="p">$</span> cheap-otto dashboards status --execute
+<span class="c"># the Reviewer's own service comes with the deploy, and its ui shares the same tunnel</span>
+<span class="p">$</span> cargo run -p code-reviewer -- m1 sync
+<span class="p">$</span> cargo run -p code-reviewer -- ui
+<span class="c"># take it back down</span>
+<span class="p">$</span> cheap-otto dashboards tunnel --stop --execute
+<span class="p">$</span> cheap-otto dashboards uninstall --execute</pre></div>
+    <p>Like other dashboard-changing cheap-otto commands, <code>ui</code> is a dry run until you add <code>--execute</code>. This is what it prints without it, with the default peer:</p>
+    <div class="term"><div class="term-bar"><span>cheap-otto ui</span><span>dry run</span></div><pre><span class="p">$</span> cheap-otto ui
+=== cheap-otto: dashboards on the paired MacBook ===
+Paired MacBook  : otto-mac (admin@100.101.102.103)
+Mission Control : http://127.0.0.1:7420
+Pixel Office    : http://127.0.0.1:7421
+Reviewer        : http://127.0.0.1:7430
+Install         : `cheap-otto dashboards install-script` prints the script
+  * Ensure LaunchAgent com.cheapotto.dashboards.mission-control -> 127.0.0.1:7420
+  * Ensure LaunchAgent com.cheapotto.dashboards.pixel-office -> 127.0.0.1:7421
+Tunnel          :
+  $ ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o ConnectTimeout=10 -p 22 -L 127.0.0.1:7420:127.0.0.1:7420 -L 127.0.0.1:7421:127.0.0.1:7421 -L 127.0.0.1:7430:127.0.0.1:7430 admin@100.101.102.103
+Browser         : http://localhost:7420
+
+<span class="ok">Pass `--execute` to install the services on the Mac, open the tunnel and open Mission Control.</span></pre></div>
+
+    <h3>What changed for you</h3>
+    <ul class="tight">
+      <li><strong>Crashes heal themselves.</strong> Each service is a LaunchAgent with <code>KeepAlive</code>, logging to <code>~/.cheap-otto/logs/dashboards/&lt;id&gt;.log</code>.</li>
+      <li><strong>Re-running is safe.</strong> The install script prints <code>action=unchanged</code> for a service that is already right, and frees a port another process holds before it starts one.</li>
+      <li><strong>One tunnel, recorded.</strong> <code>tunnel.json</code> holds its pid and ports. A second <code>ui</code> reuses it, and the tool refuses to kill a listener it did not start.</li>
+      <li><strong>The pages link to each other.</strong> Mission Control asks <code>GET /api/dashboards</code> which ones are up and links to them. The Reviewer links back to Mission Control.</li>
+      <li><strong><code>ssh otto-mac</code> is quiet.</strong> It no longer forwards dev ports, so it can't collide with the tunnel. Forward 3000, 5173 and 8080 when you need them with <code>cheap-otto pair --host &lt;mac-address&gt; --user &lt;mac-user&gt; --tunnel</code>. Replace the angle-bracket values with your own; they are placeholders. <code>--tunnel</code> starts the live tunnel without <code>--apply</code>.</li>
+      <li><strong>No more orphans.</strong> The Reviewer's "start Pixel Office" button kicks the LaunchAgent instead of spawning a process outside <code>launchd</code>.</li>
+    </ul>
+
+    <h2>The PRs</h2>
+    <p>The work was written as a spec first (requirements, design, then 24 tasks) and cut into 15 PRs of one theme each, planned at no more than 600 changed lines. A few grew past that once review fixes landed. Each row links to its PR.</p>
+    <div class="scroll-x">
+    <table class="ledger">
+      <thead><tr><th>PR</th><th>What it delivered</th></tr></thead>
+      <tbody>
+        <tr class="phase"><td colspan="2">Phase 0 · prerequisite</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/31">#31</a></td><td>A request guard on both servers. Before a tunnel carries anything, they reject a non-loopback <code>Host</code> (DNS rebinding) and state-changing requests from foreign origins.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 1 · the core, pure and tested on any OS</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/41">#41</a></td><td>The registry in <code>src/dashboards.rs</code>: ids, names, ports and LaunchAgent labels in one place.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/45">#45</a></td><td>LaunchAgent templates with <code>KeepAlive</code>. The <code>dashboards</code> project name is reserved, so no schedule can overwrite a dashboard's plist.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/51">#51</a></td><td>The install script and plan: idempotent, frees held ports, skips the Pixel Office when <code>pixel-agents</code> is missing.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/52">#52</a></td><td>A read-only status probe, its parser, and a diagnosis that says why a dashboard is down.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/47">#47</a></td><td>The tunnel: one <code>ssh -N</code> for every port, the decision to reuse, start or refuse, and <code>tunnel.json</code>.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/42">#42</a></td><td>The managed SSH config block stops writing <code>LocalForward</code>, so <code>ssh otto-mac</code> no longer grabs ports.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 2 · the CLI</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/54">#54</a></td><td>Uninstall and restart, and the <code>dashboards list|install|install-script|status|restart|uninstall</code> subcommands.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/50">#50</a></td><td><code>dashboards tunnel</code> to show, start or stop the one tunnel.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/56">#56</a></td><td>A new <code>cheap-otto ui</code>: services, then SSH config, then one tunnel, then a warning per dashboard that isn't listening, then the browser. No more tmux.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 3 · Mission Control as the hub</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/48">#48</a></td><td><code>GET /api/dashboards</code>, links between the pages, and a test that keeps both crates on the same ports.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 4 · the Reviewer joins in</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/43">#43</a></td><td>The <code>m1 sync</code> build script becomes a pure function, so a test proves both binaries are installed, <code>cheap-otto</code> first.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/44">#44</a></td><td>The Reviewer's fallback tunnel forwards only <code>:7430</code> and never leaves a stray <code>ssh</code> behind.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/49">#49</a></td><td>The Pixel Office button kicks the LaunchAgent instead of spawning an orphan.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/58">#58</a></td><td><code>code-reviewer ui</code> shares the <code>cheap-otto ui</code> tunnel, <code>m1 sync</code> installs the dashboard services, and <code>open-ui.ps1</code> is now a thin wrapper.</td></tr>
+        <tr class="phase"><td colspan="2">Phase 5 · docs</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/59">#59</a></td><td>The README, this site, the reviewer's README, the deploy skill and the agent rules, all brought in line with the code.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>How it was built</h2>
+    <p>Every PR came from its own Claude Code session, branched from <code>main</code> and started as soon as the PRs it depended on had merged, so independent rows ran in parallel. Each one opened its PR and stopped. Cubic reviewed every PR, and Code Tender (the fixer that runs on the Mac next to the reviewer) answered the comments with commits of its own. Once the checks were green and every thread was resolved, the PR auto-merged, one at a time, so only one branch re-ran CI at once.</p>
+    <p>The honest part: Code Tender is not always right. Once, on <a href="https://github.com/cokitron/cheap-otto/pull/44">#44</a>, its fix contradicted the spec and was reverted. Every fix it made was checked against the spec before merge. And when a Claude session tried to fix the same comment, the two sometimes pushed at once, and one fix was thrown away. Now the task sessions leave review comments to Code Tender.</p>
+
+    <h2>What's left</h2>
+    <p>Two checks only the owner can run, because they need the real Mac: deploy with <code>m1 sync</code> and verify all ten steps (<a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a>), then reboot the Mac and watch the services come back (<a href="https://github.com/cokitron/cheap-otto/issues/30">#30</a>). The spec, with every requirement and decision, is in <a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-dashboards"><code>specs/m1-dashboards</code></a>.</p>
+  </article>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <span><a href="../">Home</a> · <a href="./">Blog</a> · <a href="https://github.com/cokitron/cheap-otto">GitHub</a></span>
+    <span>o=o · otto reads the same both ways</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var btns = Array.prototype.slice.call(document.querySelectorAll('[data-theme-btn]'));
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    btns.forEach(function (b) { b.classList.toggle('on', b.dataset.themeBtn === t); b.setAttribute('aria-pressed', b.dataset.themeBtn === t); });
+    try { localStorage.setItem('otto-theme', t); } catch (e) {}
+  }
+  btns.forEach(function (b) { b.addEventListener('click', function () { setTheme(b.dataset.themeBtn); }); });
+  setTheme(document.documentElement.getAttribute('data-theme') || 'night');
+})();
+</script>
+</body>
+</html>
