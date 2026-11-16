@@ -20,5 +20,5 @@ description: Run or inspect a multi-lens Internal CI code review or stateful com
    ```
 4. Inspect tracked PR status, open observations, and Google Drive Doc URL:
    ```bash
-   code-reviewer --workspace ~/otto-workspaces/code-reviewer status
+   code-reviewer --workspace ~/otto-workspaces/cheap-otto status
    ```

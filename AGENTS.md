@@ -14,13 +14,13 @@ Antigravity caps each workspace rule file at **24,000 bytes** after expanding `@
 Before modifying files in any of the scopes below, read the linked rule file in full:
 
 - **Rust sources & manifests (`**/*.rs`, `**/Cargo.toml`):** [01-rust-idioms-and-edition-2024.md](.claude/rules/01-rust-idioms-and-edition-2024.md) and [04-clippy-formatting-and-docs.md](.claude/rules/04-clippy-formatting-and-docs.md)
-- **Security, shell/PowerShell scripts & appliance guardrails (`**/*.rs`, `**/*.sh`, `**/*.ps1`):** [02-security-and-appliance-safety.md](.claude/rules/02-security-and-appliance-safety.md) and [.ai/security-and-tender-boundaries.md](.ai/security-and-tender-boundaries.md)
+- **Security, shell/PowerShell scripts & appliance guardrails (`**/*.rs`, `**/*.sh`, `**/*.ps1`, `**/Cargo.toml`):** [02-security-and-appliance-safety.md](.claude/rules/02-security-and-appliance-safety.md) and [.ai/security-and-tender-boundaries.md](.ai/security-and-tender-boundaries.md)
 - **Functional core, shells & tests (`src/`, `tests/`, `crates/`):** [03-architecture-and-testing.md](.claude/rules/03-architecture-and-testing.md) and [.ai/architecture-and-invariants.md](.ai/architecture-and-invariants.md)
 - **Dependencies, `clap` flags & JSON state evolution (`Cargo.toml`, `Cargo.lock`, `main.rs`):** [05-crate-ecosystem-and-cli-patterns.md](.claude/rules/05-crate-ecosystem-and-cli-patterns.md)
 - **Autonomous PR reviewer & Code Tender (`crates/code-reviewer/`):** [07-code-reviewer.md](.claude/rules/07-code-reviewer.md)
 - **Embedded dashboards, `server.rs` & `request_guard.rs`:** [08-embedded-web-ui.md](.claude/rules/08-embedded-web-ui.md)
 - **Brand assets, `README.md`, `docs/` & `docs/blog/`:** [09-brand-and-pages-site.md](.claude/rules/09-brand-and-pages-site.md)
-- **GitHub Actions CI, Rulesets, Dependabot & Releases (`.github/`, `Cargo.toml`):** [10-ci-and-release.md](.claude/rules/10-ci-and-release.md)
+- **GitHub Actions CI, Rulesets, Dependabot & Releases (`.github/`, `Cargo.toml`, `Cargo.lock`):** [10-ci-and-release.md](.claude/rules/10-ci-and-release.md)
 - **Specs & multi-PR task execution (`specs/`):** [11-specs-protocol.md](.claude/rules/11-specs-protocol.md) and [specs/README.md](specs/README.md)
 
 ## Workspace Skills
