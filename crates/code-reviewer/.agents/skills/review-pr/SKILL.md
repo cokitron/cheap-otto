@@ -8,17 +8,17 @@ description: Run or inspect a multi-lens Internal CI code review or stateful com
 ## Workflow
 1. Verify appliance readiness if needed:
    ```bash
-   code-reviewer --workspace ~/otto-workspaces/code-reviewer doctor
+   code-reviewer --workspace ~/otto-workspaces/cheap-otto doctor
    ```
 2. Preview pending reviews across watched repos:
    ```bash
-   code-reviewer --workspace ~/otto-workspaces/code-reviewer poll --dry-run
+   code-reviewer --workspace ~/otto-workspaces/cheap-otto poll --dry-run
    ```
 3. Run a targeted review or compliance re-review on a specific PR:
    ```bash
-   code-reviewer --workspace ~/otto-workspaces/code-reviewer review --repo <OWNER/REPO> --pr <PR_NUMBER>
+   code-reviewer --workspace ~/otto-workspaces/cheap-otto review --repo <OWNER/REPO> --pr <PR_NUMBER>
    ```
 4. Inspect tracked PR status, open observations, and Google Drive Doc URL:
    ```bash
-   code-reviewer --workspace ~/otto-workspaces/code-reviewer status
+   code-reviewer --workspace ~/otto-workspaces/cheap-otto status
    ```

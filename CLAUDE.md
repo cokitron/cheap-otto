@@ -69,7 +69,7 @@ cargo run -p code-reviewer -- --help
 2. The battery charge ceiling stays in `50..=100` (default 78) and the battery sleep fallback (`pmset -b sleep 5`) is always kept.
 3. Arbiter precedence: kill-switch first, then thermal `Serious` or worse, before any other rule.
 4. No `unsafe` (`#![forbid(unsafe_code)]` at every crate root) and no `.unwrap()`, `.expect()` or `panic!` outside tests. Both crates are at zero today.
-5. Servers default to `127.0.0.1`, but `cheap-otto serve --host` and `code-reviewer serve --bind` accept overrides; do not expose either server on a non-loopback address. Remote access goes through SSH tunnels.
+5. Servers default to `127.0.0.1`, and `require_loopback_bind` (`src/request_guard.rs`, `crates/code-reviewer/src/request_guard.rs`) rejects any `--host` / `--bind` address other than `127.0.0.1`, `localhost` or `::1`. Remote access goes through SSH tunnels.
 6. Tests need no Mac, no network and no wall-clock time.
 
 ## Conventions

@@ -14,7 +14,7 @@ Use this skill from **any** machine (Windows workstation or M1 MacBook) and **an
      gdrive readonly ls <DRIVE_FOLDER_ID>
      gdocs readonly read <DOC_ID> --comments=false
      ```
-   - Or on the M1 directly: read `~/otto-workspaces/code-reviewer/reviews/<owner>__<repo>/pr-<N>/latest-review.md`.
+   - Or on the M1 directly: read `~/otto-workspaces/cheap-otto/crates/code-reviewer/reviews/<owner>__<repo>/pr-<N>/latest-review.md`.
 2. **Execute Section 1 (`Open Observations — Agent Action Queue`) in severity order (`CRITICAL` -> `HIGH` -> `MEDIUM` -> `LOW`):**
    - Check **Section 2 (`Resolved & Accepted Compliance Ledger`)** first so you never regress previously closed items.
    - Apply each fix at the cited `path:line` or record a concrete, evidence-backed reply on the PR if an item is governed by an intentional ADR/invariant or tracked follow-up issue `#N`.

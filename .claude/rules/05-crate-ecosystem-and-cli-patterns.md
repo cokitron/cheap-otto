@@ -21,7 +21,7 @@ Both binaries keep a small, audited dependency tree so they build fast on a fanl
 | `thiserror` | `2.0` | both | Domain error enums |
 | `axum`, `tokio` | `0.8`, `1.43` | `cheap-otto` only | The `serve` REST API and the `pixel-agents` event forwarder |
 | `tower` | `0.5` (dev) | `cheap-otto` only | `oneshot` router tests |
-| `chrono`, `toml` | `0.4`, `0.8` | `code-reviewer` only | Ledger timestamps, `config/repos.toml` |
+| `chrono`, `toml` | `0.4`, `1.2` | `code-reviewer` only | Ledger timestamps, `config/repos.toml` |
 
 ### Adding a dependency
 - **`std` first.** No crate for string handling, path joining or formatting the standard library already covers.

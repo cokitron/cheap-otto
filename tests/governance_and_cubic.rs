@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -407,6 +408,7 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
         "README.md",
         "CLAUDE.md",
         "AGENTS.md",
+        ".agents/skills.json",
         "CONTRIBUTING.md",
         "SECURITY.md",
         "CODE_OF_CONDUCT.md",
@@ -431,6 +433,26 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
         }
     }
 
+    let skills_registry = fs::read_to_string(root.join(".agents/skills.json"))
+        .map_err(|e| format!("failed reading .agents/skills.json: {e}"))?;
+    let skills_registry: serde_json::Value = serde_json::from_str(&skills_registry)
+        .map_err(|e| format!(".agents/skills.json is not valid JSON: {e}"))?;
+    let registers_code_reviewer_skills = skills_registry
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("path").and_then(serde_json::Value::as_str)
+                    == Some("crates/code-reviewer/.agents/skills")
+            })
+        });
+    if !registers_code_reviewer_skills {
+        return Err(
+            ".agents/skills.json must register `crates/code-reviewer/.agents/skills` in `entries`"
+                .to_string(),
+        );
+    }
+
     for rust_entry in [
         "src/lib.rs",
         "src/main.rs",
@@ -450,4 +472,125 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[test]
+fn agents_md_stays_under_antigravity_inline_cap_and_skills_mirror() -> Result<(), String> {
+    const ANTIGRAVITY_RULE_CAP_BYTES: usize = 24_000;
+    let root = repo_root();
+    let agents_md = fs::read_to_string(root.join("AGENTS.md"))
+        .map_err(|e| format!("failed reading AGENTS.md: {e}"))?;
+
+    let mut expanded_bytes = 0usize;
+    for line in agents_md.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@[")
+            && let Some((_, after_bracket)) = rest.split_once("](")
+            && let Some((rel_path, "")) = after_bracket.split_once(')')
+        {
+            let inc = fs::read(root.join(rel_path)).map_err(|e| {
+                format!("AGENTS.md @[...] include `{rel_path}` could not be read: {e}")
+            })?;
+            expanded_bytes = expanded_bytes.saturating_add(inc.len()).saturating_add(1);
+        } else {
+            expanded_bytes = expanded_bytes.saturating_add(line.len()).saturating_add(1);
+        }
+    }
+
+    if expanded_bytes >= ANTIGRAVITY_RULE_CAP_BYTES {
+        return Err(format!(
+            "AGENTS.md expands to {expanded_bytes} bytes (>= {ANTIGRAVITY_RULE_CAP_BYTES} byte Antigravity cap); move path-scoped rules to standard markdown links"
+        ));
+    }
+
+    let agy_root = root.join("crates/code-reviewer/.agents/skills");
+    let claude_root = root.join("crates/code-reviewer/.claude/skills");
+    let mut agy_tree = BTreeMap::new();
+    collect_tree(&agy_root, &agy_root, &mut agy_tree)?;
+    let mut claude_tree = BTreeMap::new();
+    collect_tree(&claude_root, &claude_root, &mut claude_tree)?;
+    if let Some(drift) = first_tree_drift(&agy_tree, &claude_tree) {
+        return Err(format!(
+            "skills drifted between .agents/skills and .claude/skills: {drift}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Reads every file under `dir` into `out`, keyed by its `/`-joined path relative to `base`.
+fn collect_tree(
+    base: &Path,
+    dir: &Path,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("failed listing {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("failed listing {}: {e}", dir.display()))?
+            .path();
+        if path.is_dir() {
+            collect_tree(base, &path, out)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(base)
+            .map_err(|e| format!("{} is outside {}: {e}", path.display(), base.display()))?
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let bytes =
+            fs::read(&path).map_err(|e| format!("failed reading {}: {e}", path.display()))?;
+        out.insert(rel, bytes);
+    }
+    Ok(())
+}
+
+/// Names the first path that is missing from, extra in, or different between the mirrored trees.
+fn first_tree_drift(
+    agy: &BTreeMap<String, Vec<u8>>,
+    claude: &BTreeMap<String, Vec<u8>>,
+) -> Option<String> {
+    for (rel, agy_bytes) in agy {
+        match claude.get(rel) {
+            None => return Some(format!("`{rel}` is missing from .claude/skills")),
+            Some(claude_bytes) if claude_bytes != agy_bytes => {
+                return Some(format!("`{rel}` differs between the two trees"));
+            }
+            Some(_) => {}
+        }
+    }
+    claude
+        .keys()
+        .find(|rel| !agy.contains_key(*rel))
+        .map(|rel| format!("`{rel}` is extra in .claude/skills (missing from .agents/skills)"))
+}
+
+#[test]
+fn first_tree_drift_reports_missing_extra_and_differing_paths() {
+    let tree = |files: &[(&str, &str)]| -> BTreeMap<String, Vec<u8>> {
+        files
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.as_bytes().to_vec()))
+            .collect()
+    };
+    let base = tree(&[("a/SKILL.md", "one"), ("b/SKILL.md", "two")]);
+    assert_eq!(first_tree_drift(&base, &base.clone()), None);
+    assert!(
+        first_tree_drift(&base, &tree(&[("a/SKILL.md", "one")]))
+            .is_some_and(|m| m.contains("b/SKILL.md") && m.contains("missing"))
+    );
+    assert!(
+        first_tree_drift(
+            &base,
+            &tree(&[("a/SKILL.md", "one"), ("b/SKILL.md", "two"), ("c/x.md", "")])
+        )
+        .is_some_and(|m| m.contains("c/x.md") && m.contains("extra"))
+    );
+    assert!(
+        first_tree_drift(&base, &tree(&[("a/SKILL.md", "one"), ("b/SKILL.md", "2")]))
+            .is_some_and(|m| m.contains("b/SKILL.md") && m.contains("differs"))
+    );
 }
