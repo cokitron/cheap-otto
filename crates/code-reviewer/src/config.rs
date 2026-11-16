@@ -605,7 +605,36 @@ pub fn write_private_kb_file(path: &Path, contents: &str, append: bool) -> std::
     file.write_all(contents.as_bytes())
 }
 
-/// Merges a committed starter KB markdown file with a private runtime KB overlay, deduplicating headings and bullets.
+const KB_TOMBSTONE_PREFIX: &str = "<!-- otto-kb-deleted: ";
+const KB_TOMBSTONE_SUFFIX: &str = " -->";
+
+fn format_kb_tombstone(norm_key: &str) -> String {
+    let escaped = norm_key.replace("-->", "--&gt;");
+    format!("{KB_TOMBSTONE_PREFIX}{escaped}{KB_TOMBSTONE_SUFFIX}")
+}
+
+fn parse_kb_tombstone_key(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let inner = trimmed
+        .strip_prefix(KB_TOMBSTONE_PREFIX)?
+        .strip_suffix(KB_TOMBSTONE_SUFFIX)?
+        .replace("--&gt;", "-->");
+    let key = inner.trim().to_ascii_lowercase();
+    (!key.is_empty()).then_some(key)
+}
+
+fn normalize_kb_line_key(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || parse_kb_tombstone_key(trimmed).is_some() {
+        return None;
+    }
+    let key = trimmed.trim_start_matches("- ").trim().to_ascii_lowercase();
+    (!key.is_empty()).then_some(key)
+}
+
+/// Merges a committed starter KB markdown file with a private runtime KB overlay, deduplicating
+/// headings and bullets while honoring `<!-- otto-kb-deleted: … -->` tombstones recorded when an
+/// operator deletes or edits a committed rule from the dashboard.
 pub fn merge_kb_markdown(committed: &str, runtime_overlay: &str) -> String {
     let base_trimmed = committed.trim_end();
     if runtime_overlay.trim().is_empty() {
@@ -615,69 +644,110 @@ pub fn merge_kb_markdown(committed: &str, runtime_overlay: &str) -> String {
             format!("{base_trimmed}\n")
         };
     }
-    if base_trimmed.is_empty() {
-        return format!("{}\n", runtime_overlay.trim_end());
-    }
 
-    let existing_norm: std::collections::BTreeSet<String> = base_trimmed
-        .lines()
-        .map(|l| {
-            l.trim()
-                .trim_start_matches("- ")
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let mut extra_lines = Vec::new();
+    // Evaluate overlay lines in order: a tombstone suppresses an earlier rule, while a later rule
+    // line revives a previously tombstoned entry (e.g. via `append_tender_kb_entry`).
+    let mut deleted_keys = std::collections::BTreeSet::new();
+    let mut overlay_entries: Vec<(String, &str)> = Vec::new();
     for line in runtime_overlay.lines() {
-        let t = line.trim();
-        if t.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let norm = t.trim_start_matches("- ").trim().to_ascii_lowercase();
-        if existing_norm.contains(&norm) {
-            continue;
+        if let Some(key) = parse_kb_tombstone_key(trimmed) {
+            overlay_entries.retain(|(existing_key, _)| existing_key != &key);
+            deleted_keys.insert(key);
+        } else if let Some(key) = normalize_kb_line_key(line) {
+            deleted_keys.remove(&key);
+            if !overlay_entries
+                .iter()
+                .any(|(existing_key, _)| existing_key == &key)
+            {
+                overlay_entries.push((key, line));
+            }
         }
-        extra_lines.push(line);
     }
 
-    if extra_lines.is_empty() {
-        format!("{base_trimmed}\n")
+    let mut merged_lines: Vec<&str> = Vec::new();
+    let mut surviving_base_keys = std::collections::BTreeSet::new();
+    for line in base_trimmed.lines() {
+        if line.trim().is_empty() {
+            // Collapse consecutive or leading blank lines left behind by deleted rules.
+            if !merged_lines.is_empty()
+                && !merged_lines
+                    .last()
+                    .is_some_and(|prev| prev.trim().is_empty())
+            {
+                merged_lines.push("");
+            }
+            continue;
+        }
+        if let Some(key) = normalize_kb_line_key(line) {
+            if deleted_keys.contains(&key) {
+                continue;
+            }
+            surviving_base_keys.insert(key);
+        }
+        merged_lines.push(line);
+    }
+
+    for (key, line) in overlay_entries {
+        if !surviving_base_keys.contains(&key) {
+            merged_lines.push(line);
+            surviving_base_keys.insert(key);
+        }
+    }
+
+    while merged_lines
+        .last()
+        .is_some_and(|line| line.trim().is_empty())
+    {
+        merged_lines.pop();
+    }
+
+    if merged_lines.is_empty() {
+        String::new()
     } else {
-        format!("{base_trimmed}\n{}\n", extra_lines.join("\n"))
+        format!("{}\n", merged_lines.join("\n"))
     }
 }
 
-/// Strips lines already present in `committed` before persisting operator edits to the private runtime KB overlay.
+/// Computes the private runtime KB overlay for `edited_full` against `committed`: strips unchanged
+/// committed lines, keeps operator additions/replacements, and emits tombstones for any committed
+/// lines the operator deleted or edited so they do not reappear on reload.
 pub fn strip_committed_kb_lines(committed: &str, edited_full: &str) -> String {
-    let base_norm: std::collections::BTreeSet<String> = committed
-        .lines()
-        .map(|l| {
-            l.trim()
-                .trim_start_matches("- ")
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .filter(|l| !l.is_empty())
-        .collect();
+    let mut base_keys_ordered: Vec<String> = Vec::new();
+    let mut base_norm = std::collections::BTreeSet::new();
+    for line in committed.lines() {
+        if let Some(key) = normalize_kb_line_key(line)
+            && base_norm.insert(key.clone())
+        {
+            base_keys_ordered.push(key);
+        }
+    }
 
-    let kept: Vec<&str> = edited_full
-        .lines()
-        .filter(|line| {
-            let t = line.trim();
-            if t.is_empty() {
-                return false;
-            }
-            let norm = t.trim_start_matches("- ").trim().to_ascii_lowercase();
-            !base_norm.contains(&norm)
-        })
+    let mut edited_keys = std::collections::BTreeSet::new();
+    let mut kept_lines: Vec<String> = Vec::new();
+    for line in edited_full.lines() {
+        if let Some(key) = normalize_kb_line_key(line)
+            && edited_keys.insert(key.clone())
+            && !base_norm.contains(&key)
+        {
+            kept_lines.push(line.to_string());
+        }
+    }
+
+    let mut out_lines: Vec<String> = base_keys_ordered
+        .into_iter()
+        .filter(|key| !edited_keys.contains(key))
+        .map(|key| format_kb_tombstone(&key))
         .collect();
-    if kept.is_empty() {
+    out_lines.extend(kept_lines);
+
+    if out_lines.is_empty() {
         String::new()
     } else {
-        format!("{}\n", kept.join("\n"))
+        format!("{}\n", out_lines.join("\n"))
     }
 }
 
@@ -908,6 +978,36 @@ mod tests {
         );
         let stripped = strip_committed_kb_lines(committed, &merged);
         assert_eq!(stripped, "- `[acme/app]` Normalize line endings.\n");
+    }
+
+    #[test]
+    fn deleting_and_editing_committed_kb_rules_round_trips_through_tombstone_overlay() {
+        let committed = "# Code Tender KB\n\n- `[*]` Rule alpha --> check.\n- `[*]` Rule beta.\n";
+
+        // 1. Edit `Rule alpha --> check.` (includes HTML comment delimiter `-->`) and delete `Rule beta.`
+        let edited = "# Code Tender KB\n\n- `[*]` Rule alpha --> updated.\n";
+        let overlay = strip_committed_kb_lines(committed, edited);
+        assert!(overlay.contains("<!-- otto-kb-deleted:"), "{overlay}");
+        assert!(!overlay.contains("Rule beta"), "{overlay}");
+
+        let reloaded = merge_kb_markdown(committed, &overlay);
+        assert_eq!(reloaded, edited);
+
+        // Saving the reloaded view a second time is idempotent.
+        let overlay_again = strip_committed_kb_lines(committed, &reloaded);
+        assert_eq!(overlay_again, overlay);
+
+        // 2. Clearing every line suppresses the entire committed file on reload.
+        let cleared_overlay = strip_committed_kb_lines(committed, "");
+        assert_eq!(merge_kb_markdown(committed, &cleared_overlay), "");
+
+        // 3. Appending a previously deleted committed rule revives it without duplication.
+        let revived_overlay = format!("{overlay}- `[*]` Rule beta.\n");
+        let revived = merge_kb_markdown(committed, &revived_overlay);
+        assert_eq!(
+            revived,
+            "# Code Tender KB\n\n- `[*]` Rule beta.\n- `[*]` Rule alpha --> updated.\n"
+        );
     }
 
     #[test]
