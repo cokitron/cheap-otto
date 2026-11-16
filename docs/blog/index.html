@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blog · cheap-otto</title>
+<meta name="description" content="What shipped in cheap-otto, PR by PR.">
+<meta name="theme-color" content="#F7D842">
+<link rel="icon" type="image/svg+xml" href="../assets/otto-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('otto-theme'); } catch (e) {}
+    if (t !== 'night' && t !== 'paper') { t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'night'; }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="blog.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brandmark" href="../" aria-label="cheap-otto home">cheap-<b>otto</b></a>
+    <div class="top-nav">
+      <nav class="modenav" aria-label="Site"><a href="../">Home</a><a href="./" class="on" aria-current="page">Blog</a></nav>
+      <div class="modenav" role="group" aria-label="Theme"><button type="button" data-theme-btn="night">Night</button><button type="button" data-theme-btn="paper">Paper</button></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="post-head">
+    <div class="sechead"><span class="sectag">Blog</span><span class="secsub">what shipped, PR by PR</span></div>
+    <h1>Shipping log.</h1>
+    <p class="lede">What changed in cheap-otto and why, with the commands that run it.</p>
+  </div>
+  <ul class="posts">
+    <li><a class="card post-card" href="2026-11-15-three-dashboards-one-tunnel.html"><span class="label"><time datetime="2026-11-15">15 Nov 2026</time> · 15 PRs</span><span class="t">Three dashboards. One tunnel.</span><p>Mission Control, the Pixel Office and the Reviewer now run as launchd services on the Mac, and one <code>ssh</code> process brings them to Windows.</p></a></li>
+  </ul>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <span><a href="../">Home</a> · <a href="https://github.com/cokitron/cheap-otto">GitHub</a></span>
+    <span>o=o · otto reads the same both ways</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var btns = Array.prototype.slice.call(document.querySelectorAll('[data-theme-btn]'));
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    btns.forEach(function (b) { b.classList.toggle('on', b.dataset.themeBtn === t); b.setAttribute('aria-pressed', b.dataset.themeBtn === t); });
+    try { localStorage.setItem('otto-theme', t); } catch (e) {}
+  }
+  btns.forEach(function (b) { b.addEventListener('click', function () { setTheme(b.dataset.themeBtn); }); });
+  setTheme(document.documentElement.getAttribute('data-theme') || 'night');
+})();
+</script>
+</body>
+</html>
