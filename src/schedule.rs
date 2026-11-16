@@ -52,7 +52,12 @@ pub enum ScheduleError {
 ///
 /// APFS file names ignore case, so `Dashboards` (or `code-reviewer` with id `UI`) would still
 /// write, boot out or kick the dashboard's plist.
-fn reject_dashboard_label(project: &str, job_id: &str) -> Result<(), ScheduleError> {
+///
+/// # Errors
+///
+/// Returns [`ScheduleError::ReservedProjectName`] for the `dashboards` project and
+/// [`ScheduleError::ReservedLaunchdLabel`] when the label would be the Reviewer's.
+pub fn reject_dashboard_label(project: &str, job_id: &str) -> Result<(), ScheduleError> {
     if project.eq_ignore_ascii_case(crate::dashboards::RESERVED_PROJECT_NAME) {
         return Err(ScheduleError::ReservedProjectName(project.to_string()));
     }

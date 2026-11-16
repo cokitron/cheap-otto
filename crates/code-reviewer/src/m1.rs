@@ -22,6 +22,29 @@ pub struct M1SyncOptions<'a> {
     pub npm_pkgs: &'a str,
 }
 
+/// Rejects an `--host` value that `ssh` could read as an option or that carries shell syntax.
+///
+/// The host is handed to `ssh` as an argument, where a leading `-` (`-oProxyCommand=...`) would run
+/// a local command. Only ssh aliases, `user@host` names and IP addresses need to pass, so the
+/// allowlist is ASCII alphanumerics plus `.`, `_`, `-` and `@`.
+pub(crate) fn validate_ssh_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("ssh host must not be empty".to_string());
+    }
+    if host.starts_with('-') {
+        return Err(format!("ssh host `{host}` must not start with `-`"));
+    }
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
+    {
+        return Err(format!(
+            "ssh host `{host}` may contain only ASCII letters, digits, `.`, `_`, `-` and `@`"
+        ));
+    }
+    Ok(())
+}
+
 /// Builds the piped `ssh <host> sh -s` command with GitHub tokens removed from its environment.
 fn ssh_script_command(host: &str) -> Command {
     let mut cmd = Command::new("ssh");
@@ -32,6 +55,8 @@ fn ssh_script_command(host: &str) -> Command {
         "ConnectTimeout=10",
         "-o",
         "ClearAllForwardings=yes",
+        // `--` ends option parsing, so the host can never be read as an ssh flag.
+        "--",
         host,
         "sh",
         "-s",
@@ -46,6 +71,7 @@ fn ssh_script_command(host: &str) -> Command {
 /// Runs a POSIX `sh -s` script on `otto-mac` over SSH stdin so PowerShell / Windows quoting
 /// and UTF-8 BOMs never corrupt multi-line commands or special characters.
 pub fn run_ssh_script(host: &str, script: &str) -> Result<String, String> {
+    validate_ssh_host(host)?;
     let mut child = ssh_script_command(host)
         .spawn()
         .map_err(|e| format!("failed to spawn `ssh`: {}", e))?;
@@ -120,6 +146,7 @@ pub fn sync_everything_to_m1(
     cfg: &WorkspaceConfig,
     opts: &M1SyncOptions<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_ssh_host(opts.host)?;
     let remote_url = if opts.remote_repo_path.starts_with("~/") {
         format!("ssh://{}/{}", opts.host, opts.remote_repo_path)
     } else {
@@ -433,8 +460,23 @@ pub fn remote_shell_path_expr(remote_path: &str) -> String {
     }
 }
 
+/// Escapes a path for use inside a double-quoted POSIX `sh` string.
+///
+/// Backslashes become `/` (Windows-style separators), and `"`, `$` and backticks are escaped, so
+/// the remote shell never runs a command substitution or expands a variable hidden in a path.
 fn shell_escape_rel(input: &str) -> String {
-    input.replace('\\', "/").replace('"', "\\\"")
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '\\' => out.push('/'),
+            '"' | '$' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Minimal RFC-4648 Base64 encoder (avoids extra crate dependency while keeping binary transfers 8-bit safe).
@@ -483,6 +525,7 @@ mod tests {
                 "ConnectTimeout=10",
                 "-o",
                 "ClearAllForwardings=yes",
+                "--",
                 "otto-mac",
                 "sh",
                 "-s"
@@ -568,6 +611,73 @@ BREW_PKGS='gh jq' CARGO_PKGS='ripgrep' NPM_PKGS='pnpm' REPO_ROOT=\"$CR_ROOT\" /b
             remote_shell_path_expr("/Users/m/otto-workspaces/cheap-otto"),
             "/Users/m/otto-workspaces/cheap-otto"
         );
+    }
+
+    #[test]
+    fn run_ssh_script_rejects_option_like_and_shell_hosts_before_spawning_ssh() {
+        for host in [
+            "-oProxyCommand=touch /tmp/pwned",
+            "-p",
+            "",
+            "otto-mac;id",
+            "$(id)",
+            "a b",
+        ] {
+            let err = run_ssh_script(host, "true").unwrap_err();
+            assert!(err.starts_with("ssh host"), "{host:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn m1_sync_rejects_an_option_like_host_before_touching_git() {
+        let opts = M1SyncOptions {
+            host: "-oProxyCommand=touch /tmp/pwned",
+            remote_repo_path: "~/otto-workspaces/cheap-otto",
+            sync_tokens: false,
+            sync_drive: false,
+            brew_pkgs: "",
+            cargo_pkgs: "",
+            npm_pkgs: "",
+        };
+        let cfg: WorkspaceConfig =
+            toml::from_str(include_str!("../config/repos.example.toml")).unwrap();
+        let err = sync_everything_to_m1(Path::new("."), &cfg, &opts).unwrap_err();
+        assert!(err.to_string().contains("must not start with `-`"), "{err}");
+    }
+
+    #[test]
+    fn escapes_expansion_and_quotes_for_double_quoted_sh_paths() {
+        assert_eq!(shell_escape_rel("a$(id)b"), "a\\$(id)b");
+        assert_eq!(shell_escape_rel("a`id`b"), "a\\`id\\`b");
+        assert_eq!(shell_escape_rel("x\"; rm -rf ~ #"), "x\\\"; rm -rf ~ #");
+        assert_eq!(shell_escape_rel("dir\\file"), "dir/file");
+        assert_eq!(
+            remote_shell_path_expr("~/a$HOME/b"),
+            "$HOME/a\\$HOME/b",
+            "only the leading ~/ may expand"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escaped_paths_round_trip_through_a_real_double_quoted_sh_string() {
+        for input in [
+            "plain/path",
+            "a$(id)b",
+            "a`id`b",
+            "x\"; rm -rf ~ #",
+            "$HOME/${PATH}",
+            "-leading-dash",
+            "it's",
+        ] {
+            let script = format!("printf '%s' \"{}\"", shell_escape_rel(input));
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{input:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), input, "{input:?}");
+        }
     }
 
     #[cfg(unix)]
