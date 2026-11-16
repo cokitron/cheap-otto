@@ -18,6 +18,15 @@ pub struct CommandSpec {
     /// Whether a non-zero exit code is tolerated (e.g., idempotent `git remote add`).
     #[serde(default)]
     pub allow_failure: bool,
+    /// Optional LF-normalised payload piped into the child process's standard input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
+}
+
+/// Normalises CRLF and bare CR line endings to LF so remote POSIX `sh -s` scripts never see `\r`.
+#[must_use = "returns the LF-normalised script text"]
+pub fn normalize_script_lf(script: &str) -> String {
+    script.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 impl CommandSpec {
@@ -33,6 +42,7 @@ impl CommandSpec {
             program: program.to_string(),
             args: args.into_iter().map(Into::into).collect(),
             allow_failure: false,
+            stdin: None,
         }
     }
 
@@ -40,6 +50,14 @@ impl CommandSpec {
     #[must_use = "returns the updated command specification"]
     pub fn with_allow_failure(mut self, allow_failure: bool) -> Self {
         self.allow_failure = allow_failure;
+        self
+    }
+
+    /// Attaches an LF-normalised standard-input payload to pipe into the child process.
+    #[must_use = "returns the updated command specification"]
+    pub fn with_stdin(mut self, stdin: impl Into<String>) -> Self {
+        let raw = stdin.into();
+        self.stdin = Some(normalize_script_lf(&raw));
         self
     }
 
@@ -100,5 +118,26 @@ mod tests {
         .with_allow_failure(true);
 
         assert!(spec.allow_failure);
+    }
+
+    #[test]
+    fn with_stdin_normalizes_crlf_and_bare_cr_and_omits_none_in_json()
+    -> Result<(), serde_json::Error> {
+        let plain = CommandSpec::new("Probe", "ssh", ["otto-mac", "true"]);
+        assert_eq!(plain.stdin, None);
+        let plain_json = serde_json::to_string(&plain)?;
+        assert!(!plain_json.contains("\"stdin\""), "{plain_json}");
+        let round_trip: CommandSpec = serde_json::from_str(&plain_json)?;
+        assert_eq!(round_trip, plain);
+
+        let scripted = CommandSpec::new("Run script", "ssh", ["otto-mac", "/bin/sh -s"])
+            .with_stdin("set -eu\r\necho ok\rexit 0\r\n");
+        assert_eq!(
+            scripted.stdin.as_deref(),
+            Some("set -eu\necho ok\nexit 0\n")
+        );
+        // `display_command` renders only discrete arguments and never leaks the stdin body.
+        assert_eq!(scripted.display_command(), "ssh otto-mac \"/bin/sh -s\"");
+        Ok(())
     }
 }

@@ -646,6 +646,13 @@ fn dashboards_install_status_restart_uninstall_are_dry_runs_without_execute()
         assert!(stdout.contains("$ ssh "), "{sub:?}: {stdout}");
         assert!(stdout.contains("@192.168.1.42"), "{sub:?}: {stdout}");
         assert!(stdout.contains("Pass `--execute`"), "{sub:?}: {stdout}");
+        if sub[0] == "restart" {
+            assert!(stdout.contains("kickstart -k"), "{sub:?}: {stdout}");
+        } else {
+            assert!(stdout.contains("\"/bin/sh -s\""), "{sub:?}: {stdout}");
+            assert!(!stdout.contains("set -eu"), "{sub:?}: {stdout}");
+            assert!(!stdout.contains("set -u"), "{sub:?}: {stdout}");
+        }
     }
     assert!(!Path::new(&state_str).join("tunnel.json").exists());
 
