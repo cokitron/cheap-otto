@@ -422,8 +422,10 @@ pub struct TunnelRecord {
     /// When the tunnel was started, in seconds since the Unix epoch.
     pub started_epoch_secs: u64,
     /// OS process start-time stamp (`Win32_Process.CreationDate` in UTC ISO-8601 on Windows,
-    /// `ps -o lstart=` on Unix) captured at spawn time to narrow PID-reuse races before signalling.
-    /// Older `tunnel.json` files omit this field and fall back to command-line verification.
+    /// `ps -o lstart=` run under `TZ=UTC` on Unix, so DST or timezone changes cannot alter it)
+    /// captured at spawn time to narrow PID-reuse races before signalling. macOS `lstart` has
+    /// one-second resolution, so this is a second check on top of the exact argv match; a stronger
+    /// token is tracked in a follow-up issue. Older `tunnel.json` files omit this field and fall back to command-line verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_started_at: Option<String>,
 }
@@ -559,7 +561,10 @@ pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord
 }
 
 /// Verifies both the live command line and, when present on `record`, the OS process start-time
-/// stamp (`Win32_Process.CreationDate` or `ps -o lstart=`).
+/// stamp (`Win32_Process.CreationDate` or `ps -o lstart=` captured under `TZ=UTC`).
+///
+/// The Unix stamp has one-second resolution, so it is a second check on top of the exact argv
+/// match rather than a unique identity; a stronger token is tracked in a follow-up issue.
 ///
 /// Records written by older builds carry `process_started_at: None` and fall back to
 /// [`command_line_is_recorded_tunnel`]. When `record.process_started_at` is `Some`, `live_started_at`
@@ -1901,6 +1906,28 @@ mod tests {
             "ssh admin@other-host",
             Some("Mon Nov 16 15:00:00 2026"),
             &legacy
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn utc_style_start_stamp_matches_and_a_different_stamp_is_rejected()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let cmdline = build_tunnel_spec(&peer, &set).display_command();
+        let mut record = covering_record(&peer);
+        record.process_started_at = Some("Mon Nov 16 21:00:00 2026".to_string());
+
+        assert!(process_matches_recorded_tunnel(
+            &cmdline,
+            Some("Mon Nov 16 21:00:00 2026\n"),
+            &record
+        ));
+        assert!(!process_matches_recorded_tunnel(
+            &cmdline,
+            Some("Mon Nov 16 15:00:00 2026"),
+            &record
         ));
         Ok(())
     }

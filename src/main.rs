@@ -1390,7 +1390,20 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Runs a child process without a shell and returns `stdout` when exit status is `0`.
 fn capture_command_stdout(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    capture_command_stdout_with_env(program, args, &[])
+}
+
+/// Like [`capture_command_stdout`], with extra `(name, value)` environment variables set on the child.
+fn capture_command_stdout_with_env(
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .envs(envs.iter().copied())
+        .output()
+        .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -3964,7 +3977,10 @@ fn parse_windows_process_snapshot(raw: &str) -> Option<(String, Option<String>)>
 }
 
 /// Reads the OS process creation timestamp (`Win32_Process.CreationDate` in UTC ISO-8601 on
-/// Windows, `ps -o lstart=` on Unix). `pid` is a `u32`, so no untrusted text reaches the command.
+/// Windows, `ps -o lstart=` under `TZ=UTC` and `LC_ALL=C` on Unix, so a DST or timezone change
+/// cannot alter the stamp). macOS `lstart` has one-second resolution, so the stamp is a second check
+/// on top of the exact argv match; a stronger token is tracked in a follow-up issue. `pid` is a
+/// `u32`, so no untrusted text reaches the command.
 fn process_started_at(pid: u32) -> Option<String> {
     let raw = if cfg!(target_os = "windows") {
         let query = format!(
@@ -3975,7 +3991,11 @@ fn process_started_at(pid: u32) -> Option<String> {
             &["-NoProfile", "-NonInteractive", "-Command", &query],
         )?
     } else {
-        capture_command_stdout("ps", &["-p", &pid.to_string(), "-o", "lstart="])?
+        capture_command_stdout_with_env(
+            "ps",
+            &["-p", &pid.to_string(), "-o", "lstart="],
+            &[("TZ", "UTC"), ("LC_ALL", "C")],
+        )?
     };
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -4207,6 +4227,13 @@ fn tunnel_readiness(child_exited: bool, unanswered: &[u16]) -> TunnelReadiness {
     }
 }
 
+/// Requires the OS start stamp for a freshly spawned tunnel, so a new record never lacks one.
+fn require_process_started_at(pid: u32, stamp: Option<String>) -> Result<String, String> {
+    stamp.ok_or_else(|| {
+        format!("could not read the start time of tunnel process {pid}; stopped it unrecorded")
+    })
+}
+
 /// Spawns the tunnel, records it, and waits for every forward to answer. On failure the child
 /// is stopped and reaped, the record removed, and the unanswered ports named. [R3.4, R3.6]
 fn start_dashboard_tunnel(
@@ -4225,13 +4252,22 @@ fn start_dashboard_tunnel(
         .spawn()
         .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
     let pid = child.id();
+    // Fail closed: without a start stamp the record would fall back to the legacy argv-only check.
+    let stamp = match require_process_started_at(pid, process_started_at(pid)) {
+        Ok(stamp) => stamp,
+        Err(err) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err.into());
+        }
+    };
     let record = TunnelRecord {
         pid,
         ports: ports.clone(),
         destination: peer.ssh_destination(),
         ssh_port: peer.ssh_port,
         started_epoch_secs: current_epoch_secs(),
-        process_started_at: process_started_at(pid),
+        process_started_at: Some(stamp),
     };
     if let Err(err) = save_tunnel_record(state_dir, &record) {
         let _ = child.kill();
@@ -4572,6 +4608,18 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
 mod tests {
     use super::*;
     use cheap_otto::dashboards::DashboardRemoteStatus;
+
+    #[test]
+    fn new_tunnel_records_require_a_start_stamp() {
+        assert_eq!(
+            require_process_started_at(7, Some("Mon Nov 16 21:00:00 2026".to_string())),
+            Ok("Mon Nov 16 21:00:00 2026".to_string())
+        );
+        let err = require_process_started_at(7, None)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("tunnel process 7"));
+    }
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!("cheap-otto-main-{name}-{}", std::process::id()));
