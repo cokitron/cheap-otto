@@ -353,9 +353,63 @@ struct ResolvedSshConfig {
     proxy_command: Option<String>,
     host_key_alias: Option<String>,
     strict_host_key_checking: Option<String>,
-    user_known_hosts_file: Option<String>,
-    global_known_hosts_file: Option<String>,
+    user_known_hosts_file: Vec<String>,
+    global_known_hosts_file: Vec<String>,
     identity_agent: Option<String>,
+}
+
+/// Splits an `ssh -G` value into words on unquoted whitespace, dropping the double quotes that
+/// wrap paths with spaces (such as `"C:\Program Files\ssh\known_hosts"`).
+fn split_ssh_config_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut in_quotes = false;
+    for ch in value.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+/// Quotes one value for an `ssh -o Key=value` option so OpenSSH reads it back as a single word.
+/// Plain values pass through unchanged; anything with whitespace, quotes or backslashes is
+/// wrapped in double quotes with `\` and `"` escaped.
+fn ssh_config_quote(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\\');
+    if !needs_quotes {
+        return value.to_string();
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Pure parser for `ssh -G` output. Keeps connection settings and drops `localforward`,
@@ -397,10 +451,14 @@ fn parse_ssh_effective_config(raw: &str) -> ResolvedSshConfig {
             }
             // Trust store and agent socket settings, so `-F none` does not break hosts that
             // keep their known hosts or SSH agent outside the OpenSSH defaults.
-            "userknownhostsfile" => cfg.user_known_hosts_file = Some(value.to_string()),
-            "globalknownhostsfile" => cfg.global_known_hosts_file = Some(value.to_string()),
+            "userknownhostsfile" => cfg.user_known_hosts_file = split_ssh_config_words(value),
+            "globalknownhostsfile" => cfg.global_known_hosts_file = split_ssh_config_words(value),
             "identityagent" if !value.eq_ignore_ascii_case("none") => {
-                cfg.identity_agent = Some(value.to_string());
+                let agent = value
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .unwrap_or(value);
+                cfg.identity_agent = Some(agent.to_string());
             }
             // `localforward`, `remoteforward`, `dynamicforward` and all other directives are
             // deliberately ignored so `-F none` carries only the single Reviewer `-L` forward.
@@ -504,17 +562,24 @@ fn reviewer_fallback_tunnel_args_with_config(
             args.push("-o".to_string());
             args.push(format!("StrictHostKeyChecking={strict}"));
         }
-        if let Some(file) = &cfg.user_known_hosts_file {
-            args.push("-o".to_string());
-            args.push(format!("UserKnownHostsFile={file}"));
-        }
-        if let Some(file) = &cfg.global_known_hosts_file {
-            args.push("-o".to_string());
-            args.push(format!("GlobalKnownHostsFile={file}"));
+        // OpenSSH re-splits `-o` values on whitespace, so each path is quoted individually.
+        for (key, files) in [
+            ("UserKnownHostsFile", &cfg.user_known_hosts_file),
+            ("GlobalKnownHostsFile", &cfg.global_known_hosts_file),
+        ] {
+            if !files.is_empty() {
+                let joined = files
+                    .iter()
+                    .map(|file| ssh_config_quote(file))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                args.push("-o".to_string());
+                args.push(format!("{key}={joined}"));
+            }
         }
         if let Some(agent) = &cfg.identity_agent {
             args.push("-o".to_string());
-            args.push(format!("IdentityAgent={agent}"));
+            args.push(format!("IdentityAgent={}", ssh_config_quote(agent)));
         }
     }
 
@@ -2437,8 +2502,8 @@ localforward [127.0.0.1]:7421 [127.0.0.1]:7421
         assert_eq!(
             resolved,
             ResolvedSshConfig {
-                user_known_hosts_file: Some("~/.ssh/team_known_hosts".to_string()),
-                global_known_hosts_file: Some("/etc/ssh/ssh_known_hosts".to_string()),
+                user_known_hosts_file: vec!["~/.ssh/team_known_hosts".to_string()],
+                global_known_hosts_file: vec!["/etc/ssh/ssh_known_hosts".to_string()],
                 identity_agent: Some("/tmp/agent.sock".to_string()),
                 ..ResolvedSshConfig::default()
             }
@@ -2459,6 +2524,45 @@ localforward [127.0.0.1]:7421 [127.0.0.1]:7421
         }
         assert!(!args.iter().any(|arg| arg.contains("7421")));
         assert_eq!(args[args.len() - 2..], ["--", "otto-mac"]);
+    }
+
+    #[test]
+    fn fallback_tunnel_quotes_paths_with_spaces() {
+        let ssh_g = "\
+userknownhostsfile \"C:\\Program Files\\ssh\\known_hosts\" ~/.ssh/known_hosts2
+globalknownhostsfile \"/opt/my dir/global_known_hosts\"
+identityagent \"/tmp/my agent.sock\"
+";
+        let resolved = parse_ssh_effective_config(ssh_g);
+        assert_eq!(
+            resolved.user_known_hosts_file,
+            vec![
+                "C:\\Program Files\\ssh\\known_hosts".to_string(),
+                "~/.ssh/known_hosts2".to_string()
+            ]
+        );
+        assert_eq!(
+            resolved.identity_agent.as_deref(),
+            Some("/tmp/my agent.sock")
+        );
+
+        let args = reviewer_fallback_tunnel_args_with_config("otto-mac", 7430, Some(&resolved));
+        for expected in [
+            "UserKnownHostsFile=\"C:\\\\Program Files\\\\ssh\\\\known_hosts\" ~/.ssh/known_hosts2",
+            "GlobalKnownHostsFile=\"/opt/my dir/global_known_hosts\"",
+            "IdentityAgent=\"/tmp/my agent.sock\"",
+        ] {
+            assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn ssh_config_helpers_round_trip_hostile_values() {
+        assert_eq!(ssh_config_quote("/plain/path"), "/plain/path");
+        assert_eq!(ssh_config_quote("a b"), "\"a b\"");
+        assert_eq!(ssh_config_quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(split_ssh_config_words(""), Vec::<String>::new());
+        assert_eq!(split_ssh_config_words("  a   \"b c\"  "), ["a", "b c"]);
     }
 
     #[test]
