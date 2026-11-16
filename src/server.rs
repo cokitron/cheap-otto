@@ -35,7 +35,7 @@ use crate::macos::{MacOsStateBackup, parse_pmset_batt_ac_power};
 use crate::request_guard::{RequestGuard, require_loopback_bind};
 use crate::schedule::{
     NewScheduleParams, ScheduleCadence, ScheduleRegistry, ScheduledWorkload,
-    build_schedule_install_plan, parse_run_history_jsonl,
+    build_schedule_install_plan, parse_run_history_jsonl, reject_dashboard_label,
 };
 use crate::template::{NewTemplateParams, TaskTemplate, TemplateRegistry};
 use crate::ui_assets::MISSION_CONTROL_HTML;
@@ -1260,21 +1260,45 @@ async fn handle_create_schedule(
 }
 
 async fn handle_run_schedule_now(
+    State(state): State<Arc<ControlPlaneState>>,
     AxumPath((project, id)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
     if !validate_safe_identifier(&project) || !validate_safe_identifier(&id) {
         return error_response(StatusCode::BAD_REQUEST, "invalid schedule identifier");
     }
-    let label = format!("com.cheapotto.{project}.{id}");
+    // Only a schedule this control plane registered may be kicked. Building the label from the
+    // path alone would let `run-now` restart any `com.cheapotto.*` job, such as a dashboard or
+    // a reviewer service.
+    let Some(spec) = load_schedules_registry(&state)
+        .jobs
+        .into_iter()
+        .find(|job| job.project_name == project && job.job_id == id)
+    else {
+        return error_response(StatusCode::NOT_FOUND, "no such schedule");
+    };
+    if let Err(err) = reject_dashboard_label(&spec.project_name, &spec.job_id) {
+        return error_response(StatusCode::BAD_REQUEST, &err.to_string());
+    }
+    // The stored label is trusted data from `schedules.json`, so a hand-edited entry could name
+    // another service (such as a dashboard) under a valid project and id. Kick only the label
+    // those two parts produce.
+    let canonical_label = format!("com.cheapotto.{}.{}", spec.project_name, spec.job_id);
+    if spec.launchd_label != canonical_label {
+        return error_response(StatusCode::BAD_REQUEST, "invalid schedule launchd label");
+    }
     if cfg!(target_os = "macos")
         && let Some(uid) = run_local_stdout("id", &["-u"])
     {
-        let target = format!("gui/{}/{label}", uid.trim());
+        let target = format!("gui/{}/{canonical_label}", uid.trim());
         let _ = Command::new("launchctl")
             .args(["kickstart", "-k", &target])
             .output();
     }
-    (StatusCode::OK, Json(json!({ "triggered": label }))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({ "triggered": canonical_label })),
+    )
+        .into_response()
 }
 
 async fn handle_remove_schedule(
@@ -1929,6 +1953,115 @@ mod tests {
             }
         }
         assert!(!tmp.join("state").exists(), "a refused request wrote state");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn run_now_kicks_only_registered_schedules_and_never_a_dashboard() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        // Not registered: a dashboard, a reviewer job and an unknown schedule are all refused.
+        for uri in [
+            "/api/schedules/dashboards/mission-control/run-now",
+            "/api/schedules/code-reviewer/pr-poller/run-now",
+            "/api/schedules/demo/nightly/run-now",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(guarded_request("POST", uri, Some(OWN_HOST), None, None))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+
+        // A registry entry that names a dashboard (written by hand, since `add` refuses it) is
+        // still refused before any `launchctl` call.
+        let peer = PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap();
+        let mut spec = build_schedule_install_plan(
+            &peer,
+            &NewScheduleParams {
+                job_id: "mission-control",
+                project_name: "demo",
+                cadence: ScheduleCadence::IntervalSecs(3600),
+                workload: ScheduledWorkload::CiPipeline {
+                    branch: "main".to_string(),
+                    command: "cargo test".to_string(),
+                    only_on_change: false,
+                },
+                allow_battery: false,
+                run_at_load: false,
+            },
+        )
+        .unwrap()
+        .spec;
+        spec.project_name = "dashboards".to_string();
+        spec.launchd_label = "com.cheapotto.dashboards.mission-control".to_string();
+        let mut reg = ScheduleRegistry::default();
+        reg.upsert(spec);
+        fs::create_dir_all(tmp.join("state")).unwrap();
+        fs::write(
+            tmp.join("state").join("schedules.json"),
+            serde_json::to_string_pretty(&reg).unwrap(),
+        )
+        .unwrap();
+        let res = app
+            .oneshot(guarded_request(
+                "POST",
+                "/api/schedules/dashboards/mission-control/run-now",
+                Some(OWN_HOST),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn run_now_rejects_a_stored_label_that_is_not_the_canonical_project_label() {
+        let tmp = temp_state_dir();
+        let app = test_router(&tmp);
+        // `demo`/`nightly` passes the identifier and dashboard checks, but its stored label
+        // points at a dashboard LaunchAgent.
+        let peer = PeerNode::new("otto-mac", "127.0.0.1", "m", 22).unwrap();
+        let mut spec = build_schedule_install_plan(
+            &peer,
+            &NewScheduleParams {
+                job_id: "nightly",
+                project_name: "demo",
+                cadence: ScheduleCadence::IntervalSecs(3600),
+                workload: ScheduledWorkload::CiPipeline {
+                    branch: "main".to_string(),
+                    command: "cargo test".to_string(),
+                    only_on_change: false,
+                },
+                allow_battery: false,
+                run_at_load: false,
+            },
+        )
+        .unwrap()
+        .spec;
+        spec.launchd_label = "com.cheapotto.dashboards.mission-control".to_string();
+        let mut reg = ScheduleRegistry::default();
+        reg.upsert(spec);
+        fs::create_dir_all(tmp.join("state")).unwrap();
+        fs::write(
+            tmp.join("state").join("schedules.json"),
+            serde_json::to_string_pretty(&reg).unwrap(),
+        )
+        .unwrap();
+        let res = app
+            .oneshot(guarded_request(
+                "POST",
+                "/api/schedules/demo/nightly/run-now",
+                Some(OWN_HOST),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let _ = fs::remove_dir_all(&tmp);
     }
 

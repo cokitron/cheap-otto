@@ -16,7 +16,7 @@ use crate::config::{
 };
 use crate::drive::sync_living_docs_to_drive;
 use crate::github::GitHubClient;
-use crate::m1::{DEFAULT_M1_HOST, remote_shell_path_expr};
+use crate::m1::{DEFAULT_M1_HOST, remote_shell_path_expr, validate_ssh_host};
 use crate::request_guard::{RequestGuard, host_name_of, require_json_body, require_loopback_bind};
 use crate::state::{
     ActiveTenderWorkerState, ActiveWorkerState, LedgerStore, TenderPrState, TenderRunStatus,
@@ -115,29 +115,6 @@ pub fn run_ui_server(
 
 /// How long `code-reviewer ui` waits for its fallback tunnel to answer before giving up.
 const FALLBACK_TUNNEL_DEADLINE: Duration = Duration::from_secs(5);
-
-/// Rejects an `--host` value that `ssh` could read as an option or that carries shell syntax.
-///
-/// The host is handed to `ssh` as an argument, where a leading `-` (`-oProxyCommand=...`) would run
-/// a local command. Only ssh aliases, `user@host` names and IP addresses need to pass, so the
-/// allowlist is ASCII alphanumerics plus `.`, `_`, `-` and `@`.
-fn validate_ssh_host(host: &str) -> Result<(), String> {
-    if host.is_empty() {
-        return Err("ssh host must not be empty".to_string());
-    }
-    if host.starts_with('-') {
-        return Err(format!("ssh host `{host}` must not start with `-`"));
-    }
-    if !host
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@'))
-    {
-        return Err(format!(
-            "ssh host `{host}` may contain only ASCII letters, digits, `.`, `_`, `-` and `@`"
-        ));
-    }
-    Ok(())
-}
 
 /// What `code-reviewer ui` was asked to open.
 pub struct TunneledUiOptions<'a> {
