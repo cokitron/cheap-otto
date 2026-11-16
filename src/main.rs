@@ -11,9 +11,9 @@ use cheap_otto::dashboards::{
     DashboardDiagnosis, DashboardId, DashboardSet, DashboardStatusReport, MISSION_CONTROL_PORT,
     PIXEL_OFFICE_PORT, REVIEWER_PORT, ServiceManager, TunnelDecision, TunnelFailure, TunnelRecord,
     build_install_plan, build_restart_spec, build_status_spec, build_tunnel_spec,
-    build_uninstall_plan, command_line_is_recorded_tunnel, dashboard_log_path, decide_tunnel,
-    describe_tunnel_failure, explain_unavailable, parse_status_output, recorded_tunnel_covers,
-    render_install_script, render_status_rows,
+    build_uninstall_plan, dashboard_log_path, decide_tunnel, describe_tunnel_failure,
+    explain_unavailable, parse_status_output, process_matches_recorded_tunnel,
+    recorded_tunnel_covers, render_install_script, render_status_rows,
 };
 use cheap_otto::doctor::{
     CheckStatus, ProbeSource, RawTelemetrySnapshot, SystemProbeInput, parse_active_otto_sessions,
@@ -3949,31 +3949,69 @@ fn remove_tunnel_record(state_dir: &Path) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-/// The full command line of a running process, or `None` when it is gone or unreadable.
-/// `pid` is a number, so nothing operator-supplied reaches either command.
-fn process_command_line(pid: u32) -> Option<String> {
-    let line = if cfg!(target_os = "windows") {
-        let query =
-            format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine");
+/// Parses two-line Windows process telemetry (`<CreationDate>\n<CommandLine>`) into
+/// `(command_line, process_started_at)`. Returns `None` when the process has gone or its command
+/// line is empty.
+fn parse_windows_process_snapshot(raw: &str) -> Option<(String, Option<String>)> {
+    let (first_line, rest) = raw.split_once('\n')?;
+    let cmd_line = rest.trim();
+    if cmd_line.is_empty() {
+        return None;
+    }
+    let started_at = first_line.trim();
+    let started_at = (!started_at.is_empty()).then(|| started_at.to_string());
+    Some((cmd_line.to_string(), started_at))
+}
+
+/// Reads the OS process creation timestamp (`Win32_Process.CreationDate` in UTC ISO-8601 on
+/// Windows, `ps -o lstart=` on Unix). `pid` is a `u32`, so no untrusted text reaches the command.
+fn process_started_at(pid: u32) -> Option<String> {
+    let raw = if cfg!(target_os = "windows") {
+        let query = format!(
+            "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if ($p -and $p.CreationDate) {{ $p.CreationDate.ToUniversalTime().ToString('o') }}"
+        );
         capture_command_stdout(
             "powershell",
             &["-NoProfile", "-NonInteractive", "-Command", &query],
         )?
     } else {
-        capture_command_stdout("ps", &["-p", &pid.to_string(), "-o", "args="])?
+        capture_command_stdout("ps", &["-p", &pid.to_string(), "-o", "lstart="])?
     };
-    let line = line.trim();
-    (!line.is_empty()).then(|| line.to_string())
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// True only when the recorded pid is alive and its command line is exactly the recorded
-/// tunnel's, so a recycled pid (someone's own ssh session) is never signalled. [R3.5]
+/// Reads a running process's `(command_line, process_started_at)`, or `None` when it is gone or
+/// unreadable. `pid` is a `u32`, so nothing operator-supplied reaches either OS command.
+fn process_snapshot(pid: u32) -> Option<(String, Option<String>)> {
+    if cfg!(target_os = "windows") {
+        let query = format!(
+            "$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if ($p) {{ if ($p.CreationDate) {{ $p.CreationDate.ToUniversalTime().ToString('o') }} else {{ '' }}; $p.CommandLine }}"
+        );
+        let raw = capture_command_stdout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &query],
+        )?;
+        parse_windows_process_snapshot(&raw)
+    } else {
+        let line = capture_command_stdout("ps", &["-p", &pid.to_string(), "-o", "args="])?;
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        Some((line.to_string(), process_started_at(pid)))
+    }
+}
+
+/// True only when the recorded pid is alive, its command line is the recorded tunnel's, and (when
+/// recorded) its OS start-time stamp matches, narrowing PID-reuse races before signalling. [R3.5]
 fn recorded_tunnel_is_running(record: &TunnelRecord) -> bool {
-    process_command_line(record.pid)
-        .is_some_and(|line| command_line_is_recorded_tunnel(&line, record))
+    process_snapshot(record.pid).is_some_and(|(line, started_at)| {
+        process_matches_recorded_tunnel(&line, started_at.as_deref(), record)
+    })
 }
 
-/// Terminates a process; callers verify it with [`recorded_tunnel_is_running`] first.
+/// Terminates a process; callers verify it with [`recorded_tunnel_is_running`] immediately before.
 fn terminate_process(pid: u32) -> bool {
     let pid = pid.to_string();
     let mut command = if cfg!(target_os = "windows") {
@@ -3993,11 +4031,24 @@ fn terminate_process(pid: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Terminates a verified-running recorded tunnel, or errors and keeps the record so the live
-/// process is never left running untracked.
-fn terminate_recorded_tunnel(record: &TunnelRecord) -> Result<(), Box<dyn std::error::Error>> {
-    if terminate_process(record.pid) {
-        return Ok(());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminateOutcome {
+    Signalled,
+    NotRecordedTunnel,
+}
+
+/// Re-verifies process identity (command line and start time) immediately before signalling so a
+/// PID recycled since the earlier check is not killed. Without an OS pidfd handle `kill`/`taskkill`
+/// still leave a tiny kernel-level window, so if `terminate_process` fails we also check whether
+/// the tunnel already exited on its own before treating it as an unstoppable live tunnel.
+fn terminate_recorded_tunnel(
+    record: &TunnelRecord,
+) -> Result<TerminateOutcome, Box<dyn std::error::Error>> {
+    if !recorded_tunnel_is_running(record) {
+        return Ok(TerminateOutcome::NotRecordedTunnel);
+    }
+    if terminate_process(record.pid) || !recorded_tunnel_is_running(record) {
+        return Ok(TerminateOutcome::Signalled);
     }
     Err(format!(
         "could not stop recorded tunnel pid {}; {TUNNEL_RECORD_FILE} kept",
@@ -4173,12 +4224,14 @@ fn start_dashboard_tunnel(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+    let pid = child.id();
     let record = TunnelRecord {
-        pid: child.id(),
+        pid,
         ports: ports.clone(),
         destination: peer.ssh_destination(),
         ssh_port: peer.ssh_port,
         started_epoch_secs: current_epoch_secs(),
+        process_started_at: process_started_at(pid),
     };
     if let Err(err) = save_tunnel_record(state_dir, &record) {
         let _ = child.kill();
@@ -4222,14 +4275,16 @@ fn stop_dashboard_tunnel(state_dir: &Path) -> Result<(), Box<dyn std::error::Err
         println!("No recorded tunnel.");
         return Ok(());
     };
-    if recorded_tunnel_is_running(&record) {
-        terminate_recorded_tunnel(&record)?;
-        println!("  ==> Stopped tunnel pid {}", record.pid);
-    } else {
-        println!(
-            "  [info] Recorded pid {} is not the recorded tunnel any more; it was not signalled.",
-            record.pid
-        );
+    match terminate_recorded_tunnel(&record)? {
+        TerminateOutcome::Signalled => {
+            println!("  ==> Stopped tunnel pid {}", record.pid);
+        }
+        TerminateOutcome::NotRecordedTunnel => {
+            println!(
+                "  [info] Recorded pid {} is not the recorded tunnel any more; it was not signalled.",
+                record.pid
+            );
+        }
     }
     remove_tunnel_record(state_dir)?;
     println!("Removed {TUNNEL_RECORD_FILE}.");
@@ -4531,6 +4586,7 @@ mod tests {
             destination: "user@otto-mac".to_string(),
             ssh_port: 22,
             started_epoch_secs: 1,
+            process_started_at: Some("2026-11-16T21:00:00.0000000Z".to_string()),
         }
     }
 
@@ -4691,5 +4747,29 @@ mod tests {
         let status = spawn_and_wait_spec(&spec, false)?;
         assert!(status.success(), "expected exit 0, got {status}");
         Ok(())
+    }
+
+    #[test]
+    fn parses_windows_process_snapshot_with_and_without_creation_date() {
+        let full = "2026-11-16T21:00:00.0000000Z\r\n\"ssh\" -N admin@192.0.2.10\r\n";
+        assert_eq!(
+            parse_windows_process_snapshot(full),
+            Some((
+                "\"ssh\" -N admin@192.0.2.10".to_string(),
+                Some("2026-11-16T21:00:00.0000000Z".to_string())
+            ))
+        );
+
+        let missing_stamp = "\r\nssh -N admin@192.0.2.10\r\n";
+        assert_eq!(
+            parse_windows_process_snapshot(missing_stamp),
+            Some(("ssh -N admin@192.0.2.10".to_string(), None))
+        );
+
+        assert_eq!(parse_windows_process_snapshot(""), None);
+        assert_eq!(
+            parse_windows_process_snapshot("2026-11-16T21:00:00.0000000Z\r\n   \r\n"),
+            None
+        );
     }
 }
