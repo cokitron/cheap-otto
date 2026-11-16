@@ -25,7 +25,7 @@ cargo run -p code-reviewer -- m1 sync --brew "jq,ripgrep" --cargo "cargo-nextest
 cargo run -p code-reviewer -- m1 status
 
 # 5. Copy any arbitrary local file to M1 with exact permissions (8-bit Base64 safe)
-cargo run -p code-reviewer -- m1 push-file --local ./crates/code-reviewer/config/repos.toml --remote ~/otto-workspaces/code-reviewer/config/repos.toml --mode 644
+cargo run -p code-reviewer -- m1 push-file --local ./crates/code-reviewer/config/repos.toml --remote ~/otto-workspaces/cheap-otto/crates/code-reviewer/config/repos.toml --mode 644
 
 # 6. Run any remote shell command safely via SSH stdin (`sh -s`)
 cargo run -p code-reviewer -- m1 exec --cmd "code-reviewer doctor"

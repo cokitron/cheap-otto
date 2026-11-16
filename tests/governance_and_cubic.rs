@@ -407,6 +407,7 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
         "README.md",
         "CLAUDE.md",
         "AGENTS.md",
+        ".agents/skills.json",
         "CONTRIBUTING.md",
         "SECURITY.md",
         "CODE_OF_CONDUCT.md",
@@ -445,6 +446,56 @@ fn open_source_governance_and_safety_files_are_present() -> Result<(), String> {
             return Err(format!(
                 "`{}` must enforce `#![forbid(unsafe_code)]`",
                 rust_entry
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn agents_md_stays_under_antigravity_inline_cap_and_skills_mirror() -> Result<(), String> {
+    const ANTIGRAVITY_RULE_CAP_BYTES: usize = 24_000;
+    let root = repo_root();
+    let agents_md = fs::read_to_string(root.join("AGENTS.md"))
+        .map_err(|e| format!("failed reading AGENTS.md: {e}"))?;
+
+    let mut expanded_bytes = 0usize;
+    for line in agents_md.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@[")
+            && let Some((_, after_bracket)) = rest.split_once("](")
+            && let Some((rel_path, "")) = after_bracket.split_once(')')
+        {
+            let inc = fs::read(root.join(rel_path)).map_err(|e| {
+                format!("AGENTS.md @[...] include `{rel_path}` could not be read: {e}")
+            })?;
+            expanded_bytes = expanded_bytes.saturating_add(inc.len()).saturating_add(1);
+        } else {
+            expanded_bytes = expanded_bytes.saturating_add(line.len()).saturating_add(1);
+        }
+    }
+
+    if expanded_bytes >= ANTIGRAVITY_RULE_CAP_BYTES {
+        return Err(format!(
+            "AGENTS.md expands to {expanded_bytes} bytes (>= {ANTIGRAVITY_RULE_CAP_BYTES} byte Antigravity cap); move path-scoped rules to standard markdown links"
+        ));
+    }
+
+    for skill in ["fix-from-drive", "review-pr", "update-m1"] {
+        let agy_path = root.join(format!(
+            "crates/code-reviewer/.agents/skills/{skill}/SKILL.md"
+        ));
+        let claude_path = root.join(format!(
+            "crates/code-reviewer/.claude/skills/{skill}/SKILL.md"
+        ));
+        let agy = fs::read(&agy_path)
+            .map_err(|e| format!("failed reading {}: {e}", agy_path.display()))?;
+        let claude = fs::read(&claude_path)
+            .map_err(|e| format!("failed reading {}: {e}", claude_path.display()))?;
+        if agy != claude {
+            return Err(format!(
+                "mirrored skill `{skill}` drifted between .agents/skills and .claude/skills"
             ));
         }
     }

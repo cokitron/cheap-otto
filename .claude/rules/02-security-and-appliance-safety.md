@@ -14,7 +14,7 @@ paths:
 
 ## 1. Memory & Type Safety
 
-- **No `unsafe` Rust.** `#![forbid(unsafe_code)]` sits at every crate root (`src/lib.rs`, `src/main.rs`, `crates/code-reviewer/src/main.rs`, `tests/cli_integration.rs`). A new crate root or test binary gets it too.
+- **No `unsafe` Rust.** `#![forbid(unsafe_code)]` sits at every crate root and integration test binary (`src/lib.rs`, `src/main.rs`, `crates/code-reviewer/src/main.rs`, `tests/*.rs`). A new crate root or test binary gets it too.
 - **Saturating and checked arithmetic.** Hardware math (RAM budgets, disk percentages, idle timers, battery caps) must never panic on overflow or underflow. Use `saturating_sub`, `saturating_add`, `checked_mul` or `.clamp(min, max)`.
 
 ---
@@ -37,7 +37,7 @@ There are two layers, and they have different rules.
   - a typed number (`u8`, `u16`, `u32`, `u8::from(bool)`);
   - an identifier that passed a validator: `validate_safe_identifier` (project names, task ids, aliases, users, tmux sessions), `validate_model_identifier` or `validate_session_identifier`. All three allow only a small ASCII set and reject a leading `-`, so a value can't be read as a flag;
   - free text wrapped by `posix_single_quote` (prompts, questions).
-  - **Known exception:** the verify command. `build_agent_ask_plan` interpolates `verify_and_commit` raw (`src/agent_session.rs:431-437`), as do the follow-up and task handlers in `src/server.rs` (`verify_command`, around lines 772-779 and 1306-1317). Treat it as trusted operator input: it must never carry PR, agent or API-derived text. It is **not** only operator-reachable today: it is set by the CLI `--verify` flag and by the `verify_command` field of Mission Control REST requests, and that API is unauthenticated (section 6). This is an open injection gap, not a satisfied rule. Fixing it means validated command arguments or an operator-configured allowlist; until then, don't add new paths that feed it.
+  - **Known exception:** the verify command. `build_agent_ask_plan` interpolates `verify_and_commit` raw (`src/agent_session.rs:431-437`), as do the follow-up and task handlers in `src/server.rs` (`verify_command`, around lines 878-885 and 1436-1485). Treat it as trusted operator input: it must never carry PR, agent or API-derived text. It is **not** only operator-reachable today: it is set by the CLI `--verify` flag and by the `verify_command` field of Mission Control REST requests, and that API is unauthenticated (section 6). This is an open injection gap, not a satisfied rule. Fixing it means validated command arguments or an operator-configured allowlist; until then, don't add new paths that feed it.
   New interpolation points need one of these three, plus a test with a hostile input such as `x'; rm -rf ~ #`.
 - **`launchd` plists** are XML: pass every interpolated string through `xml_escape` (`src/schedule.rs`).
 - **Multi-line remote scripts go over stdin.** `code-reviewer` uses `run_ssh_script` (`ssh host sh -s`), which also normalises CRLF. Prefer it to nesting quotes, especially from PowerShell.
