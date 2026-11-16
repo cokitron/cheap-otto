@@ -131,7 +131,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
 - **Steps:**
   1. Add `PIXEL_AGENTS_CONFIG_SNIPPET` as in design 3.3.
   2. Add `pub fn render_install_script(set: &DashboardSet) -> String` producing the script in design 3.3, in that order: header, GUI-session guard, legacy tmux cleanup, `install_service`, `wait_port`, Mission Control block, Pixel Office block. Labels and ports come from `set`. The header sets up `xml_escape` and the `HOME_XML` and `PIXEL_BIN_XML` values used to fill the plist placeholders, and `FAILED=0`. Before bootstrap, a port still held is freed by listener, waiting 5 s and then 2 s more for the port to be released, with `kill -9` as the last resort. If the port stays held, `install_service` prints the `cause=port-held` line with `last_exit` and `log`, sets `FAILED=1` and returns 1; each call site is `if install_service …; then wait_port …; fi`, so `wait_port` is skipped for that service. Because `set -e` is off inside an `if` condition, `install_service` checks `cat`, `mv` and `launchctl bootstrap` explicitly and reports `cause=plist-write-failed` or `cause=bootstrap-failed` the same way. The script ends with `exit 4` when `FAILED` is 1.
-  3. Add `DashboardPlan` and `pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. The spec is `CommandSpec::new("Install dashboard services on MacBook", "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-p", <port>, <user@host>, <remote>])` with `remote = format!("/bin/sh -c {}", posix_single_quote(&script))`.
+  3. Add `DashboardPlan` and `pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. The spec is `CommandSpec::new("Install dashboard services on MacBook", "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-p", <port>, <user@host>, "/bin/sh -s"]).with_stdin(&script)`.
   4. `display_steps` has one line per managed service: `Ensure LaunchAgent <label> -> 127.0.0.1:<port>`.
   5. Create `tests/dashboard_scripts.rs` with `#![forbid(unsafe_code)]`. Under `#[cfg(unix)]`, write the rendered script to a temp file and assert `sh -n <file>` exits 0.
 - **Tests:**
@@ -147,7 +147,7 @@ All of Phase 1 lives in the functional core. No task here spawns a process, read
     - `install_script_exits_four_when_a_service_never_listens`: contains `FAILED=1` and `exit 4`.
     - `install_script_reports_cause_log_and_last_exit_when_a_service_never_listens`: the failure line contains `listening=0`, `cause=not-listening-after-10s`, `last_exit=` and `log=$LOG_DIR/`, and both `wait_port` calls pass the service label.
     - `install_script_escapes_xml_values_for_plists`: contains `sed -e 's/&/\&amp;/g'`.
-    - `install_plan_wraps_script_for_remote_sh`: program is `ssh`; the last arg starts with `/bin/sh -c '`.
+    - `install_plan_wraps_script_for_remote_sh`: program is `ssh`; the last arg is `"/bin/sh -s"` and `spec.stdin` carries the script.
   - in `tests/dashboard_scripts.rs`: `rendered_install_script_passes_sh_syntax_check`
 - **Acceptance:**
   - `cargo test -p cheap-otto --lib dashboards::tests` passes.

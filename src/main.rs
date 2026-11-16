@@ -6,7 +6,7 @@ use cheap_otto::agent_session::{
 };
 use cheap_otto::arbiter::{ArbiterPolicy, ArbiterSnapshot};
 use cheap_otto::bridge::{PeerNode, merge_ssh_config_block};
-use cheap_otto::command::CommandSpec;
+use cheap_otto::command::{CommandSpec, normalize_script_lf};
 use cheap_otto::dashboards::{
     DashboardDiagnosis, DashboardId, DashboardSet, DashboardStatusReport, MISSION_CONTROL_PORT,
     PIXEL_OFFICE_PORT, REVIEWER_PORT, ServiceManager, TunnelDecision, TunnelFailure, TunnelRecord,
@@ -51,6 +51,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1399,7 +1400,40 @@ fn capture_command_stdout(program: &str, args: &[&str]) -> Option<String> {
 
 /// Runs a [`CommandSpec`] and captures its `stdout` when exit status is `0`.
 fn capture_spec_stdout(spec: &CommandSpec) -> Option<String> {
-    let output = Command::new(&spec.program).args(&spec.args).output().ok()?;
+    let output = match &spec.stdin {
+        None => Command::new(&spec.program)
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()?,
+        Some(payload) => {
+            let normalized = normalize_script_lf(payload);
+            let mut child = Command::new(&spec.program)
+                .args(&spec.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .ok()?;
+            let child_stdin = child.stdin.take()?;
+            let (write_res, wait_res) = std::thread::scope(|scope| {
+                let writer = scope.spawn(move || {
+                    let mut stdin = child_stdin;
+                    stdin.write_all(normalized.as_bytes())
+                });
+                let waited = child.wait_with_output();
+                let wrote = writer
+                    .join()
+                    .unwrap_or_else(|_| Err(std::io::Error::other("stdin writer failed")));
+                (wrote, waited)
+            });
+            let out = wait_res.ok()?;
+            if write_res.is_err() {
+                return None;
+            }
+            out
+        }
+    };
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -1407,16 +1441,56 @@ fn capture_spec_stdout(spec: &CommandSpec) -> Option<String> {
     }
 }
 
+/// Runs `spec` with inherited stdout/stderr, piping `spec.stdin` (LF-normalised) when present.
+fn spawn_and_wait_spec(
+    spec: &CommandSpec,
+    inherit_stdin_when_none: bool,
+) -> Result<std::process::ExitStatus, String> {
+    match &spec.stdin {
+        None => {
+            let stdin_cfg = if inherit_stdin_when_none {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            };
+            Command::new(&spec.program)
+                .args(&spec.args)
+                .stdin(stdin_cfg)
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))
+        }
+        Some(payload) => {
+            let normalized = normalize_script_lf(payload);
+            let mut child = Command::new(&spec.program)
+                .args(&spec.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+            let write_res = match child.stdin.take() {
+                Some(mut stdin) => stdin.write_all(normalized.as_bytes()),
+                None => Err(std::io::Error::other("child stdin pipe was unavailable")),
+            };
+            let status = child
+                .wait()
+                .map_err(|err| format!("failed waiting for '{}': {err}", spec.program))?;
+            if status.success()
+                && let Err(err) = write_res
+            {
+                return Err(format!("failed writing stdin to '{}': {err}", spec.program));
+            }
+            Ok(status)
+        }
+    }
+}
+
 /// Spawns a [`CommandSpec`] directly via `Command::args` with inherited terminal stdio.
 fn execute_command_spec(spec: &CommandSpec) -> Result<(), Box<dyn std::error::Error>> {
     println!("  ==> {} ($ {})", spec.description, spec.display_command());
-    let status = Command::new(&spec.program)
-        .args(&spec.args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+    let status = spawn_and_wait_spec(spec, true)?;
 
     if !status.success() {
         if spec.allow_failure {
@@ -4227,27 +4301,21 @@ fn dashboard_context(
     Ok((peer, set))
 }
 
-/// Prints the banner, the paired Mac and the command; with `hide_script`, the remote script is
-/// shown as `<script>` so the plan stays readable.
-fn print_dashboard_command(title: &str, peer: &PeerNode, spec: &CommandSpec, hide_script: bool) {
-    let mut shown = spec.clone();
-    if let Some(remote) = shown.args.last_mut().filter(|_| hide_script) {
-        *remote = "/bin/sh -c <script>".to_string();
-    }
+/// Prints the banner, the paired Mac and the command; multi-line scripts live on `spec.stdin`, so
+/// `display_command` renders only discrete arguments and keeps the plan readable.
+fn print_dashboard_command(title: &str, peer: &PeerNode, spec: &CommandSpec) {
     let destination = peer.ssh_destination();
     println!("=== cheap-otto: dashboards {title} ===");
     println!("Paired MacBook  : {} ({destination})", peer.alias);
-    println!("Command         :\n  $ {}", shown.display_command());
+    println!("Command         :\n  $ {}", spec.display_command());
 }
 
-/// Runs a remote-script plan with inherited stdio. The error names the exit status, not the
-/// whole script; the script's own output already said which dashboard failed and why.
+/// Runs a remote-script plan with inherited stdout/stderr and `spec.stdin` piped to the remote
+/// shell. The error names the exit status, not the whole script; the script's own output already
+/// said which dashboard failed and why.
 fn execute_remote_script(spec: &CommandSpec) -> Result<(), Box<dyn std::error::Error>> {
     println!("  ==> {}", spec.description);
-    let status = Command::new(&spec.program)
-        .args(&spec.args)
-        .status()
-        .map_err(|err| format!("failed to spawn '{}': {err}", spec.program))?;
+    let status = spawn_and_wait_spec(spec, false)?;
     if status.success() {
         return Ok(());
     }
@@ -4289,7 +4357,7 @@ fn run_dashboards_install_script(
 fn run_dashboards_install(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let (peer, set) = dashboard_context(opts)?;
     let plan = build_install_plan(&peer, &set);
-    print_dashboard_command("install", &peer, &plan.spec, true);
+    print_dashboard_command("install", &peer, &plan.spec);
     println!("Script          : `cheap-otto dashboards install-script` prints it");
     for step in &plan.display_steps {
         println!("  * {step}");
@@ -4304,7 +4372,7 @@ fn run_dashboards_install(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std
 fn run_dashboards_uninstall(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let (peer, set) = dashboard_context(opts)?;
     let plan = build_uninstall_plan(&peer, &set);
-    print_dashboard_command("uninstall", &peer, &plan.spec, true);
+    print_dashboard_command("uninstall", &peer, &plan.spec);
     for step in &plan.display_steps {
         println!("  * {step}");
     }
@@ -4324,7 +4392,7 @@ fn run_dashboards_restart(
     let (peer, set) = dashboard_context(opts)?;
     let spec = build_restart_spec(&peer, &set, id)
         .ok_or_else(|| format!("dashboard '{}' is not in the registry", id.slug()))?;
-    print_dashboard_command(&format!("restart {}", id.slug()), &peer, &spec, false);
+    print_dashboard_command(&format!("restart {}", id.slug()), &peer, &spec);
     if !opts.execute {
         println!("\nPass `--execute` to restart it on the Mac.");
         return Ok(());
@@ -4382,7 +4450,7 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
-        print_dashboard_command("status", &peer, &spec, true);
+        print_dashboard_command("status", &peer, &spec);
         println!(
             "\nPass `--execute` to run this read-only probe and check which ports answer here."
         );
@@ -4390,7 +4458,7 @@ fn run_dashboards_status(opts: &DashboardOptions<'_>) -> Result<(), Box<dyn std:
     }
 
     if !opts.json {
-        print_dashboard_command("status", &peer, &spec, true);
+        print_dashboard_command("status", &peer, &spec);
     }
     let tunnelled: Vec<(DashboardId, bool)> = set
         .services()
@@ -4604,5 +4672,24 @@ mod tests {
             false
         ));
         assert!(!live_tunnel_needs_replacement(&conflict, false));
+    }
+
+    #[test]
+    fn capture_and_spawn_spec_pipe_lf_normalized_stdin_to_child() -> Result<(), String> {
+        let mut spec = if cfg!(target_os = "windows") {
+            CommandSpec::new("Echo stdin lines", "findstr", [".*"])
+        } else {
+            CommandSpec::new("Echo stdin lines", "cat", std::iter::empty::<&str>())
+        };
+        // Populate raw CRLF directly to verify the execution boundary also normalises LF.
+        spec.stdin = Some("alpha\r\nbeta\r\n".to_string());
+
+        let captured = capture_spec_stdout(&spec).ok_or("capture_spec_stdout returned None")?;
+        let normalized_out = captured.replace("\r\n", "\n");
+        assert_eq!(normalized_out, "alpha\nbeta\n");
+
+        let status = spawn_and_wait_spec(&spec, false)?;
+        assert!(status.success(), "expected exit 0, got {status}");
+        Ok(())
     }
 }

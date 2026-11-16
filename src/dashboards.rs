@@ -767,16 +767,17 @@ pub struct DashboardPlan {
     pub script: String,
     /// Human-readable steps for the dry-run printout.
     pub display_steps: Vec<String>,
-    /// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> /bin/sh -c '<script>'`.
+    /// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> "/bin/sh -s"` with the
+    /// script streamed on standard input.
     pub spec: CommandSpec,
 }
 
 /// Builds the plan that installs the managed dashboard LaunchAgents over SSH. [R4.4]
 ///
-/// The remote command is `/bin/sh -c '<script>'`: the Mac's login shell is zsh and the script
-/// must run under `sh`, and [`posix_single_quote`] makes the whole script one safe argument.
-/// `BatchMode=yes` keeps an authentication prompt from stalling the install, and `CommandSpec`
-/// has no stdin channel, so the script travels as that argument. `display_steps` has one
+/// The remote command is `/bin/sh -s` and the script travels on `spec.stdin` (LF-normalised):
+/// the Mac's login shell is zsh and the script must run under `sh`, while streaming over stdin
+/// keeps multi-line scripts out of command-line arguments. `BatchMode=yes` keeps an authentication
+/// prompt from stalling the install. `display_steps` has one
 /// `Ensure LaunchAgent <label> -> 127.0.0.1:<port>` line per managed service.
 #[must_use = "the install plan should be printed or executed"]
 pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan {
@@ -791,7 +792,7 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
             )
         })
         .collect();
-    let spec = remote_sh_spec("Install dashboard services on MacBook", peer, &script);
+    let spec = remote_sh_stdin_spec("Install dashboard services on MacBook", peer, &script);
     DashboardPlan {
         set: set.clone(),
         script,
@@ -800,11 +801,9 @@ pub fn build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan 
     }
 }
 
-/// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> /bin/sh -c '<script>'`.
-///
-/// The Mac's login shell is zsh, so the script runs under `/bin/sh` and travels as one
-/// [`posix_single_quote`]d argument; the local process gets discrete args.
-fn remote_sh_spec(description: &str, peer: &PeerNode, script: &str) -> CommandSpec {
+/// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> "/bin/sh -s"` with `script`
+/// LF-normalised on standard input, so no multi-line script appears in an `ssh` argument.
+fn remote_sh_stdin_spec(description: &str, peer: &PeerNode, script: &str) -> CommandSpec {
     CommandSpec::new(
         description,
         "ssh",
@@ -816,7 +815,27 @@ fn remote_sh_spec(description: &str, peer: &PeerNode, script: &str) -> CommandSp
             "-p".to_string(),
             peer.ssh_port.to_string(),
             peer.ssh_destination(),
-            format!("/bin/sh -c {}", posix_single_quote(script)),
+            "/bin/sh -s".to_string(),
+        ],
+    )
+    .with_stdin(script)
+}
+
+/// `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> /bin/sh -c '<command>'`
+/// for single-line remote commands such as `launchctl kickstart`.
+fn remote_sh_spec(description: &str, peer: &PeerNode, command: &str) -> CommandSpec {
+    CommandSpec::new(
+        description,
+        "ssh",
+        [
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
+            "-p".to_string(),
+            peer.ssh_port.to_string(),
+            peer.ssh_destination(),
+            format!("/bin/sh -c {}", posix_single_quote(command)),
         ],
     )
 }
@@ -852,7 +871,7 @@ pub fn build_uninstall_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPla
         .managed()
         .map(|service| format!("Unload and delete LaunchAgent {}", service.launchd_label))
         .collect();
-    let spec = remote_sh_spec("Remove dashboard services from MacBook", peer, &script);
+    let spec = remote_sh_stdin_spec("Remove dashboard services from MacBook", peer, &script);
     DashboardPlan {
         set: set.clone(),
         script,
@@ -935,22 +954,18 @@ echo "host cheap_otto_bin=$cheap_otto_bin pixel_agents_bin=$pixel_agents_bin gui
     script
 }
 
-/// Builds `ssh -o BatchMode=yes -o ConnectTimeout=3 -p <port> <user@host> /bin/sh -c '<script>'`
-/// for [`render_status_script`]. [R5.5]
+/// Builds `ssh -o BatchMode=yes -o ConnectTimeout=3 -p <port> <user@host> "/bin/sh -s"` with
+/// [`render_status_script`] piped on standard input. [R5.5]
 ///
-/// The Mac's login shell is zsh, so the script is wrapped in `/bin/sh -c` and passed as one
-/// single-quoted argument. The local process gets discrete args, like
-/// [`PeerNode::build_ssh_probe_spec`].
+/// The Mac's login shell is zsh, so the remote command invokes `/bin/sh -s` and reads the
+/// multi-line script from stdin rather than passing it as a quoted command-line argument.
 #[must_use = "the status probe should be displayed or executed"]
 pub fn build_status_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec {
-    let remote = format!(
-        "/bin/sh -c {}",
-        crate::worktree::posix_single_quote(&render_status_script(set))
-    );
     peer.build_ssh_probe_spec(
         "Read every dashboard's LaunchAgent, pid and port on the Mac (read-only)",
-        &remote,
+        "/bin/sh -s",
     )
+    .with_stdin(render_status_script(set))
 }
 
 /// What the probe saw for one dashboard on the Mac. [R5.1]
@@ -2050,14 +2065,11 @@ mod tests {
             .last()
             .map(String::as_str)
             .unwrap_or_default();
-        assert!(remote.starts_with("/bin/sh -c '"), "{remote}");
-        // The script carries single quotes (the pixel-agents snippet), so they must be escaped.
-        assert!(plan.script.contains('\''));
-        assert_eq!(
-            remote,
-            format!("/bin/sh -c {}", posix_single_quote(&plan.script))
-        );
+        assert_eq!(remote, "/bin/sh -s");
+        assert!(plan.spec.args.iter().all(|arg| !arg.contains('\n')));
         assert_eq!(plan.script, render_install_script(&set));
+        assert_eq!(plan.spec.stdin.as_deref(), Some(plan.script.as_str()));
+        assert!(!plan.script.contains('\r'));
         assert_eq!(
             plan.display_steps,
             [
@@ -2119,7 +2131,9 @@ mod tests {
             "ssh -o BatchMode=yes -o ConnectTimeout=3 -p 2222 admin@192.0.2.10"
         );
         assert_eq!(spec.args.len(), 8);
-        assert!(spec.args[7].starts_with("/bin/sh -c 'set -u\n"));
+        assert_eq!(spec.args[7], "/bin/sh -s");
+        assert!(spec.args.iter().all(|arg| !arg.contains('\n')));
+        assert_eq!(spec.stdin.as_deref(), Some(script.as_str()));
         Ok(())
     }
 
@@ -2303,9 +2317,26 @@ host cheap_otto_bin=1 pixel_agents_bin=0 gui_session=1 autologin_user=-
         assert!(!script.contains(REVIEWER_LAUNCHD_LABEL));
         let plan = build_uninstall_plan(&tunnel_peer()?, &set);
         assert_eq!(plan.spec.program, "ssh");
-        let remote = plan.spec.args.last();
-        assert!(remote.is_some_and(|remote| remote.starts_with("/bin/sh -c '")));
+        assert_eq!(
+            plan.spec.args.last().map(String::as_str),
+            Some("/bin/sh -s")
+        );
+        assert!(plan.spec.args.iter().all(|arg| !arg.contains('\n')));
+        assert_eq!(plan.spec.stdin.as_deref(), Some(script.as_str()));
         assert_eq!(plan.display_steps.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_sh_stdin_spec_normalizes_crlf_input() -> Result<(), crate::bridge::BridgeError> {
+        let spec = remote_sh_stdin_spec(
+            "Run CRLF script",
+            &tunnel_peer()?,
+            "set -eu\r\necho ready\r\n",
+        );
+        assert_eq!(spec.args.last().map(String::as_str), Some("/bin/sh -s"));
+        assert_eq!(spec.stdin.as_deref(), Some("set -eu\necho ready\n"));
+        assert!(spec.args.iter().all(|arg| !arg.contains('\n')));
         Ok(())
     }
 

@@ -356,7 +356,7 @@ if [ "$FAILED" -ne 0 ]; then exit 4; fi
 
 **Transports** [R4.4]:
 
-- From the workstation: `build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. Its `CommandSpec` is `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> <remote>` (`BatchMode=yes` so an authentication prompt cannot stall the install; `CommandSpec` has no stdin channel, so the script stays in `remote`) where `remote` is `format!("/bin/sh -c {}", posix_single_quote(&script))`. Wrapping in `/bin/sh -c` matters: the Mac's login shell is zsh, and the script must run under `sh`. `posix_single_quote` (`src/worktree.rs`) makes the script one safe argument.
+- From the workstation: `build_install_plan(peer: &PeerNode, set: &DashboardSet) -> DashboardPlan`. Its `CommandSpec` is `ssh -o BatchMode=yes -o ConnectTimeout=10 -p <port> <user@host> "/bin/sh -s"` (`BatchMode=yes` so an authentication prompt cannot stall the install) with the LF-normalised script attached to `CommandSpec::stdin`. Running `/bin/sh -s` matters: the Mac's login shell is zsh, the script must run under `sh`, and streaming over stdin keeps multi-line scripts out of command-line arguments.
 - On the Mac: `cheap-otto dashboards install-script` prints the script; provisioning pipes it to `/bin/sh` (section 3.10).
 
 ```rust
@@ -367,7 +367,7 @@ pub struct DashboardPlan {
     pub script: String,
     /// Human-readable steps for the dry-run printout.
     pub display_steps: Vec<String>,
-    /// `ssh … /bin/sh -c '<script>'`.
+    /// `ssh … "/bin/sh -s"` with the script on `spec.stdin`.
     pub spec: CommandSpec,
 }
 ```
