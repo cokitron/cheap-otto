@@ -53,7 +53,7 @@
     </div>
 
     <h2>Ten checks on the real Mac</h2>
-    <p>Once the dashboard wave was on <code>main</code>, the 10-step rollout in <a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a> ran against the paired MacBook. Note that <code>code-reviewer m1</code> and <code>code-reviewer ui</code> act on the Mac immediately, while the <code>cheap-otto</code> commands below wait for <code>--execute</code>:</p>
+    <p>Once the dashboard wave was on <code>main</code>, the 10-step rollout in <a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a> ran against the paired MacBook. Note that <code>code-reviewer m1</code> and <code>code-reviewer ui</code> act on the Mac immediately, while the <code>cheap-otto</code> commands below wait for <code>--execute</code>. The block below is written for PowerShell or a POSIX shell; <code>cmd.exe</code> needs double quotes around the <code>--cmd</code> value, because single quotes are literal there:</p>
     <div class="term"><div class="term-bar"><span>windows → otto-mac</span><span>live rollout</span></div><pre><span class="c"># push HEAD, build both binaries on the M1 and install the dashboard LaunchAgents</span>
 <span class="p">$</span> cargo run -p code-reviewer -- m1 sync
 <span class="c"># probe launchd and loopback ports on the Mac, plus tunnelled ports here</span>
@@ -62,6 +62,8 @@
 <span class="p">$</span> cheap-otto dashboards install --execute
 <span class="c"># prove KeepAlive: kill Mission Control on the Mac; launchd restarts it within 15s</span>
 <span class="p">$</span> cargo run -p code-reviewer -- m1 exec --cmd 'launchctl kill SIGTERM gui/$(id -u)/com.cheapotto.dashboards.mission-control'
+<span class="c"># same command for cmd.exe, where single quotes are literal: use double quotes</span>
+<span class="p">$</span> cargo run -p code-reviewer -- m1 exec --cmd "launchctl kill SIGTERM gui/$(id -u)/com.cheapotto.dashboards.mission-control"
 <span class="c"># stop the one tunnel, then bring all three ports back without opening a browser</span>
 <span class="p">$</span> cheap-otto dashboards tunnel --stop --execute
 <span class="p">$</span> cheap-otto ui --execute --no-open</pre></div>
