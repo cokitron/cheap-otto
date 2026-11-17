@@ -21,13 +21,13 @@ specs/<feature>/
 
 A PR should be big enough to be worth a review and small enough to read in one sitting. Every PR, from a person or an agent, stays inside this budget:
 
-- **At most 600 changed lines** (insertions plus deletions, tests included, `Cargo.lock` excluded); aim for about 400.
+- **At most 600 changed code lines** (insertions plus deletions, tests included; `Cargo.lock`, `specs/`, `docs/` and `*.md` excluded); aim for about 400. Specs ship in the same PR as their first code slice, never as standalone spec-only PRs.
 - **One theme.** Several small tasks that belong together (the same files or the same feature) may share a PR; that is what the PR plan is for. No drive-by refactors, renames, or reformatting of code the tasks do not touch. A behaviour change and a refactor are two PRs.
 
 Check it before you open the PR:
 
 ```bash
-git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'
+git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock' ':(exclude)specs/**' ':(exclude)docs/**' ':(exclude)*.md'
 ```
 
 **Bundling.** Fewer, coherent PRs beat many tiny ones. When a spec is written, group its tasks into PRs in the PR plan: tasks that touch the same files or finish one feature go together while they fit the budget. Do not open a PR for a task the plan bundles with others.
@@ -53,11 +53,11 @@ Follow these steps exactly. They are written so that an agent with no other cont
    cargo clippy --workspace --all-targets --all-features -- -D warnings
    cargo test --workspace --all-targets --locked
    ```
-   Then run every acceptance check in the task and compare with the expected result, and check the size:
+   Then run every acceptance check in the task and compare with the expected result, and check the code size:
    ```bash
-   git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock'
+   git diff --shortstat origin/main...HEAD -- . ':(exclude)Cargo.lock' ':(exclude)specs/**' ':(exclude)docs/**' ':(exclude)*.md'
    ```
-   Over 600 lines: split (see [PR size budget](#pr-size-budget)) before opening the PR.
+   Over 600 code lines: split (see [PR size budget](#pr-size-budget)) before opening the PR.
 7. **Stay off the live appliance.** Outside a **LIVE** task with owner approval, never pass `--execute` or `--apply` against the real Mac or real GitHub repos, and never run live `code-reviewer m1 …`, `poll`, `tend-poll`, `review`, `tend`, `sync-docs` or `ui`. `sync-docs` writes to Google Drive and has no dry run, so it is never part of a non-LIVE task. Use `--dry-run` for `poll`, `tend-poll`, `review` and `tend`. Local tests may run commands (including with `--execute`) only with an isolated temp `--state-dir` and no live endpoints, for example `tunnel --stop --execute` with no recorded pid. Exercise the CLI as a dry run with a temp `--state-dir`. Preview pages with the servers in `.claude/launch.json`. The same exemption applies as in the definition of done: issue comments, branch pushes and PRs are normal coordination, not live operations.
 8. **Update the spec:** tick each task's (or part's) checkbox in `tasks.md` and add one line under it with the PR number. If you changed the design, update `design.md`.
 9. **Open a PR** against `main` with a Conventional Commit title. The description says which tasks it implements and closes each of their issues (`Implements specs/<feature> T1.2 and T1.3, closes #NN, closes #MM`; a part that is not the last says `part of #NN` instead), what changed, the size line from step 6, and pastes the gate result and the acceptance check output. Do not merge it yourself unless the owner asked.
@@ -81,3 +81,4 @@ Copy the structure of an existing spec folder. Keep requirement and task ids sta
 | [`m1-dashboards`](m1-dashboards/README.md) | Every dashboard runs as a service on the MacBook and reaches the workstation through one SSH tunnel | Implemented; the owner's two LIVE tasks (T6.1, T6.2) remain |
 | [`m1-cloud-services`](m1-cloud-services/README.md) | Serve Colima (Docker Engine), PostgreSQL 17 and container/app ports from the MacBook to the workstation over one SSH tunnel | Planned (8 implementation PRs + 2 LIVE tasks) |
 | [`m1-chat-control`](m1-chat-control/README.md) | Talk independently to `@Claude` and `@Agy` from Discord across parallel multi-account Git worktrees (`~/repos/<gh-account>/`) | Planned (7 implementation PRs + 2 LIVE tasks) |
+| [`m1-env-secrets`](m1-env-secrets/README.md) | Keep Windows and the Mac aligned on `.env` schemas and ephemeral `HMAC-SHA256` digests with zero secrets on the wire and zero secrets in coding agents | In progress (PR 1 `T1.1`; 7 implementation PRs + 2 LIVE tasks) |

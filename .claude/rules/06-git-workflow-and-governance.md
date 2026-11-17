@@ -12,7 +12,7 @@
   - `ci/<scope-or-topic>` — GitHub Actions / CI pipeline updates
   - `perf/<scope-or-topic>` — measurable performance/memory improvements
   - `otto/<task-id>` — automated `cheap-otto` delegated worktree branches
-- **PR size:** a PR changes at most 600 lines (tests included, `Cargo.lock` excluded) and covers one theme. Small related changes share a PR; work that will not fit is split into parts that each leave `main` green; `specs/README.md` (PR size budget) says how. Purely mechanical changes (lockfile, generated assets, renames, dependency bumps) may exceed this when the PR says so and contains nothing else.
+- **PR size:** a PR changes at most 600 code lines (tests included; `Cargo.lock`, `specs/`, `docs/` and `*.md` excluded) and covers one theme; specs ship with their first code PR rather than as standalone spec PRs. Small related changes share a PR; work that will not fit is split into parts that each leave `main` green; `specs/README.md` (PR size budget) says how. Purely mechanical changes (lockfile, generated assets, renames, dependency bumps) may exceed this when the PR says so and contains nothing else.
 - **Squash-merge to `main`:** Pull Requests squash-merge into a single atomic Conventional Commit on `main` so history remains linear, bisectable, and changelog-ready.
 
 ## 2. Conventional Commits & PR Titles
