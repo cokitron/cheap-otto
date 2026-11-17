@@ -20,9 +20,13 @@ jobs:
   pr-hygiene:
     name: PR Governance & Secret Guard
     runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.detect_changes.outputs.code_changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Validate Conventional PR title & branch hygiene
         if: github.event_name == 'pull_request'
@@ -54,28 +58,62 @@ jobs:
             exit 1
           fi
 
+      - name: Detect whether non-doc files changed
+        id: detect_changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" != "pull_request" ] || [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
+          if [ -z "$CHANGED" ] || printf '%s\n' "$CHANGED" | grep -qvE '^(specs/|docs/|README\.md$|CONTRIBUTING\.md$|LICENSE$)'; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust-gate:
-    name: Rust Gate (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Rust Gate (${{ matrix.label }})
+    needs: pr-hygiene
+    runs-on: ${{ needs.pr-hygiene.outputs.code_changed == 'true' && matrix.runner || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - label: ubuntu-latest
+            runner: ubuntu-latest
+          - label: macos-latest
+            runner: macos-15-intel
+          - label: windows-latest
+            runner: windows-latest
     steps:
+      - name: Fast-pass docs-only pull request
+        if: needs.pr-hygiene.outputs.code_changed != 'true'
+        run: echo "Docs/spec-only PR — skipping Rust compilation while reporting required check green."
+
       - name: Checkout repository
+        if: needs.pr-hygiene.outputs.code_changed == 'true'
         uses: actions/checkout@v7
 
       - name: Install Rust toolchain
+        if: needs.pr-hygiene.outputs.code_changed == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - name: Check formatting
-        if: matrix.os == 'ubuntu-latest'
+        if: needs.pr-hygiene.outputs.code_changed == 'true' && matrix.label == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: Lint with Clippy (-D warnings)
+        if: needs.pr-hygiene.outputs.code_changed == 'true'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run deterministic unit & integration tests
+        if: needs.pr-hygiene.outputs.code_changed == 'true'
         run: cargo test --workspace --all-targets --locked
