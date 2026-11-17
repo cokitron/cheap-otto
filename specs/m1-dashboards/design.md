@@ -437,7 +437,15 @@ The CLI passes its local port checks in as `tunnelled` and adds the warning for 
 pub fn build_tunnel_spec(peer: &PeerNode, set: &DashboardSet) -> CommandSpec
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TunnelRecord { pub pid: u32, pub ports: Vec<u16>, pub destination: String, pub ssh_port: u16, pub started_epoch_secs: u64 }
+pub struct TunnelRecord {
+    pub pid: u32,
+    pub ports: Vec<u16>,
+    pub destination: String,
+    pub ssh_port: u16,
+    pub started_epoch_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_started_at: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TunnelDecision {
@@ -478,10 +486,10 @@ Process helpers, also in `src/main.rs` (the reviewer's `state.rs` has the same i
 
 | Helper | Windows | Elsewhere |
 | --- | --- | --- |
-| `process_command_line(pid) -> Option<String>` | `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=<pid>').CommandLine"` | `ps -p <pid> -o args=` |
+| `process_snapshot(pid) -> Option<(String, Option<String>)>` | `powershell -NoProfile -NonInteractive -Command "$p = Get-CimInstance Win32_Process -Filter 'ProcessId=<pid>'; …"` (`CreationDate` in UTC ISO-8601 + `CommandLine`) | `ps -p <pid> -o args=` and `ps -p <pid> -o lstart=` |
 | `terminate_process(pid)` | `taskkill /PID <pid> /F` | `kill <pid>` |
 
-`recorded_tunnel_is_running(record) -> bool` is `process_command_line(record.pid)` passed to the pure `command_line_is_recorded_tunnel`. That is the `ssh_alive` input of `recorded_tunnel_covers`. `<pid>` is a `u32`, so nothing operator-supplied reaches these commands.
+`recorded_tunnel_is_running(record) -> bool` feeds `process_snapshot(record.pid)` into the pure `process_matches_recorded_tunnel`, which checks `command_line_is_recorded_tunnel` and, when `process_started_at` is recorded, requires an exact start-time match (older records without `process_started_at` fall back to the command-line check). `terminate_recorded_tunnel` re-runs `recorded_tunnel_is_running` immediately before invoking `kill` or `taskkill`; without a kernel `pidfd` handle a tiny residual window still exists between that check and the signal, and re-verifying start time plus command line narrows it as far as external tools allow. `<pid>` is a `u32`, so nothing operator-supplied reaches these commands.
 
 An image name is not enough: after a reboot the recorded pid can belong to an unrelated ssh session, and killing it would drop someone's shell. The command line must carry the recorded destination and every recorded forward. A record that cannot be verified (process gone, command line unreadable or different) is stale: remove `tunnel.json` and signal nothing. If ports are still held after that, it is the foreign-holder error in step 3. [R3.5]
 
