@@ -20,7 +20,8 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 
 ### T1.1 Scope layout, `.env` / `.env.example` parser & blocked keys
 
-- [x] Done (in PR 1 alongside `specs/m1-env-secrets/`)
+- [x] Done
+- **PR:** #74
 - **Covers:** R1.1, R1.2, R1.3, R1.4, R4.2
 - **Depends on:** nothing
 - **Files:** `src/env_secrets.rs` (new), `src/lib.rs`
