@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docker, Discord and .env off the wire · cheap-otto blog</title>
+<meta name="description" content="Two specs merged on main — Colima + PostgreSQL 17 over SSH and dual @Claude/@Agy Discord chat across multi-account worktrees — plus next up: keeping .env secrets off the wire and out of every agent.">
+<meta name="theme-color" content="#F7D842">
+<meta property="og:title" content="Docker, Discord and .env off the wire · cheap-otto">
+<meta property="og:description" content="Two specs merged after 34 review threads (Docker + Postgres over SSH, and @Claude + @Agy on Discord), and next up: .env secrets that never cross the wire or pass through an agent.">
+<meta property="og:image" content="https://cokitron.github.io/cheap-otto/assets/social-preview.png">
+<meta property="og:url" content="https://cokitron.github.io/cheap-otto/blog/2026-11-17-docker-discord-and-env-off-the-wire.html">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="../assets/otto-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('otto-theme'); } catch (e) {}
+    if (t !== 'night' && t !== 'paper') { t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'night'; }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="blog.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brandmark" href="../" aria-label="cheap-otto home">cheap-<b>otto</b></a>
+    <div class="top-nav">
+      <nav class="modenav" aria-label="Site"><a href="../">Home</a><a href="./" class="on">Blog</a></nav>
+      <div class="modenav" role="group" aria-label="Theme"><button type="button" data-theme-btn="night">Night</button><button type="button" data-theme-btn="paper">Paper</button></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <article>
+    <div class="post-head">
+      <div class="sechead"><span class="sectag">Specs</span><span class="secsub"><time datetime="2026-11-17">17 Nov 2026</time> · m1-cloud-services · m1-chat-control · env safety</span></div>
+      <h1>Docker, Discord and .env off the wire.</h1>
+      <p class="lede">With the three dashboards running under <code>launchd</code> on the real M1 (<a href="2026-11-17-live-on-the-mac.html">previous post</a>), the next wave is about the workloads and credentials that live on that MacBook. Two specifications just landed on <code>main</code> (<a href="https://github.com/cokitron/cheap-otto/pull/69">#69</a> and <a href="https://github.com/cokitron/cheap-otto/pull/71">#71</a>) after 34 review threads, and the third is next on the board: managing <code>.env</code> files so secrets never travel on the wire to the Mac and never pass through an agent.</p>
+    </div>
+
+    <div class="stats">
+      <div class="card stat y"><span class="label">Specs merged</span><span class="num">2</span><p>m1-cloud-services (#69) and m1-chat-control (#71), 605 lines across 9 files</p></div>
+      <div class="card stat"><span class="label">Planned PRs</span><span class="num">15</span><p>8 for Docker, Postgres and app ports; 7 for Discord dual-agent chat, plus 4 LIVE checks</p></div>
+      <div class="card stat"><span class="label">Spec threads</span><span class="num">34</span><p>Cubic findings resolved in the design docs before any Rust was written (33 by Code Tender)</p></div>
+      <div class="card stat"><span class="label">Secrets on wire</span><span class="num">0</span><p>next spec: .env values stay off the bridge to the Mac and out of every agent</p></div>
+    </div>
+
+    <h2>1. Colima, PostgreSQL 17 and app ports (#69)</h2>
+    <p>Your Windows workstation should be able to run <code>docker ps</code>, <code>docker compose</code>, Testcontainers and <code>psql</code> against the Apple Silicon MacBook without installing Docker Desktop on Windows or opening unauthenticated TCP <code>2375</code> or <code>5432</code> on Wi-Fi. The spec in <a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-cloud-services"><code>specs/m1-cloud-services</code></a> (tracked in <a href="https://github.com/cokitron/cheap-otto/issues/70">#70</a>) plans a second, workload-only SSH tunnel alongside the dashboard tunnel (<code>&lt;user&gt;</code> and <code>&lt;port&gt;</code> below are placeholders for your Mac username and registered container or dev-server port):</p>
+    <div class="term"><div class="term-bar"><span>specs/m1-cloud-services</span><span>planned bridge</span></div><pre>windows 127.0.0.1                           otto-mac 127.0.0.1 (loopback only)
+-----------------------------------------   ----------------------------------------------
+127.0.0.1:23750  -- ssh -N -F none -------→ /Users/&lt;user&gt;/.colima/default/docker.sock
+127.0.0.1:5432   -- services-tunnel.json -→ 127.0.0.1:5432 (postgresql@17)
+127.0.0.1:&lt;port&gt; -------------------------→ 127.0.0.1:&lt;port&gt; (containers &amp; dev servers)</pre></div>
+    <ul class="tight">
+      <li><strong>Sized for unified memory.</strong> Colima starts with Apple's <code>vz</code> hypervisor and <code>virtiofs</code> capped at <code>4</code> CPUs and <code>4</code> GiB RAM on 16 GiB Macs (<code>2</code> CPUs and <code>2</code> GiB on 8 GiB Macs), coordinated with the thermal and RAM arbiter in <code>src/arbiter.rs</code> so parallel builds do not push a fanless Air into swap thrashing.</li>
+      <li><strong>Unix socket forward, no <code>sshd</code> <code>PATH</code> trap.</strong> OpenSSH forwards workstation <code>127.0.0.1:23750</code> straight to Colima's Unix socket on the Mac and configures a <code>docker</code> context named <code>otto-mac</code>, avoiding <code>docker system dial-stdio</code> failures under minimal non-interactive <code>sshd</code> environments.</li>
+      <li><strong>Decoupled from the dashboard tunnel.</strong> Desired forwards live in <code>.cheap-otto/services.json</code> and their tunnel in <code>.cheap-otto/services-tunnel.json</code>, validated disjoint from <code>DashboardSet::ports()</code> (<code>7420</code>, <code>7421</code>, <code>7430</code>). Adding or removing port <code>3000</code> restarts only the services tunnel; Mission Control and the Reviewer never blink.</li>
+      <li><strong>Loopback-verified Postgres and cached UI state.</strong> Startup checks <code>SHOW listen_addresses</code>, rewrites and restarts <code>postgresql@17</code> if needed, and fails closed if a non-loopback listener remains. Mission Control's planned <code>GET /api/services</code> reads cached files written atomically under <code>services.lock</code> and never spawns SSH on page load.</li>
+    </ul>
+
+    <h2>2. @Claude and @Agy on Discord (#71)</h2>
+    <p>Driving <code>claude</code> and <code>agy</code> today needs an SSH session or a workstation tunnel. <a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-chat-control"><code>specs/m1-chat-control</code></a> (<a href="https://github.com/cokitron/cheap-otto/pull/71">#71</a>) lets you talk to both agents independently from Discord on your phone or browser for free, with zero inbound ports on the Mac, zero third-party npm packages and zero new Cargo dependencies:</p>
+    <ul class="tight">
+      <li><strong>Stdlib Node 24 sidecar, pure Rust core.</strong> A small <code>launchd</code> service (<code>com.cheapotto.chat.discord</code>) keeps outbound Discord Gateway v10 WebSockets open using Node 24's built-in <code>WebSocket</code> and <code>fetch</code>, prefilters <code>allowed_user_ids</code> so unauthorized users spawn nothing, and passes allowlisted events to pure Rust (<code>src/chat.rs</code>).</li>
+      <li><strong>Multi-account repo hub.</strong> Clones live under <code>~/repos/&lt;gh-account&gt;/&lt;repo&gt;</code> (<code>&lt;gh-account&gt;</code> and <code>&lt;repo&gt;</code> are placeholders) with per-account <code>.gitconfig</code> <code>includeIf</code> rules and a broker-only credential helper, so personal and org repositories never mix GitHub tokens or commit authors.</li>
+      <li><strong>One thread, one shared worktree, two memories.</strong> Posting in a mapped <code>#&lt;repo&gt;</code> channel creates a Discord thread and a dedicated worktree (<code>~/repos/&lt;gh-account&gt;/.worktrees/&lt;repo&gt;--&lt;slug&gt;</code>, where <code>&lt;slug&gt;</code> is a placeholder) storing both <code>claude_session_id</code> and <code>agy_conversation_id</code>. Per-worktree queue tickets serialize turns inside one thread while separate threads run in parallel (up to <code>3</code> across the Mac by default).</li>
+      <li><strong>Separate macOS user for agent turns.</strong> During spec review on <a href="https://github.com/cokitron/cheap-otto/pull/71">#71</a>, Cubic pointed out that stripping <code>GH_TOKEN</code> and <code>DISCORD_*_TOKEN</code> from child environment variables does not stop a same-UID agent from reading <code>~/.cheap-otto/tokens/</code> or <code>.git/config</code>. The spec runs agent turns under a separate macOS user that can write only the working tree (with <code>safe.directory</code> configured for read-only <code>git</code> inspection), while the operator-owned broker runs <code>git add</code>, <code>git commit</code>, <code>git push</code> and <code>gh</code> with an empty <code>core.hooksPath</code>.</li>
+    </ul>
+
+    <h2>3. Next up: .env off the wire and away from agents</h2>
+    <p>Today <code>.gitignore</code> and CI's <code>PR Governance &amp; Secret Guard</code> block <code>.env</code> and <code>.env.*</code> (except <code>.env.example</code>) from git, so <code>cheap-otto sync</code> rightly leaves your local <code>.env</code> behind on Windows. Once containers, migrations, dev servers and chat-driven worktrees run on the Mac, those workloads still need runtime secrets — and both shortcuts people reach for break security:</p>
+    <ul class="tight">
+      <li><strong>Never on the wire to the Mac.</strong> Copying raw <code>.env</code> files or passing <code>KEY=VALUE</code> pairs from Windows over SSH argv, dry-run plans, <code>history.jsonl</code> or Mission Control HTTP bodies puts plaintext secrets into command histories, logs or network payloads. The next spec keeps secret values off the Windows-to-Mac wire altogether: secrets are provisioned, unlocked or pulled directly on the Mac into operator-owned <code>0600</code> storage, while the bridge exchanges only <code>.env.example</code> schemas, variable names and missing-key diagnostics.</li>
+      <li><strong>Never through an agent.</strong> Pasting a <code>.env</code> into a task prompt or leaving a readable <code>.env</code> inside an agent worktree ships live API keys and database URLs straight to external model APIs and session logs. Coding agents (<code>claude</code>, <code>agy</code>, <code>kiro</code>) and Code Tender will see only <code>.env.example</code> key names; the operator-owned broker injects real <code>.env</code> variables strictly into the target app, test, migration or container process at runtime, behind the same separate-UID wall designed in <a href="https://github.com/cokitron/cheap-otto/pull/71">#71</a>.</li>
+    </ul>
+
+    <h2>The specs &amp; queue</h2>
+    <div class="scroll-x">
+    <table class="ledger">
+      <thead><tr><th>Item</th><th>Status &amp; scope</th></tr></thead>
+      <tbody>
+        <tr class="phase"><td colspan="2">Merged specifications (ready for task PRs)</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/69">#69</a></td><td><a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-cloud-services"><code>specs/m1-cloud-services</code></a> · Colima (<code>vz</code> + <code>virtiofs</code>), PostgreSQL 17, Unix-socket Docker context and <code>services-tunnel.json</code> (8 PRs + 2 LIVE tasks, 14 review threads resolved, tracked in <a href="https://github.com/cokitron/cheap-otto/issues/70">#70</a>).</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/71">#71</a></td><td><a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-chat-control"><code>specs/m1-chat-control</code></a> · Dual <code>@Claude</code> and <code>@Agy</code> Discord bots, <code>~/repos/&lt;gh-account&gt;/</code> hub, shared-worktree FIFO handoffs and separate-UID broker isolation (7 PRs + 2 LIVE tasks, 20 review threads resolved).</td></tr>
+        <tr class="phase"><td colspan="2">Next on the design board</td></tr>
+        <tr><td>Next</td><td>Safe <code>.env</code> management · Mac-local <code>0600</code> secret store, schema checks against <code>.env.example</code>, zero secrets on the bridge wire and zero secret reads or env exposure inside coding agents.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/issues/60">#60</a></td><td>Modular platform roadmap · extract synchronous <code>crates/otto-core</code>, unify the Mac <code>LaunchAgent</code> service layer and add a compile-time module registry.</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <span><a href="../">Home</a> · <a href="./">Blog</a> · <a href="https://github.com/cokitron/cheap-otto">GitHub</a></span>
+    <span>o=o · otto reads the same both ways</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var btns = Array.prototype.slice.call(document.querySelectorAll('[data-theme-btn]'));
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    btns.forEach(function (b) { b.classList.toggle('on', b.dataset.themeBtn === t); b.setAttribute('aria-pressed', b.dataset.themeBtn === t); });
+    try { localStorage.setItem('otto-theme', t); } catch (e) {}
+  }
+  btns.forEach(function (b) { b.addEventListener('click', function () { setTheme(b.dataset.themeBtn); }); });
+  setTheme(document.documentElement.getAttribute('data-theme') || 'night');
+})();
+</script>
+</body>
+</html>

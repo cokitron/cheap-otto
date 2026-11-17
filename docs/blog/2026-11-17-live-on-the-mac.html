@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live on the Mac, seven seams shut · cheap-otto blog</title>
+<meta name="description" content="The three launchd dashboards passed their 10-step rollout on the real MacBook, and 7 PRs shut seams across SSH stdin scripts, process-bound tunnels, schedule run-now, Code Tender KB edits and macOS CI.">
+<meta name="theme-color" content="#F7D842">
+<meta property="og:title" content="Live on the Mac, seven seams shut · cheap-otto">
+<meta property="og:description" content="10 live checks passed on the old MacBook, and 7 PRs hardened SSH stdin scripts, process-bound tunnels, fallback forwards, Code Tender's KB overlay and CI.">
+<meta property="og:image" content="https://cokitron.github.io/cheap-otto/assets/social-preview.png">
+<meta property="og:url" content="https://cokitron.github.io/cheap-otto/blog/2026-11-17-live-on-the-mac.html">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="../assets/otto-mark.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;700;800&display=swap" rel="stylesheet">
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('otto-theme'); } catch (e) {}
+    if (t !== 'night' && t !== 'paper') { t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'paper' : 'night'; }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<link rel="stylesheet" href="blog.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <a class="brandmark" href="../" aria-label="cheap-otto home">cheap-<b>otto</b></a>
+    <div class="top-nav">
+      <nav class="modenav" aria-label="Site"><a href="../">Home</a><a href="./" class="on">Blog</a></nav>
+      <div class="modenav" role="group" aria-label="Theme"><button type="button" data-theme-btn="night">Night</button><button type="button" data-theme-btn="paper">Paper</button></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <article>
+    <div class="post-head">
+      <div class="sechead"><span class="sectag">Shipped</span><span class="secsub"><time datetime="2026-11-17">17 Nov 2026</time> · rollout <a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a> · hardening, tender KB &amp; CI</span></div>
+      <h1>Live on the Mac. Seven seams shut.</h1>
+      <p class="lede">The <a href="2026-11-15-three-dashboards-one-tunnel.html">first post</a> ended with a caveat: all 15 dashboard PRs had merged with 260 offline tests, and none had touched the real MacBook yet. Now <a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a> is done on the lid-closed M1, all 10 live checks passed, and seven follow-up PRs shut seams in how <code>cheap-otto</code> streams remote scripts, identifies its SSH tunnel, isolates fallback forwards, guards schedule triggers, edits Code Tender's knowledge base and runs macOS CI.</p>
+    </div>
+
+    <div class="stats">
+      <div class="card stat y"><span class="label">PRs</span><span class="num">7</span><p>hardening, stdin scripts, tunnel identity, Tender KB edits and CI fast-pass, each under 600 lines</p></div>
+      <div class="card stat"><span class="label">Lines</span><span class="num">+1,753</span><p>and −223 across 27 files in those 7 PRs</p></div>
+      <div class="card stat"><span class="label">Tests</span><span class="num">284</span><p>up from 260; none needs a Mac, a network or the clock</p></div>
+      <div class="card stat"><span class="label">Review threads</span><span class="num">18/18</span><p>answered on the Mac by Code Tender across those 7 PRs</p></div>
+    </div>
+
+    <h2>Ten checks on the real Mac</h2>
+    <p>Once the dashboard wave was on <code>main</code>, the 10-step rollout in <a href="https://github.com/cokitron/cheap-otto/issues/29">#29</a> ran against the paired MacBook. Note that <code>code-reviewer m1</code> and <code>code-reviewer ui</code> act on the Mac immediately, while the <code>cheap-otto</code> commands below wait for <code>--execute</code>. The block below is written for PowerShell or a POSIX shell; <code>cmd.exe</code> needs double quotes around the <code>--cmd</code> value, because single quotes are literal there:</p>
+    <div class="term"><div class="term-bar"><span>windows → otto-mac</span><span>live rollout</span></div><pre><span class="c"># push HEAD, build both binaries on the M1 and install the dashboard LaunchAgents</span>
+<span class="p">$</span> cargo run -p code-reviewer -- m1 sync
+<span class="c"># probe launchd and loopback ports on the Mac, plus tunnelled ports here</span>
+<span class="p">$</span> cheap-otto dashboards status --execute
+<span class="c"># prove idempotence: a second install prints action=unchanged and keeps every PID</span>
+<span class="p">$</span> cheap-otto dashboards install --execute
+<span class="c"># prove KeepAlive: kill Mission Control on the Mac; launchd restarts it within 15s</span>
+<span class="p">$</span> cargo run -p code-reviewer -- m1 exec --cmd 'launchctl kill SIGTERM gui/$(id -u)/com.cheapotto.dashboards.mission-control'
+<span class="c"># same command for cmd.exe, where single quotes are literal: use double quotes</span>
+<span class="p">$</span> cargo run -p code-reviewer -- m1 exec --cmd "launchctl kill SIGTERM gui/$(id -u)/com.cheapotto.dashboards.mission-control"
+<span class="c"># stop the one tunnel, then bring all three ports back without opening a browser</span>
+<span class="p">$</span> cheap-otto dashboards tunnel --stop --execute
+<span class="p">$</span> cheap-otto ui --execute --no-open</pre></div>
+    <p>All three services (<code>:7420</code>, <code>:7421</code>, <code>:7430</code>) came up <code>loaded=yes listening=yes</code> behind one <code>ssh</code> process on Windows. Killing Mission Control left the Pixel Office and the Reviewer untouched while <code>launchd</code> restarted Mission Control under a new PID, and <code>ssh otto-mac true</code> ran with zero port-forward warnings.</p>
+
+    <h2>Scripts go over stdin, not argv</h2>
+    <p>Before <a href="https://github.com/cokitron/cheap-otto/pull/64">#64</a>, <code>dashboards install</code>, <code>uninstall</code> and <code>status</code> packed their whole POSIX script into a quoted <code>/bin/sh -c '&lt;script&gt;'</code> argument (<code>&lt;script&gt;</code> is a placeholder for the rendered script). Now <code>CommandSpec</code> carries an LF-normalised <code>stdin</code> payload and streams multi-line scripts into <code>/bin/sh -s</code>. Here is the real dry run with the default placeholder peer:</p>
+    <div class="term"><div class="term-bar"><span>cheap-otto dashboards install</span><span>dry run</span></div><pre><span class="p">$</span> cheap-otto dashboards install
+=== cheap-otto: dashboards install ===
+Paired MacBook  : otto-mac (admin@100.101.102.103)
+Command         :
+  $ ssh -o BatchMode=yes -o ConnectTimeout=10 -p 22 admin@100.101.102.103 "/bin/sh -s"
+Script          : `cheap-otto dashboards install-script` prints it
+  * Ensure LaunchAgent com.cheapotto.dashboards.mission-control -&gt; 127.0.0.1:7420
+  * Ensure LaunchAgent com.cheapotto.dashboards.pixel-office -&gt; 127.0.0.1:7421
+
+<span class="ok">Pass `--execute` to install them on the Mac.</span></pre></div>
+
+    <h3>What else changed for you</h3>
+    <ul class="tight">
+      <li><strong>Tunnel stop checks when the process was born.</strong> <code>tunnel.json</code> now records <code>process_started_at</code> in UTC (<code>Win32_Process.CreationDate</code> on Windows, <code>TZ=UTC LC_ALL=C ps -p &lt;pid&gt; -o lstart=</code> on Unix, where <code>&lt;pid&gt;</code> is a placeholder for the tunnel PID). <code>cheap-otto dashboards tunnel --stop --execute</code> refuses to signal a process unless both its full <code>ssh -N</code> command line and its start time match, and re-checks right before <code>taskkill</code> or <code>kill</code>. Older <code>tunnel.json</code> files without the field still load.</li>
+      <li><strong>Fallback Reviewer tunnels ignore <code>LocalForward</code> in <code>~/.ssh/config</code>.</strong> When <code>code-reviewer ui</code> opens a Reviewer-only fallback tunnel (for a custom <code>--host</code>, a non-<code>7430</code> <code>--port</code> or an unrecorded peer), it resolves connection settings locally via <code>ssh -G -- &lt;host&gt;</code> (<code>&lt;host&gt;</code> is a placeholder) and spawns <code>ssh -F none</code> with only connection, host-key and agent options plus its single <code>-L</code> forward, so stale config forwards cannot trip <code>ExitOnForwardFailure=yes</code>.</li>
+      <li><strong>Schedule <code>run-now</code> cannot kick a dashboard.</strong> <code>POST /api/schedules/&lt;project&gt;/&lt;id&gt;/run-now</code> on Mission Control (<code>&lt;project&gt;</code> and <code>&lt;id&gt;</code> are placeholders) now looks the job up in <code>schedules.json</code> first (<code>404</code> otherwise), re-runs <code>reject_dashboard_label</code> and verifies the canonical <code>com.cheapotto.&lt;project&gt;.&lt;id&gt;</code> label before calling <code>launchctl kickstart</code>.</li>
+      <li><strong><code>code-reviewer m1</code> validates hosts and escapes remote paths.</strong> Every <code>m1</code> SSH call rejects option-like or shell-metacharacter hosts before spawning, ends option parsing with <code>--</code> before the host, and escapes <code>$</code> and backticks inside double-quoted remote <code>sh</code> paths.</li>
+      <li><strong>Committed Code Tender KB rules can be edited or deleted in the UI.</strong> Editing or deleting a committed rule on <code>:7430</code> writes an HTML comment tombstone (<code>&lt;!-- otto-kb-deleted: &lt;key&gt; --&gt;</code>, where <code>&lt;key&gt;</code> is a placeholder for the rule text) into <code>~/.code-reviewer/kb-overrides/</code> instead of touching git-tracked files. Deleted rules stay gone on reload, in-place edits keep their slot and casing, and a later learned rule revives a tombstoned key cleanly.</li>
+      <li><strong>Agent rules have a byte-cap guard in <code>cargo test</code>.</strong> <code>AGENTS.md</code> stays below Antigravity's 24,000-byte inline expansion cap, root <code>.agents/skills.json</code> registers the Reviewer skills, and a test fails if <code>.agents/skills</code> and <code>.claude/skills</code> drift by a byte.</li>
+      <li><strong>Docs and spec PRs clear CI in seconds.</strong> PRs touching only <code>specs/</code>, <code>docs/</code>, <code>README.md</code>, <code>CONTRIBUTING.md</code> or <code>LICENSE</code> fast-pass all three required <code>Rust Gate</code> checks on Ubuntu instead of waiting 15 minutes for a queued <code>macos-latest</code> runner, while code PRs route macOS tests onto <code>macos-15-intel</code> (<code>release.yml</code> still builds native <code>aarch64-apple-darwin</code> binaries).</li>
+    </ul>
+
+    <h2>The PRs</h2>
+    <p>All seven PRs stayed inside the 600-line size budget, review fixes included (the largest, <a href="https://github.com/cokitron/cheap-otto/pull/65">#65</a>, changed 431 lines). Each row links to its PR.</p>
+    <div class="scroll-x">
+    <table class="ledger">
+      <thead><tr><th>PR</th><th>What it delivered</th></tr></thead>
+      <tbody>
+        <tr class="phase"><td colspan="2">SSH, tunnels &amp; control-plane hardening</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/61">#61</a></td><td>Guard <code>POST /api/schedules/&lt;project&gt;/&lt;id&gt;/run-now</code> against unregistered or dashboard labels, validate <code>code-reviewer m1</code> SSH hosts with <code>--</code>, and escape <code>$</code> and backticks in remote paths (P0 of <a href="https://github.com/cokitron/cheap-otto/issues/60">#60</a>).</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/64">#64</a></td><td>Add <code>CommandSpec::with_stdin</code> and stream <code>dashboards install</code>, <code>uninstall</code> and <code>status</code> scripts into <code>/bin/sh -s</code> on SSH stdin instead of <code>/bin/sh -c</code> (<a href="https://github.com/cokitron/cheap-otto/issues/55">#55</a>, <a href="https://github.com/cokitron/cheap-otto/issues/57">#57</a>).</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/65">#65</a></td><td>Resolve connection settings via <code>ssh -G -- &lt;host&gt;</code> and run <code>code-reviewer ui</code>'s fallback tunnel with <code>-F none</code> so <code>~/.ssh/config</code> <code>LocalForward</code> entries cannot collide (<a href="https://github.com/cokitron/cheap-otto/issues/46">#46</a>).</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/66">#66</a></td><td>Record UTC <code>process_started_at</code> in <code>tunnel.json</code> and require both exact command line and start time before stopping a recorded tunnel (<a href="https://github.com/cokitron/cheap-otto/issues/53">#53</a>).</td></tr>
+        <tr class="phase"><td colspan="2">Code Tender, governance &amp; CI</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/67">#67</a></td><td>Tombstone overlay in <code>~/.code-reviewer/kb-overrides/</code> so you can edit or delete committed Code Tender and brain KB rules from <code>:7430</code> without dirtying git (<a href="https://github.com/cokitron/cheap-otto/issues/3">#3</a>).</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/63">#63</a></td><td>Keep <code>AGENTS.md</code> under the 24,000-byte inline rule cap, register root <code>.agents/skills.json</code>, and enforce byte-identical skill mirrors in <code>tests/governance_and_cubic.rs</code>.</td></tr>
+        <tr><td><a href="https://github.com/cokitron/cheap-otto/pull/72">#72</a></td><td>Fast-pass docs- and spec-only PRs on Ubuntu while reporting all three required <code>Rust Gate</code> contexts green, and run code-PR macOS checks on <code>macos-15-intel</code>.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h2>Where review pushed back</h2>
+    <p>Cubic opened 18 review threads across these seven PRs, and Code Tender answered all 18 from the Mac. Three exchanges caught bugs that offline unit tests on the happy path had missed:</p>
+    <ul class="tight">
+      <li><strong><code>-F none</code> forgot trust stores (<a href="https://github.com/cokitron/cheap-otto/pull/65">#65</a>).</strong> Ignoring <code>~/.ssh/config</code> dropped <code>LocalForward</code> as intended, and also dropped <code>UserKnownHostsFile</code>, <code>GlobalKnownHostsFile</code> and <code>IdentityAgent</code>. Code Tender added quote-aware <code>ssh -G</code> parsing and <code>-o</code> quoting for paths with spaces.</li>
+      <li><strong>Timezones and 1-second clocks (<a href="https://github.com/cokitron/cheap-otto/pull/66">#66</a>).</strong> On Unix, plain <code>ps -o lstart=</code> prints local wall time with no zone, so a DST shift would make a live tunnel fail its own identity check and stay up forever. Code Tender pinned <code>TZ=UTC</code> and <code>LC_ALL=C</code>, and made new tunnel spawns fail closed if the start stamp cannot be read. Cubic also flagged that <code>lstart</code> has 1-second resolution on macOS; getting sub-second birth time there needs <code>libproc</code> (<code>unsafe</code> or a new crate, both against repo rules), while a false match already needs a recycled PID running the identical <code>ssh -N</code> argv within the same second. Code Tender documented that limit and filed <a href="https://github.com/cokitron/cheap-otto/issues/68">#68</a>.</li>
+      <li><strong>Edits in place and <code>--&gt;</code> inside rules (<a href="https://github.com/cokitron/cheap-otto/pull/67">#67</a>).</strong> Cubic caught case-only KB edits being folded away, rules containing a literal <code>--&amp;gt;</code> colliding with tombstone escaping unless <code>&amp;</code> was escaped first, and edited rules sinking to the end of the file instead of keeping their slot. Code Tender fixed all three in one commit.</li>
+    </ul>
+
+    <h2>What's left</h2>
+    <p>One live check remains on <a href="https://github.com/cokitron/cheap-otto/tree/main/specs/m1-dashboards"><code>specs/m1-dashboards</code></a>: rebooting the MacBook and recording how the LaunchAgents come back with or without automatic login (<a href="https://github.com/cokitron/cheap-otto/issues/30">#30</a>), alongside sub-second Unix birth tokens (<a href="https://github.com/cokitron/cheap-otto/issues/68">#68</a>) and the modular <code>otto-core</code> roadmap (<a href="https://github.com/cokitron/cheap-otto/issues/60">#60</a>). For what lands on the Mac next — Docker, PostgreSQL 17, dual-bot Discord control and keeping <code>.env</code> secrets off the wire and out of every agent — read the <a href="2026-11-17-docker-discord-and-env-off-the-wire.html">next post</a>.</p>
+  </article>
+</main>
+
+<footer>
+  <div class="foot-in">
+    <span><a href="../">Home</a> · <a href="./">Blog</a> · <a href="https://github.com/cokitron/cheap-otto">GitHub</a></span>
+    <span>o=o · otto reads the same both ways</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var btns = Array.prototype.slice.call(document.querySelectorAll('[data-theme-btn]'));
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    btns.forEach(function (b) { b.classList.toggle('on', b.dataset.themeBtn === t); b.setAttribute('aria-pressed', b.dataset.themeBtn === t); });
+    try { localStorage.setItem('otto-theme', t); } catch (e) {}
+  }
+  btns.forEach(function (b) { b.addEventListener('click', function () { setTheme(b.dataset.themeBtn); }); });
+  setTheme(document.documentElement.getAttribute('data-theme') || 'night');
+})();
+</script>
+</body>
+</html>
