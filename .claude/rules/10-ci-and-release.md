@@ -16,9 +16,9 @@ Runs on pushes to `main` and on every pull request. A newer push to the same PR 
 | Job | Runs on | What it checks |
 | --- | --- | --- |
 | `PR Governance & Secret Guard` | Ubuntu | The PR title is a Conventional Commit; a same-repo branch uses an approved prefix (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`, `test/`, `ci/`, `perf/`, `otto/`, `dependabot/`, `claude/`); no tracked `.env` or `.env.*` (the template `.env.example` is allowed), `*.token`, `*.pem`, `*.key`, `peer.json`, `state-backup.json` or `crates/code-reviewer/config/repos.toml` |
-| `Rust Gate (ubuntu-latest)`, `(macos-latest)`, `(windows-latest)` | each OS | `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo test --workspace --all-targets --locked`; Ubuntu also runs `cargo fmt --all -- --check` |
+| `Rust Gate (ubuntu-latest)`, `(macos-latest)`, `(windows-latest)` | Ubuntu, macOS (`macos-15-intel`), Windows (fast-passed on Ubuntu when a PR touches only `specs/`, `docs/`, `README.md`, `CONTRIBUTING.md` or `LICENSE`) | `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo test --workspace --all-targets --locked`; Ubuntu also runs `cargo fmt --all -- --check` |
 
-- The gate runs on all three OSes, so a path separator, a line ending or a shell assumption fails the PR. Build paths with `Path::join`, never assert on separators, and gate OS-specific branches with `cfg`.
+- For code-changing PRs the gate runs on all three OSes, so a path separator, a line ending or a shell assumption fails the PR. Docs- or spec-only PRs are fast-passed on Ubuntu (see the `Rust Gate` row above) and skip the Rust checks. Build paths with `Path::join`, never assert on separators, and gate OS-specific branches with `cfg`.
 - Local toolchains differ too (the Windows workstation may be `windows-gnu`; CI and releases use `windows-msvc`). Don't rely on either's quirks.
 - `--locked` means a stale `Cargo.lock` fails the tests. Commit the lockfile with every manifest change.
 - `tests/governance_and_cubic.rs` checks `cubic.yaml`: each Cubic custom rule's description plus the files it lists must stay under 10,000 characters. Rules 01, 02, 03, 04 and 06 and the two `.ai/` files are those instruction files, so keep them lean and put detail in the other rule files.
