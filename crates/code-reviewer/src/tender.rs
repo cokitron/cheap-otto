@@ -4617,6 +4617,42 @@ gdocs_bin = "gdocs"
         )
         .unwrap();
         assert_eq!(overlay, "- private rule\n");
+
+        // Deleting or editing committed rules across `notes`, `lessons`, and shared KB files
+        // persists tombstones so the deleted committed rule does not reappear on reload.
+        save_tender_agent_notes(&ws, agent, None, Some("- edited rule\n")).unwrap();
+        assert_eq!(load_tender_agent_notes(&ws, agent), "- edited rule\n");
+
+        let kb_dir = ws.join("tender-agents/kb");
+        fs::create_dir_all(&kb_dir).unwrap();
+        fs::write(
+            kb_dir.join("patterns-fixed.md"),
+            "# Patterns\n\n- `[*]` Keep rule.\n- `[*]` Drop rule.\n",
+        )
+        .unwrap();
+        save_tender_kb_file(
+            &ws,
+            "patterns-fixed",
+            "# Patterns\n\n- `[*]` Keep rule.\n- `[acme/app]` Custom replacement.\n",
+        )
+        .unwrap();
+        let payload = load_tender_kb_payload(&ws);
+        assert_eq!(
+            payload["patterns_fixed"].as_str(),
+            Some("# Patterns\n\n- `[*]` Keep rule.\n- `[acme/app]` Custom replacement.\n")
+        );
+
+        // Re-adding the deleted committed rule via `append_tender_kb_entry` revives it cleanly.
+        assert!(append_tender_kb_entry(&ws, "patterns-fixed", None, "`[*]` Drop rule.").unwrap());
+        let revived = load_tender_kb_payload(&ws);
+        let text = revived["patterns_fixed"].as_str().unwrap_or_default();
+        assert!(text.contains("- `[*]` Drop rule."), "{text}");
+
+        fs::create_dir_all(agent_dir.join("kb")).unwrap();
+        fs::write(agent_dir.join("kb/lessons.md"), "- `[*]` Old lesson\n").unwrap();
+        save_tender_agent_lessons(&ws, agent, "").unwrap();
+        assert_eq!(load_tender_agent_lessons(&ws, agent), "");
+
         let _ = fs::remove_dir_all(&ws);
     }
 
