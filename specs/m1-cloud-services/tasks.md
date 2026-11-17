@@ -47,8 +47,8 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
   3. Implement `parse_services_status(&str) -> ServicesStatusReport`.
 - **Tests** in `src/services.rs`:
   - `sizes_colima_vm_for_16gb_m1_and_8gb_hosts`
-  - `up_script_starts_postgres_and_colima_without_lan_binds`
-  - `parses_remote_services_status_output`
+  - `up_script_starts_postgres_and_colima_without_lan_binds` (also asserts the `listen_addresses = '127.0.0.1'` check and the restart when it differs)
+  - `parses_remote_services_status_output` (also covers `POSTGRES_BIND`)
 - **Acceptance:** `cargo test -p cheap-otto --lib services::tests` passes.
 
 ### T1.3 SSH Unix-socket + port tunnel spec and Docker context commands
@@ -58,13 +58,14 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Depends on:** T1.1
 - **Files:** `src/services.rs`
 - **Steps:**
-  1. Implement `validate_remote_unix_socket(&str)` rejecting relative paths, colons, whitespace or shell metacharacters.
+  1. Implement `validate_remote_unix_socket(&str)` accepting only absolute `/Users/...` or `/var/...` POSIX paths and rejecting colons, whitespace or shell metacharacters.
   2. Implement `build_services_tunnel_spec(&PeerNode, &ServicesConfig, &str)` with `-N -F none`, the five `TUNNEL_SSH_OPTIONS`, `127.0.0.1:<docker_port>:<remote_sock>`, optional Postgres forward, app forwards, and `-- <user>@<host>`.
-  3. Add `ServicesTunnelRecord` (with `process_started_unix_ms`) and `build_docker_context_upsert_specs` / `build_docker_context_restore_spec`.
+  3. Add `ServicesTunnelRecord` (with `process_started_unix_ms` and `ssh_port`), a `command_line_is_services_tunnel` helper that matches the exact argv from `build_services_tunnel_spec`, and `build_docker_context_upsert_specs` / `build_docker_context_restore_spec`.
 - **Tests** in `src/services.rs`:
   - `rejects_unsafe_remote_unix_socket_paths`
   - `builds_ssh_tunnel_with_socket_postgres_and_app_forwards`
   - `builds_docker_context_create_update_and_use_commands`
+  - `services_tunnel_record_requires_exact_argv_and_matching_peer`
 - **Acceptance:** `cargo test -p cheap-otto --lib services::tests` passes.
 
 ### T1.4 Unified memory budget & arbiter alignment for 4 GiB Colima
@@ -75,8 +76,11 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/hardware.rs`, `src/arbiter.rs`
 - **Steps:**
   1. Add a helper on `MemoryBudget` / `ColimaVmSpec` accounting for active 4 GiB Colima co-tenancy alongside CI/agent workloads without breaking existing `hardware::tests`.
-  2. Verify `WorkloadArbiter` pauses batch queues on `ThermalLevel::Serious` or low available unified memory when Colima is active.
-- **Tests:** `colima_active_budget_preserves_safety_headroom_on_16gb_air`
+  2. Add/ensure `WorkloadArbiter` pauses batch queues on `ThermalLevel::Serious` or low available unified memory when Colima is active.
+- **Tests:**
+  - `colima_active_budget_preserves_safety_headroom_on_16gb_air`
+  - `colima_budget_headroom_boundary_is_inclusive_at_threshold`
+  - `arbiter_pauses_batch_queues_when_colima_active_and_memory_low`
 - **Acceptance:** `cargo test -p cheap-otto --lib hardware::tests` and `arbiter::tests` pass.
 
 ## Phase 2: CLI orchestration (`src/main.rs`)
@@ -89,8 +93,8 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
   1. Add `Services` subcommand (`status`, `ports list|add|remove`) gated by `--execute` / `--apply`.
-  2. Persist `.cheap-otto/services.json` and hot-reload the services tunnel if `.cheap-otto/services-tunnel.json` is active.
-- **Tests** in `tests/cli_integration.rs`: `services_ports_and_status_dry_run_and_temp_state_work`
+  2. Persist `.cheap-otto/services.json`, also persist `.cheap-otto/services-status.json` on `status --execute`, and hot-reload the services tunnel if `.cheap-otto/services-tunnel.json` is active.
+- **Tests** in `tests/cli_integration.rs`: `services_ports_and_status_dry_run_and_temp_state_work` (also covers `services-status.json`)
 - **Acceptance:** `cargo test --test cli_integration services_ports` passes.
 
 ### T2.2 `cheap-otto services up` and `services down`
@@ -101,7 +105,7 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
   1. Implement `services up` (dry-run prints remote start script + SSH tunnel + `docker context` commands; `--execute` runs remote startup over SSH stdin, spawns detached `ssh -N -F none`, verifies local forwards open within 5 s, records `services-tunnel.json`, and configures `docker context` when `docker` is on `PATH`).
-  2. Implement `services down` (verifies recorded PID + start time before stopping, restores `default` Docker context if `otto-mac` was active, and optionally stops remote Colima on `--stop-remote`).
+  2. Implement `services down` (verifies the recorded PID, start time, command line and peer before stopping, restores `default` Docker context if `otto-mac` was active, and optionally stops remote Colima on `--stop-remote`).
 - **Tests** in `tests/cli_integration.rs`: `services_up_and_down_dry_run_and_isolated_stop_work`
 - **Acceptance:** `cargo test --test cli_integration services_up_and_down` passes.
 
@@ -114,9 +118,9 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Depends on:** T1.3
 - **Files:** `src/server.rs`, `src/ui.html` (or embedded Mission Control view)
 - **Steps:**
-  1. Add `GET /api/services` behind `RequestGuard`, reading `.cheap-otto/services.json` and `.cheap-otto/services-tunnel.json`.
+  1. Add `GET /api/services` behind `RequestGuard`, reading `services.json`, `services-tunnel.json` and `services-status.json` under `state.config.state_dir`.
   2. Render a compact M1 Backing Services card (`Docker :23750`, `Postgres :5432`, forwarded app ports) in Mission Control.
-- **Tests** in `src/server.rs`: `api_services_returns_configured_forwards_and_tunnel_state`
+- **Tests** in `src/server.rs`: `api_services_returns_configured_forwards_and_tunnel_state` (covers health present and null)
 - **Acceptance:** `cargo test -p cheap-otto --lib server::tests` passes.
 
 ### T4.1 Operator and agent documentation
@@ -134,7 +138,7 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 
 - [ ] Open (**LIVE** — owner approval required)
 - **Covers:** R1.3, R2.1, R2.3, R3.1
-- **Acceptance:** On Windows, `cheap-otto services up --use-context --port 8088:80 --execute` succeeds; `docker info` shows the M1's `aarch64` Colima server; `pg_isready` / TCP connect to `127.0.0.1:5432` reaches M1 PostgreSQL 17; `docker run -d --rm -p 127.0.0.1:8088:80 nginx:alpine` answers at `http://127.0.0.1:8088` on Windows while dashboard ports `7420`/`7430` stay uninterrupted.
+- **Acceptance:** On Windows, `cheap-otto services up --use-context --port 8088:8088 --execute` succeeds; `docker info` shows the M1's `aarch64` Colima server; `pg_isready` / TCP connect to `127.0.0.1:5432` reaches M1 PostgreSQL 17; `docker run -d --rm -p 127.0.0.1:8088:80 nginx:alpine` answers at `http://127.0.0.1:8088` on Windows while dashboard ports `7420`/`7430` stay uninterrupted.
 
 ### T5.2 LIVE: Clean teardown & reboot resilience
 

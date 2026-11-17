@@ -26,7 +26,7 @@ This spec adds a pure planner and CLI workflow (`cheap-otto services ...`) that 
 
 1. The system SHALL model the backing services in a pure module `src/services.rs` with stable ids `colima` and `postgres`.
 2. WHEN planning Colima startup for a [`HardwareProfile`] (`src/hardware.rs`) THEN the system SHALL size the VM within unified memory (`4` CPUs and `4` GiB RAM on 16 GiB hosts, `2` CPUs and `2` GiB RAM on 8 GiB hosts) using `--vm-type vz --mount-type virtiofs` on Apple Silicon.
-3. WHEN `cheap-otto services up --execute` runs THEN the system SHALL start PostgreSQL (`brew services start postgresql@17`) and Colima on the Mac if not already running, wait until `~/.colima/default/docker.sock` exists and `127.0.0.1:5432` accepts connections (up to 30 s), and exit non-zero with diagnosis if either fails.
+3. WHEN `cheap-otto services up --execute` runs THEN the system SHALL start PostgreSQL (`brew services start postgresql@17`) and Colima on the Mac if not already running, wait until `~/.colima/default/docker.sock` exists and `127.0.0.1:5432` accepts connections (up to 30 s), and verify that PostgreSQL's `listen_addresses` is loopback-only (set to `127.0.0.1` and restart PostgreSQL if it is not), and exit non-zero with diagnosis if any of these fails.
 4. The system SHALL NOT configure Colima or PostgreSQL to listen on a non-loopback Mac network interface.
 5. WHEN `cheap-otto services status --execute` runs THEN the system SHALL probe the Mac over SSH stdin and report `colima` state, Docker socket path, running container count, `postgres` listener state on `127.0.0.1:5432`, and unified swap usage.
 
@@ -55,5 +55,5 @@ This spec adds a pure planner and CLI workflow (`cheap-otto services ...`) that 
 **User story:** As the operator, I want Mission Control (`:7420`) and the workload arbiter to account for Colima and PostgreSQL so parallel agent/CI runs do not push the 16 GB Air into swap thrashing.
 
 1. [`HardwareProfile::compute_memory_budget`] (`src/hardware.rs`) or a companion `ServicesBudget` helper SHALL expose the Colima VM ceiling (`4096` MiB on 16 GiB hosts) so [`WorkloadArbiter`] (`src/arbiter.rs`) pauses background queues when thermal level reaches `Serious` or free unified memory drops below safety headroom.
-2. Mission Control (`src/server.rs`) SHALL expose `GET /api/services` returning the configured service ports and latest cached/probed backing-service health, guarded by `RequestGuard`.
+2. Mission Control (`src/server.rs`) SHALL expose `GET /api/services` returning the configured service ports, the tunnel state and the last cached backing-service health persisted by `services status --execute` (`null` when never probed), guarded by `RequestGuard`, and the endpoint SHALL NOT probe the Mac itself.
 3. Every mutating `services` subcommand without `--execute` (or `--apply`) SHALL perform zero network, process or state-file writes and print the exact commands it would run.
