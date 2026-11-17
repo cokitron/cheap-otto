@@ -93,8 +93,8 @@ After PR 8, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
 - **Steps:**
   1. Add `Services` subcommand (`status`, `ports list|add|remove`) gated by `--execute` / `--apply`.
-  2. Persist `.cheap-otto/services.json`, also persist `.cheap-otto/services-status.json` on `status --execute`, and hot-reload the services tunnel if `.cheap-otto/services-tunnel.json` is active.
-- **Tests** in `tests/cli_integration.rs`: `services_ports_and_status_dry_run_and_temp_state_work` (also covers `services-status.json`)
+  2. Persist `state_dir.join("services.json")` and, on `status --execute`, `state_dir.join("services-status.json")`, each written to a sibling temp file in the same directory and then atomically renamed over the target, so `GET /api/services` never reads a torn file and maps absent or corrupt content to `health: null`. Hot-reload the services tunnel if `state_dir.join("services-tunnel.json")` is active. `state_dir` is the resolved state directory (`--state-dir`, then `./.cheap-otto`, then the repo root, then `~/.cheap-otto`).
+- **Tests** in `tests/cli_integration.rs`: `services_ports_and_status_dry_run_and_temp_state_work` runs with a temp `--state-dir`, asserts `services-status.json` is written there and not under `./.cheap-otto`, and checks that no temp file is left behind
 - **Acceptance:** `cargo test --test cli_integration services_ports` passes.
 
 ### T2.2 `cheap-otto services up` and `services down`
