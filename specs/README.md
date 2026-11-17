@@ -79,3 +79,4 @@ Copy the structure of an existing spec folder. Keep requirement and task ids sta
 | Spec | Goal | Status |
 | --- | --- | --- |
 | [`m1-dashboards`](m1-dashboards/README.md) | Every dashboard runs as a service on the MacBook and reaches the workstation through one SSH tunnel | Implemented; the owner's two LIVE tasks (T6.1, T6.2) remain |
+| [`m1-chat-control`](m1-chat-control/README.md) | Talk independently to `@Claude` and `@Agy` from Discord across parallel multi-account Git worktrees (`~/repos/<gh-account>/`) | Planned (7 implementation PRs + 2 LIVE tasks) |
