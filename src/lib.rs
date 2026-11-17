@@ -11,6 +11,7 @@ pub mod bridge;
 pub mod command;
 pub mod dashboards;
 pub mod doctor;
+pub mod env_secrets;
 pub mod hardware;
 pub mod harness;
 pub mod macos;

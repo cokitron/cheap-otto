@@ -1,0 +1,66 @@
+# Requirements: Zero-wire `.env` management and agent-isolated secret brokering
+
+## Introduction
+
+`cheap-otto sync` moves source code from Windows to `otto-mac` via `git push`, while `.gitignore` and CI's `PR Governance & Secret Guard` block `.env` and `.env.*` (except `.env.example`) from Git. Workloads running on the Mac — native `exec` tests, `launchd` CI schedules, `m1-cloud-services` containers/migrations, and `m1-chat-control` brokered checks — still need runtime environment variables, yet shipping raw `.env` files across the bridge or placing `.env` inside agent worktrees exposes plaintext credentials on the wire, in logs, and to external LLM APIs.
+
+This spec adds a pure Rust planner and verifier (`src/env_secrets.rs`) plus `cheap-otto env ...` CLI subcommands so Windows and the Mac stay synchronized on `.env` contracts via schema and ephemeral `HMAC-SHA256` fingerprint probes without ever transmitting secret values across the bridge or exposing secrets to coding agents.
+
+## Glossary
+
+| Term | Meaning |
+| --- | --- |
+| Mac | The paired headless Apple Silicon MacBook (`PeerNode` in `src/bridge.rs`, alias `otto-mac`) |
+| Workstation | The operator's Windows (or Linux/macOS) machine running `cheap-otto` |
+| Env scope | `{ project, profile, subpath }` keying one secret set across `~/otto-workspaces/<project>` and `~/repos/<gh-account>/<project>` |
+| Secret store | Operator-owned `0700` tree `~/.cheap-otto/env/<project>/<profile>/tree/[<subpath>/].env` (`0600` leaf files) and optional macOS Login Keychain items (`com.cheapotto.env.<project>.<profile>`) |
+| Reference manifest | `.env.otto.toml` (optional, repo-tracked) or `.cheap-otto/env-refs.json` mapping variable names to vault URIs (`op://`, `gcloud:`, `keychain:`) and never raw secrets |
+| Ephemeral digest | `HMAC-SHA256(nonce, key \|\| 0x00 \|\| value)` computed per `env diff --execute` run with a single-use 256-bit random nonce |
+| Execute gate | `--execute` (alias `--apply`); without it, mutating or probing commands print their deterministic plan and perform zero network, process or state-file I/O |
+
+## Requirements
+
+### R1. Shared project/profile/subpath scoping & strict `.env` parsing
+
+**User story:** As an operator running monorepos and multi-account checkouts on the Mac, I want one validated `.env` scope per project, profile and package subpath shared between `otto-workspaces` and `~/repos/<gh-account>/`, with dangerous environment overrides rejected up front.
+
+1. The system SHALL key every environment secret set by `EnvScope { project, profile, subpath }`, where `project` and `profile` (default `"dev"`) pass `validate_safe_identifier` (`src/bridge.rs`) and optional `subpath` is `/`‑separated relative segments (`1..=8` segments, `<= 128` bytes total), each starting with ASCII `[A-Za-z0-9]` and containing only `[A-Za-z0-9._-]` with no `..`, `.` or `\`.
+2. The system SHALL map `subpath = None` to `~/.cheap-otto/env/<project>/<profile>/tree/.env` and `subpath = Some("<s1>/<s2>")` to `~/.cheap-otto/env/<project>/<profile>/tree/<s1>/<s2>/.env` so root and nested monorepo scopes never collide on disk.
+3. The system SHALL validate every variable name against `^[A-Za-z_][A-Za-z0-9_]*$` and SHALL reject blocked execution-hijack names (case-insensitively): `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `IFS`, `CDPATH`, `SSH_AUTH_SOCK`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `NODE_OPTIONS`, `PYTHONSTARTUP`, `PYTHONPATH`, `RUBYOPT`, `PERL5OPT`, `RUSTC_WRAPPER`, and `CARGO_BUILD_RUSTC_WRAPPER`.
+4. WHEN parsing `.env` or `.env.example` text THEN `parse_dotenv` SHALL support blank lines, `#` comments, optional `export ` prefixes, unquoted values (stripping inline ` #...` comments preceded by whitespace), literal `'...'` values, and `"..."` values (`\n`, `\r`, `\t`, `\"`, `\\`, `\$`), and SHALL return a typed error on malformed keys, unclosed quotes, or interior NUL (`\0`) bytes.
+
+### R2. Zero-wire schema & ephemeral HMAC-SHA256 drift communication
+
+**User story:** As a developer working across Windows and the Mac, I want to verify which `.env` keys are synced, missing or drifted between both machines without any secret value or static brute-forceable hash crossing the wire or landing on disk.
+
+1. The system SHALL never transmit raw `.env` files or secret values from the workstation to the Mac (or from the Mac to the workstation) in `git` syncs, SSH `argv`, SSH `stdout`, dry-run printouts, `history.jsonl`, or Mission Control HTTP payloads.
+2. WHEN `cheap-otto env diff --execute` or `cheap-otto env status --execute` runs THEN the workstation SHALL generate a fresh 256-bit random nonce, stream the nonce over SSH `stdin` (`ssh -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -p <port> -- <user>@<host> "/bin/sh -s"`) to `~/.cargo/bin/cheap-otto env mac-digest`, and receive back only `KEY=<name> DIGEST=<hex> SOURCE=<file|keychain>` lines.
+3. `env mac-digest` SHALL compute `HMAC-SHA256(nonce, key || 0x00 || value)` in pure safe Rust (`#![forbid(unsafe_code)]`, zero external crates) so domain separation between key and value is injective and digests are useless outside that single probe run.
+4. Comparing `.env.example`, workstation `.env` (when present) and Mac digests SHALL classify every union key as `Synced`, `ValueDrift`, `MissingOnMac`, `MissingOnWindows`, `MissingBoth`, or `UndeclaredExtra`, and persist ONLY key names, classification states, sources and probe timestamp (never values or digests) to `.cheap-otto/env-status.json` via a PID-named `0600` temp file and atomic rename under an exclusive `env.lock` in the resolved state directory (`--state-dir`, `./.cheap-otto`, repo-root `.cheap-otto`, then `~/.cheap-otto`).
+5. WHEN any `cheap-otto env` command runs without `--execute` (or `--apply`) THEN it SHALL perform zero network, subprocess or state-file writes and print only variable names and command previews (never secret values, even from a local workstation `.env`).
+
+### R3. Mac-local TTY entry & per-machine vault reference pulls
+
+**User story:** As the operator, I want to enter secrets directly onto the Mac over an interactive TTY or pull them independently on each machine from a vault CLI (`op`, `gcloud`, `keychain`), with zero `ps` or temp-file permission leaks.
+
+1. WHEN `cheap-otto env set <KEY> --remote --execute` runs THEN the workstation SHALL open `ssh -t -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -p <port> -- <user>@<host>` invoking `~/.cargo/bin/cheap-otto env set-local`, which reads the secret directly from `/dev/tty` on the Mac with echo disabled (restoring terminal settings on exit or signal) so the workstation process never reads or touches the secret value.
+2. WHEN writing to `~/.cheap-otto/env/` THEN the system SHALL create `~/.cheap-otto/env` and scope directories with mode `0700`, acquire `~/.cheap-otto/env/env.lock`, open a sibling temp file with mode `0600` at creation time (`OpenOptionsExt::mode(0o600)` on Unix before writing any bytes), `sync_all()`, and atomically rename into place (removing the temp file on failure).
+3. IF `--keychain` is passed to `env set` / `env set-local` on macOS THEN the system SHALL write the secret via `/usr/bin/security -i` with the `add-generic-password -U` command piped on `stdin` (never `-w <secret>` in `argv`) under bijective service name `com.cheapotto.env/<project>/<profile>[/<subpath>]` and record the key name in `~/.cheap-otto/env/<project>/<profile>/keychain.json` (`0600`) so `ps` never exposes the value and `.env` files need no sentinel strings.
+4. WHEN `cheap-otto env pull --local|--remote --execute` runs THEN the target machine SHALL read validated `SecretRef` entries (`op://<vault>/<item>/<field>`, `gcloud:<project>/<secret>[#<version>]`, or `keychain:<service>/<account>`, rejecting leading `-` and shell metacharacters; for `--remote`, streaming only the validated non-secret `SecretRef` manifest over SSH `stdin` to `env pull-local`) and invoke the matching local CLI (`op`, `gcloud`, `security`) with discrete `Command::args` on that machine directly into its local store without sending secret bytes across the bridge.
+
+### R4. Strict coding-agent secret isolation & worktree hygiene
+
+**User story:** As the operator delegating tasks to `claude`, `agy`, `kiro` and Code Tender, I want zero `.env` files in agent worktrees and zero secret environment variables in agent processes so prompt-injected repositories cannot exfiltrate credentials.
+
+1. `cheap-otto delegate`, `ask`, `schedule --agent`, `chat dispatch` agent turns, `code-reviewer` brains, and Code Tender workers SHALL never receive secret variables from `~/.cheap-otto/env/` or macOS Keychain in their child environment, and `delegate` / `ask` SHALL not accept a `--with-env` flag.
+2. Agent worktrees (`~/otto-workspaces/<project>/.otto-worktrees/<task-id>` and `~/repos/<gh-account>/.worktrees/<repo>--<slug>`) SHALL contain zero `.env` or `.env.*` files other than git-tracked `.env.example`; optional non-secret dummy test defaults in `.env.example` annotated with `# @otto:agent-dummy=<literal>` SHALL pass only when `<literal>` contains no userinfo credentials (`://user:pass@`) or token prefixes (`sk-`, `ghp_`, `gho_`, `xox`, `eyJ`).
+3. `~/.cheap-otto/env/` SHALL remain owned by the operator macOS UID with mode `0700` (`0600` files) so agent turns running under `#71`'s separate agent macOS user cannot read the secret store via filesystem access.
+4. Before any brokered post-turn `git add` / `git commit`, the worktree hygiene check SHALL inspect untracked and modified paths via `git status --porcelain -uall` (expanding untracked subdirectories) and fail closed without staging if any path matches `.env` or `.env.*` (other than `.env.example`).
+
+### R5. Operator-brokered workload injection, output redaction & Mission Control visibility
+
+**User story:** As a developer running tests, migrations and dev servers on the Mac, I want authorized non-agent commands to receive scoped `.env` variables in memory with accidental secret prints scrubbed from logs and status visible in Mission Control.
+
+1. WHEN `cheap-otto exec --with-env [=<profile>] [--subpath <s>] --cmd "<cmd>" --execute` runs (or `~/.cargo/bin/cheap-otto env run` runs directly on the Mac for `schedule --ci --with-env` and brokered verification) THEN `env run` under the operator UID SHALL resolve the scoped `0600` file and Keychain entries, re-validate `R1.3`, and inject variables via `Command::envs` with zero `KEY=VALUE` strings in `argv`.
+2. `env run` SHALL pass child `stdout` and `stderr` through `redact_secret_values`, replacing every loaded secret of length `>= 6` bytes (except pure boolean `"true"`/`"false"` and `<= 5`-digit integers), plus its URL-encoded and JSON-escaped forms, sorted longest-value-first, with `[REDACTED:<KEY>]` before writing to logs or terminal output.
+3. Mission Control (`src/server.rs`) SHALL expose `GET /api/env` guarded by `RequestGuard`, reading `.cheap-otto/env-status.json` from `ServeConfig.state_dir` (`null` when absent or corrupt) without probing SSH or reading `~/.cheap-otto/env/` secret files, and returning only project, profile, subpath, timestamp and per-key `EnvKeySyncState` counts/labels.
