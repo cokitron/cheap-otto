@@ -65,16 +65,17 @@ pub enum EnvError {
 
 /// Validated `{ project, profile, subpath }` identifier keying a secret set across
 /// `~/otto-workspaces/<project>` and `~/repos/<gh-account>/<project>`.
+///
+/// Fields are private so every scope passes through [`EnvScope::new`]. Identifiers are
+/// case-folded to ASCII lowercase so store paths and Keychain services cannot collide on
+/// case-insensitive filesystems.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "EnvScopeWire")]
 pub struct EnvScope {
-    /// Canonical repository or project slug (`"cheap-otto"`).
-    pub project: String,
-    /// Environment profile slug (`"dev"`, `"test"`).
-    pub profile: String,
-    /// Optional validated monorepo relative subpath (`Some("apps/web")`).
+    project: String,
+    profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subpath: Option<String>,
+    subpath: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +105,8 @@ impl TryFrom<EnvScopeWire> for EnvScope {
 }
 
 impl EnvScope {
-    /// Validates and constructs an [`EnvScope`].
+    /// Validates and constructs an [`EnvScope`], case-folding project, profile and subpath to
+    /// ASCII lowercase so distinct spellings cannot map to one path on case-insensitive filesystems.
     ///
     /// # Errors
     /// Returns [`EnvError::InvalidProject`], [`EnvError::InvalidProfile`], or
@@ -119,10 +121,31 @@ impl EnvScope {
             return Err(EnvError::InvalidProfile(profile.to_string()));
         }
         Ok(Self {
-            project: clean_project.to_string(),
-            profile: clean_profile.to_string(),
-            subpath: subpath.map(validate_subpath).transpose()?,
+            project: clean_project.to_ascii_lowercase(),
+            profile: clean_profile.to_ascii_lowercase(),
+            subpath: subpath
+                .map(validate_subpath)
+                .transpose()?
+                .map(|s| s.to_ascii_lowercase()),
         })
+    }
+
+    /// Canonical lowercase repository or project slug (`"cheap-otto"`).
+    #[must_use = "returns the validated project slug"]
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// Canonical lowercase environment profile slug (`"dev"`, `"test"`).
+    #[must_use = "returns the validated profile slug"]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Canonical lowercase monorepo relative subpath (`Some("apps/web")`), if any.
+    #[must_use = "returns the validated subpath"]
+    pub fn subpath(&self) -> Option<&str> {
+        self.subpath.as_deref()
     }
 
     /// Relative path under `~/.cheap-otto/` for the `0600` secret file (`env/<p>/<prof>/tree/[<s>/].env`).
@@ -302,10 +325,12 @@ fn parse_dotenv_inner(raw: &str, parse_dummies: bool) -> Result<InnerParseOutput
         }
         if let Some(after_hash) = rest.strip_prefix('#') {
             let (comment_line, after_line) = split_at_newline(after_hash);
-            if parse_dummies
-                && let Some(lit) = comment_line.trim().strip_prefix("@otto:agent-dummy=")
-            {
-                pending_dummy = Some((line_no, lit.trim().to_string()));
+            if parse_dummies {
+                // Any non-marker comment clears the marker so it only binds to the key directly below.
+                pending_dummy = comment_line
+                    .trim()
+                    .strip_prefix("@otto:agent-dummy=")
+                    .map(|lit| (line_no, lit.trim().to_string()));
             }
             rest = advance_newline(after_line, &mut line_no);
             continue;
@@ -460,8 +485,8 @@ fn validate_agent_dummy_literal(key: &str, literal: &str) -> Result<(), EnvError
     }
     let lower = literal.to_ascii_lowercase();
     for pfx in [
-        "sk-", "rk_live_", "sk_live_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxb-", "xoxp-",
-        "xoxa-", "xapp-",
+        "sk-", "rk_live_", "sk_live_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xox", "xoxb-",
+        "xoxp-", "xoxa-", "xapp-",
     ] {
         if lower.contains(pfx) {
             return reject(&format!("token prefix '{pfx}' is forbidden in agent dummy"));
@@ -516,6 +541,45 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<EnvScope>(bad_json).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn scope_identifiers_are_case_canonical_so_store_paths_cannot_collide_on_case_insensitive_filesystems()
+    -> Result<(), EnvError> {
+        let lower = EnvScope::new("foo", "dev", Some("apps/web"))?;
+        let mixed = EnvScope::new("Foo", "DEV", Some("Apps/Web"))?;
+        assert_eq!(mixed, lower);
+        assert_eq!(mixed.relative_store_path(), lower.relative_store_path());
+        assert_eq!(mixed.keychain_service(), lower.keychain_service());
+        assert_eq!(
+            (mixed.project(), mixed.profile(), mixed.subpath()),
+            ("foo", "dev", Some("apps/web"))
+        );
+        assert_eq!(EnvScope::new("foo", "dev", None)?.subpath(), None);
+        let rejected = serde_json::from_str::<EnvScope>(r#"{"project":"Foo","profile":"dev"}"#)
+            .map_err(|e| e.to_string())
+            .err()
+            .unwrap_or_default();
+        assert!(
+            rejected.contains(&EnvError::NonCanonicalScope("project".to_string()).to_string()),
+            "{rejected}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_dummy_marker_does_not_survive_an_intervening_comment_or_blank_line()
+    -> Result<(), EnvError> {
+        let schema = parse_env_example("# @otto:agent-dummy=abc\n# ordinary note\nSOME_KEY=\n")?;
+        assert!(schema.agent_dummies.is_empty());
+        let schema = parse_env_example("# @otto:agent-dummy=abc\n\nSOME_KEY=\n")?;
+        assert!(schema.agent_dummies.is_empty());
+        let schema = parse_env_example("# @otto:agent-dummy=abc\nSOME_KEY=\n")?;
+        assert_eq!(
+            schema.agent_dummies.get("SOME_KEY").map(String::as_str),
+            Some("abc")
+        );
         Ok(())
     }
 
@@ -586,6 +650,9 @@ mod tests {
             "# @otto:agent-dummy=sk-proj-123456789\nOPENAI_API_KEY=\n",
             "# @otto:agent-dummy=ghp_1234567890abcdef\nGITHUB_API_TOKEN=\n",
             "# @otto:agent-dummy=eyJhbGciOiJIUzI1NiJ9.x.y\nJWT_TOKEN=\n",
+            "# @otto:agent-dummy=xoxs-123456\nSLACK_TOKEN=\n",
+            "# @otto:agent-dummy=xoxe.xoxp-1-abc\nSLACK_REFRESH_TOKEN=\n",
+            "# @otto:agent-dummy=xoxe-1-abc\nSLACK_CONFIG_TOKEN=\n",
         ] {
             assert!(matches!(
                 parse_env_example(bad),

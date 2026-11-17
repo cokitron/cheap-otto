@@ -27,10 +27,11 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/env_secrets.rs` (new), `src/lib.rs`
 - **Steps:**
   1. Create `src/env_secrets.rs` (`#![forbid(unsafe_code)]`, zero I/O) with `EnvError`, `EnvScope`, `BLOCKED_ENV_KEYS`, `validate_env_key`, `parse_dotenv`, `render_dotenv`, and `parse_env_example`.
-  2. Enforce `EnvScope` bijective store paths (`env/<project>/<profile>/tree/.env` and `env/<project>/<profile>/tree/<subpath>/.env`) and reject unsafe `project`, `profile` or `subpath` segments.
+  2. Enforce `EnvScope` bijective store paths (`env/<project>/<profile>/tree/.env` and `env/<project>/<profile>/tree/<subpath>/.env`), keep its fields private behind `project()`, `profile()` and `subpath()` accessors with `EnvScope::new` as the only constructor, ASCII-lowercase every identifier in `EnvScope::new`, and reject unsafe `project`, `profile` or `subpath` segments.
   3. Export `pub mod env_secrets;` in `src/lib.rs` in alphabetical order.
 - **Tests** in `src/env_secrets.rs`:
   - `scope_paths_are_bijective_across_root_and_nested_monorepo_subpaths`
+  - `scope_identifiers_are_case_canonical_so_store_paths_cannot_collide_on_case_insensitive_filesystems`
   - `rejects_blocked_execution_hijack_and_malformed_env_keys`
   - `parses_quoted_escaped_and_commented_dotenv_and_rejects_nul_or_unclosed_quotes`
   - `parses_env_example_and_rejects_credential_bearing_agent_dummies`
@@ -59,15 +60,17 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Depends on:** T1.1, T1.2
 - **Files:** `src/env_secrets.rs`
 - **Steps:**
-  1. Implement `SecretRef` (`Op`, `Gcloud`, `Keychain`) parser and `build_vault_pull_spec(&SecretRef)` using discrete argument arrays and rejecting option-like (`-`) or metacharacter segments.
-  2. Implement `build_mac_digest_probe_spec` (streaming `NONCE=<hex>` via `CommandSpec::with_stdin` over `ssh -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -p <port> -- <user>@<host> "/bin/sh -s"`), `build_remote_set_tty_spec` (`ssh -t`), `build_remote_pull_spec`, and `render_security_stdin_upsert` (`/usr/bin/security -i` stdin command with zero `-w` argv).
-  3. Implement single-pass longest-first `redact_secret_values` (covering raw, URL-encoded and JSON-escaped variants of secrets with `len >= 6`, skipping `"true"`, `"false"` and `<= 5`-digit integers) and `find_forbidden_worktree_env_paths` flagging `.env` and `.env.*` at any depth except `.env.example`.
+  1. Implement `SecretRef` (`Op`, `Gcloud`, `Keychain`) parser and `build_vault_pull_spec(&SecretRef)` using discrete argument arrays and rejecting option-like (`-`) or metacharacter segments. The keychain grammar is `keychain:<account>@<service>`, split at the first `@`, with `account` a safe identifier and `service` `/`-separated segments of `[A-Za-z0-9._-]` without a leading `-`; the canonical service form everywhere is `com.cheapotto.env/<project>/<profile>[/<subpath>]`, and for `env set --keychain` the account is the variable name.
+  2. Implement `build_mac_digest_probe_spec` (streaming `NONCE=<hex>` via `CommandSpec::with_stdin` over `ssh -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -p <port> -- <user>@<host> ~/.cargo/bin/cheap-otto env mac-digest --project <p> --profile <prof> [--subpath <s>]` with validated identifiers and no `sh -s`), `build_remote_set_tty_spec` (`ssh -t`), `build_remote_pull_spec`, and `render_security_stdin_upsert` (`/usr/bin/security -i` stdin command with zero `-w` argv) which fails closed with an `EnvError` variant on a secret containing NUL, CR, LF, a double quote or a backslash (those values use the `0600` file store) and on `service` or `account` outside the safe charset.
+  3. Implement single-pass longest-first `redact_secret_values` (covering raw, URL-encoded and JSON-escaped variants of every non-empty loaded value, with no length, boolean or integer exemption) and `find_forbidden_worktree_env_paths` flagging `.env` and `.env.*` at any depth except `.env.example`.
 - **Tests** in `src/env_secrets.rs`:
   - `parses_vault_references_and_rejects_flag_or_shell_injection`
-  - `digest_probe_streams_nonce_over_stdin_and_keeps_argv_secret_free`
+  - `keychain_refs_round_trip_account_at_service_and_reject_missing_at_second_at_and_leading_dash`
+  - `digest_probe_streams_nonce_over_stdin_and_keeps_argv_secret_free` (asserts the remote command is `env mac-digest` and the argv contains no `sh -s`)
   - `keychain_upsert_uses_security_stdin_and_never_passes_secret_in_argv`
-  - `redacts_longest_secrets_first_including_encoded_forms_without_mangling_ports`
-  - `worktree_hygiene_blocks_dotenv_variants_while_allowing_dotenv_example`
+  - `keychain_upsert_rejects_nul_cr_lf_double_quote_and_backslash_secrets_and_unsafe_service_or_account` (one case per rejected character)
+  - `redacts_every_nonempty_value_longest_first_including_short_and_encoded_forms`
+  - `worktree_hygiene_blocks_dotenv_variants_including_ignored_entries_while_allowing_dotenv_example` (covers a `!! .env` ignored entry)
 - **Acceptance:** `cargo test -p cheap-otto --lib env_secrets::tests` passes.
 
 ## Phase 2: store, broker & bridge CLI (`src/main.rs`, `src/bridge.rs`)
@@ -79,11 +82,12 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Depends on:** T1.3
 - **Files:** `src/main.rs`
 - **Steps:**
-  1. Implement `0700` directory creation, exclusive `env.lock` acquisition, and `OpenOptionsExt::mode(0o600)` temp-file write + `sync_all()` + atomic rename (unlinking temp file on failure) for `~/.cheap-otto/env/` and `.cheap-otto/env-status.json`.
-  2. Wire `cheap-otto env mac-digest` (reads `NONCE=<hex>` from `stdin`, prints `KEY=... DIGEST=... SOURCE=...`), `env set-local` (hidden `/dev/tty` read with echo-restore guard, or `security -i` + `keychain.json` on macOS), `env pull --local [--execute]` / `env pull-local`, and `env run --project <p> [--profile <prof>] [--subpath <s>] -- <program> [args...]` (injects validated env via `Command::envs` and streams stdout/stderr through `redact_secret_values`).
+  1. Implement the stores in one step. Workstation status path: resolve the state dir via `--state-dir`, `./.cheap-otto`, repo-root `.cheap-otto`, then `~/.cheap-otto`, take `env.lock` in the resolved dir, and write `env-status.json` through a PID-named temp with `sync_all()`, atomic rename and cleanup on failure; Windows semantics are separate (no Unix mode, inherited per-user ACL, `std::fs::rename` replaces the target). Mac secret store: create `0700` directories, use `~/.cheap-otto/env/env.lock`, and write through a PID-named temp opened with `OpenOptionsExt::mode(0o600)` under `cfg(unix)`, then `sync_all()`, atomic rename and cleanup on failure.
+  2. Wire `cheap-otto env mac-digest` (reads `NONCE=<hex>` from `stdin`, prints `KEY=... DIGEST=... SOURCE=...`), `env set-local` (hidden `/dev/tty` read with echo-restore guard, or `security -i` + `keychain.json` on macOS), `env pull --local [--execute]` / `env pull-local`, and operator-only `env run --project <p> [--profile <prof>] [--subpath <s>] -- <program> [args...]` (rejects non-operator invocations before resolving secrets by comparing the effective UID from `/usr/bin/id -u` with discrete args to the `MetadataExt::uid` of `~/.cheap-otto/env`, via a pure decision function taking both UIDs as inputs because `forbid(unsafe_code)` rules out `libc::getuid`; then injects validated env via `Command::envs` and streams stdout/stderr through `redact_secret_values`).
 - **Tests** in `tests/cli_integration.rs` and `src/main.rs`:
   - `env_store_writes_mode_0600_atomically_and_mac_digest_emits_no_values`
   - `env_run_injects_scoped_vars_without_argv_leak_and_redacts_output`
+  - `env_run_rejects_non_operator_uid_before_reading_the_store`
 - **Acceptance:** `cargo test -p cheap-otto --test cli_integration env_` passes.
 
 ### T2.2 Workstation bridge CLI (`schema`, `diff`, `status`, `set --remote`, `pull --remote`, `exec --with-env`)
@@ -91,14 +95,17 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - [ ] Open
 - **Covers:** R2.2, R2.4, R2.5, R3.1, R3.4, R4.1, R4.4, R5.1
 - **Depends on:** T2.1
-- **Files:** `src/main.rs`, `src/bridge.rs`, `src/worktree.rs`
+- **Files:** `src/main.rs`, `src/bridge.rs`, `src/worktree.rs`, `src/agent_session.rs`, `src/schedule.rs`, `src/server.rs`
 - **Steps:**
   1. Wire `cheap-otto env schema`, `env diff`, `env status`, `env set --remote`, and `env pull --remote`, ensuring dry runs (no `--execute`) perform zero network, subprocess or state-file writes and print zero secret values.
   2. Add optional `--with-env [=<profile>]` and `--subpath <s>` to `cheap-otto exec` (wrapping the remote command in `~/.cargo/bin/cheap-otto env run`), keeping `delegate` and `ask` strictly free of `--with-env`.
-  3. Add pre-commit worktree `.env*` check (`git status --porcelain -uall` so untracked subdirectories are expanded) in delegated/follow-up commit snippets using `find_forbidden_worktree_env_paths` rules.
+  3. Add the pre-commit worktree `.env*` check (`git status --porcelain -uall --ignored=matching`, or a complete filesystem scan, inspecting untracked, modified and ignored paths) using `find_forbidden_worktree_env_paths` rules at every commit gate: the delegated commit snippet in `src/worktree.rs`, the follow-up commit snippet in `src/agent_session.rs`, the scheduled agent commit path in `src/schedule.rs`, and the server-side delegate/follow-up handlers in `src/server.rs` (wired through `src/main.rs` and `src/bridge.rs`). If T2.2 exceeds the 600-code-line budget it MUST be split per `specs/README.md`, updating the PR plan table, README counts and status line, and each `Depends on:` in the same commit.
 - **Tests** in `tests/cli_integration.rs`:
   - `env_dry_runs_open_no_socket_write_no_files_and_print_no_secret_values`
   - `exec_with_env_wraps_remote_broker_while_delegate_rejects_with_env`
+  - `delegated_commit_gate_blocks_dotenv_including_ignored_entries`
+  - `scheduled_commit_gate_blocks_dotenv_including_ignored_entries`
+  - `follow_up_commit_gate_blocks_dotenv_including_ignored_entries`
 - **Acceptance:** `cargo test -p cheap-otto --test cli_integration` passes.
 
 ## Phase 3: Mission Control visibility (`src/server.rs`, `src/ui_assets.rs`)
@@ -141,6 +148,7 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Steps and expected results:**
   1. Deploy with `cargo run -p code-reviewer -- m1 sync`.
   2. Run `cheap-otto env set DEMO_SECRET --remote --execute`, enter a 16-char test token at the hidden Mac TTY prompt, and verify `stat -f '%Lp' ~/.cheap-otto/env/<project>/dev/tree/.env` on the Mac prints `600`.
+  2a. Run `cheap-otto env set DEMO_KC --remote --keychain --execute` with a token and confirm the `security -i` stdin grammar on the Mac: the item is stored under service `com.cheapotto.env/<project>/dev` with account `DEMO_KC`, and a secret containing a double quote or backslash is rejected by `render_security_stdin_upsert` before any command is emitted (use the `0600` file store for it instead).
   3. Run `cheap-otto env diff --execute` from Windows; verify `DEMO_SECRET` reports `MissingOnWindows` (or `Synced` once set locally) and `.cheap-otto/env-status.json` contains neither the test token nor any hex digest.
   4. Run `cheap-otto exec --with-env --cmd 'printf "%s\n" "$DEMO_SECRET"' --execute` and verify the printed line is `[REDACTED:DEMO_SECRET]`.
 
