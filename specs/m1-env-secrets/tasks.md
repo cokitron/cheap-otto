@@ -10,7 +10,7 @@ Read `../README.md`, `requirements.md` and `design.md` before starting any task.
 | 2 | T1.2 pure-Rust HMAC-SHA256 & drift classifier | `feat/m1-env-secrets-t1-2-hmac-and-diff` | PR 1 |
 | 3 | T1.3 vault refs, SSH/Keychain planners, output redactor & worktree guard | `feat/m1-env-secrets-t1-3-vault-and-plans` | PRs 1, 2 |
 | 4 | T2.1 local store, `mac-digest`, `set-local`, `pull --local` & `env run` | `feat/m1-env-secrets-t2-1-local-store-and-run` | PR 3 |
-| 5 | T2.2 workstation bridge CLI (`schema`, `diff`, `status`, `set --remote`, `exec --with-env`) | `feat/m1-env-secrets-t2-2-bridge-cli` | PR 4 |
+| 5 | T2.2 workstation bridge CLI (`schema`, `diff`, `status`, `set --remote`, `exec --with-env`, `schedule --ci --with-env`) | `feat/m1-env-secrets-t2-2-bridge-cli` | PR 4 |
 | 6 | T3.1 Mission Control `GET /api/env` & UI readiness card | `feat/m1-env-secrets-t3-1-hub` | PR 3 |
 | 7 | T4.1 user, security & agent documentation | `docs/m1-env-secrets-t4-1-docs` | PRs 5, 6 |
 
@@ -90,7 +90,7 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
   - `env_run_rejects_non_operator_uid_before_reading_the_store`
 - **Acceptance:** `cargo test -p cheap-otto --test cli_integration env_` passes.
 
-### T2.2 Workstation bridge CLI (`schema`, `diff`, `status`, `set --remote`, `pull --remote`, `exec --with-env`)
+### T2.2 Workstation bridge CLI (`schema`, `diff`, `status`, `set --remote`, `pull --remote`, `exec --with-env`, `schedule --ci --with-env`)
 
 - [ ] Open
 - **Covers:** R2.2, R2.4, R2.5, R3.1, R3.4, R4.1, R4.4, R5.1
@@ -98,11 +98,12 @@ After PR 7, the owner runs **LIVE** tasks T5.1 and T5.2 against the paired MacBo
 - **Files:** `src/main.rs`, `src/bridge.rs`, `src/worktree.rs`, `src/agent_session.rs`, `src/schedule.rs`, `src/server.rs`
 - **Steps:**
   1. Wire `cheap-otto env schema`, `env diff`, `env status`, `env set --remote`, and `env pull --remote`, ensuring dry runs (no `--execute`) perform zero network, subprocess or state-file writes and print zero secret values.
-  2. Add optional `--with-env [=<profile>]` and `--subpath <s>` to `cheap-otto exec` (wrapping the remote command in `~/.cargo/bin/cheap-otto env run`), keeping `delegate` and `ask` strictly free of `--with-env`.
+  2. Add optional `--with-env [=<profile>]` and `--subpath <s>` to `cheap-otto exec` and scheduled `--ci` workloads (wrapping both remote commands in `~/.cargo/bin/cheap-otto env run`, so secret values never appear in argv), keeping `delegate` and `ask` strictly free of `--with-env`; add integration coverage for the scheduled form.
   3. Add the pre-commit worktree `.env*` check (`git status --porcelain -uall --ignored=matching`, or a complete filesystem scan, inspecting untracked, modified and ignored paths) using `find_forbidden_worktree_env_paths` rules at every commit gate: the delegated commit snippet in `src/worktree.rs`, the follow-up commit snippet in `src/agent_session.rs`, the scheduled agent commit path in `src/schedule.rs`, and the server-side delegate/follow-up handlers in `src/server.rs` (wired through `src/main.rs` and `src/bridge.rs`). If T2.2 exceeds the 600-code-line budget it MUST be split per `specs/README.md`, updating the PR plan table, README counts and status line, and each `Depends on:` in the same commit.
 - **Tests** in `tests/cli_integration.rs`:
   - `env_dry_runs_open_no_socket_write_no_files_and_print_no_secret_values`
   - `exec_with_env_wraps_remote_broker_while_delegate_rejects_with_env`
+  - `scheduled_ci_with_env_wraps_env_run_without_secret_values_in_argv`
   - `delegated_commit_gate_blocks_dotenv_including_ignored_entries`
   - `scheduled_commit_gate_blocks_dotenv_including_ignored_entries`
   - `follow_up_commit_gate_blocks_dotenv_including_ignored_entries`

@@ -4,7 +4,7 @@
 use crate::bridge::validate_safe_identifier;
 use crate::command::normalize_script_lf;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// Default `.env` profile name when `--profile` is omitted (`"dev"`).
@@ -302,6 +302,7 @@ struct InnerParseOutput {
     entries: BTreeMap<String, String>,
     ordered_keys: Vec<String>,
     duplicate_keys: Vec<String>,
+    duplicate_seen: BTreeSet<String>,
     agent_dummies: BTreeMap<String, String>,
 }
 
@@ -351,17 +352,19 @@ fn parse_dotenv_inner(raw: &str, parse_dummies: bool) -> Result<InnerParseOutput
             ));
         };
         let key = validate_env_key(head_line[..eq_idx].trim_matches([' ', '\t']))?.to_string();
-        let after_eq = after_export[eq_idx + 1..].trim_start_matches([' ', '\t']);
-        let (value, next_rest, next_line) = parse_dotenv_value(after_eq, line_no)?;
+        let raw_after_eq = &after_export[eq_idx + 1..];
+        let after_eq = raw_after_eq.trim_start_matches([' ', '\t']);
+        // The whitespace after `=` is the delimiter that makes a following `#` an inline comment.
+        let leading_ws = after_eq.len() < raw_after_eq.len();
+        let (value, next_rest, next_line) = parse_dotenv_value(after_eq, leading_ws, line_no)?;
 
         if let Some((_, dummy_lit)) = pending_dummy.take() {
             validate_agent_dummy_literal(&key, &dummy_lit)?;
             out.agent_dummies.insert(key.clone(), dummy_lit);
         }
-        if !out.ordered_keys.contains(&key) {
-            out.ordered_keys.push(key.clone());
-        }
-        if out.entries.insert(key.clone(), value).is_some() && !out.duplicate_keys.contains(&key) {
+        if out.entries.insert(key.clone(), value).is_none() {
+            out.ordered_keys.push(key);
+        } else if out.duplicate_seen.insert(key.clone()) {
             out.duplicate_keys.push(key);
         }
         rest = next_rest;
@@ -377,7 +380,11 @@ fn parse_dotenv_inner(raw: &str, parse_dummies: bool) -> Result<InnerParseOutput
     Ok(out)
 }
 
-fn parse_dotenv_value(input: &str, start_line: usize) -> Result<(String, &str, usize), EnvError> {
+fn parse_dotenv_value(
+    input: &str,
+    leading_ws: bool,
+    start_line: usize,
+) -> Result<(String, &str, usize), EnvError> {
     if let Some(after_sq) = input.strip_prefix('\'') {
         let mut line = start_line;
         for (idx, ch) in after_sq.char_indices() {
@@ -430,7 +437,7 @@ fn parse_dotenv_value(input: &str, start_line: usize) -> Result<(String, &str, u
     }
 
     let (raw_line, after_line) = split_at_newline(input);
-    let stripped = strip_unquoted_comment(raw_line).trim_end_matches([' ', '\t']);
+    let stripped = strip_unquoted_comment(raw_line, leading_ws).trim_end_matches([' ', '\t']);
     let mut line = start_line;
     let next_rest = advance_newline(after_line, &mut line);
     Ok((stripped.to_string(), next_rest, line))
@@ -459,8 +466,8 @@ fn split_at_newline(s: &str) -> (&str, &str) {
     s.find('\n').map_or((s, ""), |idx| (&s[..idx], &s[idx..]))
 }
 
-fn strip_unquoted_comment(line: &str) -> &str {
-    let mut prev_ws = false;
+fn strip_unquoted_comment(line: &str, leading_ws: bool) -> &str {
+    let mut prev_ws = leading_ws;
     for (idx, ch) in line.char_indices() {
         if ch == '#' && prev_ws {
             return &line[..idx];
@@ -596,6 +603,34 @@ mod tests {
         for k in "|9STARTS_DIGIT|BAD-KEY|A=B|SPACE KEY".split('|') {
             assert!(matches!(validate_env_key(k), Err(EnvError::InvalidKey(_))));
         }
+    }
+
+    #[test]
+    fn treats_hash_after_whitespace_following_equals_as_inline_comment() -> Result<(), EnvError> {
+        let parsed = parse_dotenv("A= # comment\nB=\t#tab comment\nC= v # trailing\n")?;
+        for (k, expected) in [("A", ""), ("B", ""), ("C", "v")] {
+            assert_eq!(parsed.entries.get(k).map(String::as_str), Some(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_hash_directly_after_equals_as_value() -> Result<(), EnvError> {
+        let parsed = parse_dotenv("A=#F7D842\nB=#x # comment\n")?;
+        assert_eq!(parsed.entries.get("A").map(String::as_str), Some("#F7D842"));
+        assert_eq!(parsed.entries.get("B").map(String::as_str), Some("#x"));
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_first_seen_order_and_reports_each_duplicate_key_once() -> Result<(), EnvError> {
+        let raw = "B=1\nA=2\nB=3\nC=4\nB=5\nA=6\n";
+        assert_eq!(parse_env_example(raw)?.keys, vec!["B", "A", "C"]);
+        let parsed = parse_dotenv(raw)?;
+        assert_eq!(parsed.duplicate_keys, vec!["B", "A"]);
+        assert_eq!(parsed.entries.get("B").map(String::as_str), Some("5"));
+        assert_eq!(parsed.entries.get("A").map(String::as_str), Some("6"));
+        Ok(())
     }
 
     #[test]
