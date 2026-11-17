@@ -44,13 +44,15 @@ After PR 7, the owner runs **LIVE** tasks T4.1 and T4.2 against the paired MacBo
 - **Depends on:** T1.1
 - **Files:** `src/chat.rs`
 - **Steps:**
-  1. Add `ChatThreadBinding` (`thread_id`, `gh_account`, `repo_name`, `branch_name`, `worktree_dir`, `claude_session_id`, `agy_conversation_id`, `last_active_runner`, `latest_turns`) and `ChatThreadRegistry` (with the bounded dedup record and queue sequence counters), plus the pure `allocate_thread_slug` that appends a unique thread-derived suffix and rejects collisions.
+  1. Add `ChatThreadBinding` (`thread_id`, `gh_account`, `repo_name`, `branch_name`, `worktree_dir`, `status: ChatBindingStatus { Pending, Ready }`, `claude_session_id`, `agy_conversation_id`, `last_active_runner`, `latest_turns`) and `ChatThreadRegistry` (with the bounded dedup record and queue sequence counters), plus the pure `allocate_thread_slug` that appends a unique thread-derived suffix and rejects collisions.
   2. Build `HarnessRunConfig` turns (`src/harness.rs`) for `ClaudeCode` (`--session-id` on turn 1, `--resume` thereafter) and `Antigravity` (`--conversation` when known), with explicit list of stripped env var names (`DISCORD_CLAUDE_TOKEN`, `DISCORD_AGY_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`).
   3. Implement `chunk_discord_message(&str, usize)` preserving balanced ` ``` ` code blocks across `<= 1900`-char chunks.
 - **Tests** in `src/chat.rs`:
   - `preserves_separate_claude_and_agy_sessions_on_shared_worktree`
   - `chunks_long_markdown_and_reopens_fenced_code_blocks`
   - `allocates_unique_slug_per_thread_and_rejects_collisions`
+  - `pending_binding_is_not_runnable_and_rolls_back_cleanly`
+  - `child_env_strips_discord_and_github_tokens_and_keeps_unrelated_vars`
 - **Acceptance:** `cargo test -p cheap-otto --lib chat::tests` passes.
 
 ### T1.3 Multi-account `~/repos/<gh-account>` script & reserved `chat` LaunchAgent
@@ -97,12 +99,16 @@ After PR 7, the owner runs **LIVE** tasks T4.1 and T4.2 against the paired MacBo
 - **Covers:** R1.4, R2.2, R2.7, R3.2, R3.4, R4.1, R4.3, R5.2
 - **Depends on:** T2.1
 - **Files:** `src/main.rs`, `tests/cli_integration.rs`
-- **Steps:** Implement synchronous `chat dispatch` on the Mac: validate event via `route_inbound_message`, re-validate the author fail-closed, then under the registry lock (design.md section 3) check the dedup record, allocate the unique slug, take a per-worktree queue ticket and persist via atomic temp-file rename; wait for the lowest ticket on that worktree and for a free `max_parallel_chat_turns` slot; provision `otto-repo worktree` on new threads; strip secret env vars and run `claude` or `agy` under the separate agent user, brokering `git push`/`gh` in the dispatch process; record `latest_turns`; and emit chunked JSON reply frames. Timestamps and lock/slot files live here, not in `src/chat.rs`.
+- **Steps:** Implement synchronous `chat dispatch` on the Mac: validate event via `route_inbound_message`, re-validate the author fail-closed, then under the registry lock (design.md section 3) check the dedup record, allocate the unique slug, take a per-worktree queue ticket and persist the binding as `Pending` via atomic temp-file rename; wait for the lowest ticket on that worktree and for a free `max_parallel_chat_turns` slot; provision `otto-repo worktree` on new threads, then mark the binding `Ready` (on failure roll back the pending binding and any partial branch or worktree); strip secret env vars and run `claude` or `agy` under the separate agent user, validating the canonical remote and brokering `git push`/`gh` in the dispatch process with operator-controlled Git config and hooks; record `latest_turns`; and emit chunked JSON reply frames. Timestamps and lock/slot files live here, not in `src/chat.rs`.
 - **Tests:**
   - `chat_dispatch_rejects_unallowlisted_user_and_executes_builtin_status`
   - `chat_dispatch_serializes_same_worktree_turns_in_ticket_order`
   - `chat_dispatch_concurrent_threads_get_unique_branches_and_keep_all_bindings`
   - `chat_dispatch_never_exceeds_max_parallel_chat_turns`
+  - `chat_dispatch_rolls_back_pending_binding_when_worktree_provisioning_fails` (stub `otto-repo` exiting non-zero, temp state dir)
+  - `chat_dispatch_agent_child_env_has_no_tokens` (temp dirs, stub agent binary, no Mac, no network)
+  - `chat_dispatch_broker_rejects_noncanonical_remote_before_push` (temp dirs, stub agent binary, no Mac, no network)
+- **Note:** the separate-user boundary needs a real macOS user and is verified only by LIVE T4.1.
 - **Acceptance:** `cargo test --test cli_integration chat_dispatch` passes.
 
 ## Phase 3: Mission Control visibility & docs
@@ -123,7 +129,7 @@ After PR 7, the owner runs **LIVE** tasks T4.1 and T4.2 against the paired MacBo
 
 - [ ] Open (**LIVE** — owner approval required)
 - **Covers:** R1.2, R2.1, R2.3, R2.4, R3.3, R4.1
-- **Acceptance:** From the Discord mobile/desktop app, posting `@Claude` in a mapped repo channel opens a thread + `~/repos/<acct>/.worktrees/<repo>--<slug>` worktree and replies with the turn summary; posting `@Agy` in that same thread continues work on the exact same branch/worktree under `@Agy`'s identity; a second simultaneous thread in another channel runs in parallel with zero Git credential collisions, and an agent turn that tries to read `~/.cheap-otto/tokens/` or `<accounts.tokens_dir>` is denied by the separate agent user.
+- **Acceptance:** From the Discord mobile/desktop app, posting `@Claude` in a mapped repo channel opens a thread + `~/repos/<acct>/.worktrees/<repo>--<slug>` worktree and replies with the turn summary; posting `@Agy` in that same thread continues work on the exact same branch/worktree under `@Agy`'s identity; a second simultaneous thread in another channel runs in parallel with zero Git credential collisions, and an agent turn that tries to read `~/.cheap-otto/tokens/` or `<accounts.tokens_dir>` is denied by the separate agent user, as is an agent turn that tries to write `.git` or hooks.
 
 ### T4.2 LIVE: Unauthorized-user rejection & `launchd` crash recovery
 
