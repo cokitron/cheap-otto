@@ -421,6 +421,13 @@ pub struct TunnelRecord {
     pub ssh_port: u16,
     /// When the tunnel was started, in seconds since the Unix epoch.
     pub started_epoch_secs: u64,
+    /// OS process start-time stamp (`Win32_Process.CreationDate` in UTC ISO-8601 on Windows,
+    /// `ps -o lstart=` run under `TZ=UTC` on Unix, so DST or timezone changes cannot alter it)
+    /// captured at spawn time to narrow PID-reuse races before signalling. macOS `lstart` has
+    /// one-second resolution, so this is a second check on top of the exact argv match; a stronger
+    /// token is tracked in a follow-up issue. Older `tunnel.json` files omit this field and fall back to command-line verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_started_at: Option<String>,
 }
 
 /// What to do about the tunnel, given which dashboard ports answer on the workstation.
@@ -551,6 +558,34 @@ pub fn command_line_is_recorded_tunnel(command_line: &str, record: &TunnelRecord
         .collect();
     let expected = tunnel_args(&record.destination, record.ssh_port, &record.ports);
     is_ssh && !record.ports.is_empty() && args == expected
+}
+
+/// Verifies both the live command line and, when present on `record`, the OS process start-time
+/// stamp (`Win32_Process.CreationDate` or `ps -o lstart=` captured under `TZ=UTC`).
+///
+/// The Unix stamp has one-second resolution, so it is a second check on top of the exact argv
+/// match rather than a unique identity; a stronger token is tracked in a follow-up issue.
+///
+/// Records written by older builds carry `process_started_at: None` and fall back to
+/// [`command_line_is_recorded_tunnel`]. When `record.process_started_at` is `Some`, `live_started_at`
+/// must match after trimming surrounding whitespace; a missing, empty or differing start time is
+/// treated as a recycled PID so nothing is signalled. [R3.5]
+#[must_use = "the result decides whether a recorded pid may be signalled"]
+pub fn process_matches_recorded_tunnel(
+    command_line: &str,
+    live_started_at: Option<&str>,
+    record: &TunnelRecord,
+) -> bool {
+    if !command_line_is_recorded_tunnel(command_line, record) {
+        return false;
+    }
+    match &record.process_started_at {
+        None => true,
+        Some(recorded) => {
+            let recorded = recorded.trim();
+            !recorded.is_empty() && live_started_at.map(str::trim) == Some(recorded)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1495,6 +1530,7 @@ mod tests {
             destination: peer.ssh_destination(),
             ssh_port: peer.ssh_port,
             started_epoch_secs: 1_700_000_000,
+            process_started_at: Some("2026-11-16T21:00:00.0000000Z".to_string()),
         }
     }
 
@@ -1787,6 +1823,7 @@ mod tests {
             destination: "admin@192.0.2.10".to_string(),
             ssh_port: 2222,
             started_epoch_secs: 1_700_000_000,
+            process_started_at: Some("Mon Nov 16 15:00:00 2026".to_string()),
         };
         let json = serde_json::to_string_pretty(&record)?;
         assert!(json.contains("\"ssh_port\": 2222"), "{json}");
@@ -1794,8 +1831,104 @@ mod tests {
             json.contains("\"started_epoch_secs\": 1700000000"),
             "{json}"
         );
+        assert!(
+            json.contains("\"process_started_at\": \"Mon Nov 16 15:00:00 2026\""),
+            "{json}"
+        );
         let back: TunnelRecord = serde_json::from_str(&json)?;
         assert_eq!(back, record);
+
+        // Legacy records written before `process_started_at` existed still deserialize cleanly.
+        let legacy_json = r#"{
+  "pid": 4242,
+  "ports": [7420, 7421, 7430],
+  "destination": "admin@192.0.2.10",
+  "ssh_port": 2222,
+  "started_epoch_secs": 1700000000
+}"#;
+        let legacy: TunnelRecord = serde_json::from_str(legacy_json)?;
+        assert_eq!(legacy.process_started_at, None);
+        assert_eq!(legacy.pid, 4242);
+        Ok(())
+    }
+
+    #[test]
+    fn process_identity_checks_start_time_and_falls_back_for_legacy_records()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let cmdline = build_tunnel_spec(&peer, &set).display_command();
+        let record = covering_record(&peer);
+
+        // Exact command-line and start-time match (surrounding whitespace tolerated).
+        assert!(process_matches_recorded_tunnel(
+            &cmdline,
+            Some("  2026-11-16T21:00:00.0000000Z\n"),
+            &record
+        ));
+        // Recycled PID with an identical command line but different or unreadable start time fails.
+        assert!(!process_matches_recorded_tunnel(
+            &cmdline,
+            Some("2026-11-16T21:05:00.0000000Z"),
+            &record
+        ));
+        assert!(!process_matches_recorded_tunnel(&cmdline, None, &record));
+        assert!(!process_matches_recorded_tunnel(
+            "ssh admin@other-host",
+            record.process_started_at.as_deref(),
+            &record
+        ));
+
+        // Corrupt empty `Some("")` fails closed rather than acting like `None`.
+        let mut empty_stamp = record.clone();
+        empty_stamp.process_started_at = Some("   ".to_string());
+        assert!(!process_matches_recorded_tunnel(
+            &cmdline,
+            None,
+            &empty_stamp
+        ));
+        assert!(!process_matches_recorded_tunnel(
+            &cmdline,
+            Some(""),
+            &empty_stamp
+        ));
+
+        // Legacy `None` falls back to the command-line check.
+        let mut legacy = record;
+        legacy.process_started_at = None;
+        assert!(process_matches_recorded_tunnel(&cmdline, None, &legacy));
+        assert!(process_matches_recorded_tunnel(
+            &cmdline,
+            Some("Mon Nov 16 15:00:00 2026"),
+            &legacy
+        ));
+        assert!(!process_matches_recorded_tunnel(
+            "ssh admin@other-host",
+            Some("Mon Nov 16 15:00:00 2026"),
+            &legacy
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn utc_style_start_stamp_matches_and_a_different_stamp_is_rejected()
+    -> Result<(), crate::bridge::BridgeError> {
+        let peer = tunnel_peer()?;
+        let set = DashboardSet::standard();
+        let cmdline = build_tunnel_spec(&peer, &set).display_command();
+        let mut record = covering_record(&peer);
+        record.process_started_at = Some("Mon Nov 16 21:00:00 2026".to_string());
+
+        assert!(process_matches_recorded_tunnel(
+            &cmdline,
+            Some("Mon Nov 16 21:00:00 2026\n"),
+            &record
+        ));
+        assert!(!process_matches_recorded_tunnel(
+            &cmdline,
+            Some("Mon Nov 16 15:00:00 2026"),
+            &record
+        ));
         Ok(())
     }
 
